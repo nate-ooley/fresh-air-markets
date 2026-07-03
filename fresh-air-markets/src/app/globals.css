@@ -1,0 +1,52 @@
+@import "tailwindcss";
+
+@theme {
+  --color-cream: #faf6ee;
+  --color-parchment: #f3ecdd;
+  --color-pine: #1e4632;
+  --color-pine-deep: #14311f;
+  --color-leaf: #3a7d54;
+  --color-moss: #6b9c7d;
+  --color-amber: #d97a1a;
+  --color-amber-soft: #f2b04c;
+  --color-clay: #b4532a;
+  --color-ink: #241f18;
+
+  --font-display: var(--font-fraunces), Georgia, serif;
+  --font-body: var(--font-inter), system-ui, sans-serif;
+}
+
+body {
+  background: var(--color-cream);
+  color: var(--color-ink);
+  font-family: var(--font-body);
+}
+
+.font-display {
+  font-family: var(--font-display);
+}
+
+/* Booth drag affordance */
+.booth-draggable {
+  cursor: grab;
+}
+.booth-draggable:active {
+  cursor: grabbing;
+}
+
+@keyframes rise {
+  from { opacity: 0; transform: translateY(14px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.animate-rise {
+  animation: rise 0.5s ease-out both;
+}
+
+@keyframes pulse-ring {
+  0% { stroke-opacity: 0.9; stroke-width: 3; }
+  70% { stroke-opacity: 0; stroke-width: 12; }
+  100% { stroke-opacity: 0; stroke-width: 12; }
+}
+.selected-ring {
+  animation: pulse-ring 1.6s ease-out infinite;
+}
