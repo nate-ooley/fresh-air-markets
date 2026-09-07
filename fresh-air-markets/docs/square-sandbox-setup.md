@@ -39,6 +39,14 @@ signer require Vercel to provide `VERCEL=1` and `VERCEL_ENV=preview`; without
 that setting they intentionally refuse every QA mode rather than risk a
 Production-like deployment.
 
+The deployed checkout, webhook, and expiry routes use the same Preview/Sandbox
+gate. They require `VERCEL=1`, `VERCEL_ENV=preview`,
+`SQUARE_ENVIRONMENT=sandbox`, and the exact value
+`SQUARE_ALLOW_LIVE_PAYMENTS=false`. Do not create `VERCEL` or `VERCEL_ENV`
+yourself; Vercel supplies them to a Preview deployment after system variables
+are enabled. The read-only verifier below intentionally does not require these
+runtime markers, so it can run locally through `vercel env run`.
+
 Before testing checkout, confirm that this same Preview branch already has a
 QA-only `DATABASE_URL`, a private `AUTH_SECRET`, and a signed-in QA manager
 account for the same market. Those are existing portal prerequisites, not
@@ -48,7 +56,7 @@ Production authentication secret.
 | Variable | Value | Vercel handling |
 | --- | --- | --- |
 | `SQUARE_ENVIRONMENT` | `sandbox` | Preview branch only |
-| `SQUARE_ALLOW_LIVE_PAYMENTS` | `false` | Preview branch only |
+| `SQUARE_ALLOW_LIVE_PAYMENTS` | Exact lower-case `false` | Preview branch only; any other or missing value fails closed |
 | `SQUARE_ACCESS_TOKEN` | Square Sandbox Access Token | Mark sensitive; Preview branch only |
 | `SQUARE_LOCATION_ID` | Square Sandbox Location ID | Preview branch only |
 
@@ -115,7 +123,8 @@ Complete this section only after the migration order in
 [square-checkout-ledger.md](./square-checkout-ledger.md) has been applied to
 the QA database: the portal chain through `010`, then
 `011-square-payment-checkout-ledger.sql`, `012-square-webhook-events.sql`,
-and `013-final-reservation-writer.sql`. The Preview deployment must contain
+`013-final-reservation-writer.sql`, `014-square-payment-expiry.sql`, and
+`015-square-payment-expiry-retry-schedule.sql`. The Preview deployment must contain
 the durable final-reservation and webhook handlers, and the exact URL must be
 reachable over HTTPS.
 
@@ -132,11 +141,11 @@ recording, or chat.
 2. Build the destination from the stable QA branch alias:
    `https://farmers-market-git-codex-1670af-nateooley68-gmailcoms-projects.vercel.app/api/payments/square/webhook?x-vercel-protection-bypass=<Vercel-automation-secret>`.
    Confirm the alias still resolves to the current QA branch before using it.
-3. Set that exact full destination as `SQUARE_WEBHOOK_URL` in the same
-   Preview branch. The Square subscription must use the exact same string,
-   including the query value: Square signs the configured notification URL.
-   Do not register a placeholder, a changing deployment URL, or a URL without
-   the protection bypass.
+3. Set that exact full destination as the **sensitive** `SQUARE_WEBHOOK_URL`
+   value in the same Preview branch. The Square subscription must use the exact
+   same string, including the query value: Square signs the configured
+   notification URL. Do not register a placeholder, a changing deployment URL,
+   or a URL without the protection bypass.
 4. In Square Developer Console, keep **Sandbox** selected and open
    **Webhooks → Subscriptions → Add subscription**.
 5. Name it `Farmers Market QA payments`, choose the current Square API version,

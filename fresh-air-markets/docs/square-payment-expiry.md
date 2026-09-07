@@ -7,9 +7,13 @@ starts only after a usable hosted link was persisted, using Square's
 ## Deployment order
 
 1. Apply the portal migrations through `013-final-reservation-writer.sql`.
-2. Apply `014-square-payment-expiry.sql` to the same QA database.
+2. Apply `014-square-payment-expiry.sql`, then
+   `015-square-payment-expiry-retry-schedule.sql`, to the same QA database.
 3. Deploy the matching Preview revision with the existing private `DATABASE_URL`,
-   `CRON_SECRET`, Sandbox access token, and Sandbox location ID.
+   `CRON_SECRET`, Sandbox access token, Sandbox location ID, and exact
+   `SQUARE_ALLOW_LIVE_PAYMENTS=false`. Enable Vercel system variables so the
+   route receives `VERCEL=1` and `VERCEL_ENV=preview`; it refuses to claim a
+   hold without that Preview/Sandbox gate.
 4. Verify the Sandbox token/location first with `npm run square:verify-sandbox`.
 5. Configure a trusted scheduler to call the endpoint below. In QA, call it
    manually only against the QA Preview and a labeled QA reservation.
@@ -55,14 +59,16 @@ releases capacity. A `404` is not proof on its own: the worker retrieves the
 exact saved Square order and may recover only if its ID and location match and
 its state is explicitly `CANCELED`. Missing, malformed, mismatched, `OPEN`, or
 `COMPLETED` provider state becomes `manual_review`; a transport/429/5xx failure
-returns the item to `pending` for retry. In every unresolved case, the order
-remains `expiry_pending`, the reservation remains `payment_pending`, and
-capacity stays held.
+returns the item to `pending` with a durable exponential next-attempt time. It
+cannot be reclaimed by another loop iteration in the same scheduler invocation.
+In every unresolved case, the order remains `expiry_pending`, the reservation
+remains `payment_pending`, and capacity stays held.
 
-Migration `014` never invents cancellation proof for an earlier draft
-retirement. It quarantines any legacy `retired` row without that proof, and its
-associated order/reservation, into `manual_review` while keeping capacity held.
-An operator must reconcile the exact Square order before deciding any release.
+Migrations `014` and `015` never invent cancellation proof for an earlier draft
+retirement. Migration `015` also quarantines a proofless legacy `retired` row
+and any active linked order/reservation into `manual_review` while keeping
+capacity held. An operator must reconcile the exact Square order before deciding
+any release.
 
 No email, SMS, HighLevel update, refund, payment creation, or browser redirect
 is sent or trusted by this worker. A future notification integration must use a
@@ -83,8 +89,9 @@ pair, the event remains review evidence and never reclaims inventory.
 Record the QA case ID, Preview revision, UTC timestamps, aggregate endpoint
 result, redacted Square Dashboard confirmation of the matching cancelled order,
 and the payment/reservation/retirement states before and after deletion. For a
-retry, show `expiry_pending` + `payment_pending` + `pending` with capacity
-still held. Do not record credentials, full payment payloads, card values, or
-personal contact data. The local tests cover the timing boundary, concurrency,
-provider delete retry, identity fence, and completion race. A real Sandbox run
-remains required before L18 is green.
+retry, show `expiry_pending` + `payment_pending` + `pending` with a future
+`next_attempt_at` and capacity still held. Do not record credentials, full
+payment payloads, card values, or personal contact data. The local tests cover
+the timing boundary, concurrency, retry schedule, provider delete retry,
+identity fence, legacy upgrade quarantine, and completion race. A real Sandbox
+run remains required before L18 is green.

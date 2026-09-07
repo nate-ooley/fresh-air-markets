@@ -458,6 +458,24 @@ function validSchedulerLimit(value: number): boolean {
   return Number.isSafeInteger(value) && value >= 1 && value <= 100;
 }
 
+// A failed DELETE must not be reclaimed by the next loop iteration of the
+// same scheduler invocation. Keep the retry time durable so concurrent workers
+// and later invocations observe one shared, bounded exponential schedule.
+const RETIREMENT_RETRY_INITIAL_DELAY_MS = 15_000;
+const RETIREMENT_RETRY_MAX_DELAY_MS = 15 * 60_000;
+
+function retirementRetryAt(attemptedAt: Date, attemptCount: number): Date {
+  if (!Number.isSafeInteger(attemptCount) || attemptCount < 1) {
+    throw new Error("Stored payment-link retirement attempt is invalid.");
+  }
+  const exponent = Math.min(attemptCount - 1, 6);
+  const delay = Math.min(
+    RETIREMENT_RETRY_INITIAL_DELAY_MS * 2 ** exponent,
+    RETIREMENT_RETRY_MAX_DELAY_MS,
+  );
+  return new Date(attemptedAt.valueOf() + delay);
+}
+
 /**
  * Atomically claims usable hosted-checkout holds at their persisted deadline.
  *
@@ -493,9 +511,16 @@ export async function expireDueSquarePaymentHolds(input: {
       WHERE p.status = 'checkout_created'
         AND p.market_id = ${input.marketId}
         AND r.state = 'payment_pending'
-        AND p.payment_due_at IS NOT NULL
-        AND p.payment_due_at <= ${input.now}
-      ORDER BY p.payment_due_at ASC, p.id ASC
+        -- A missing or divergent persisted deadline is unsafe even when both
+        -- values would otherwise be in the future. Fence it immediately for
+        -- review instead of leaving a live link with an unknowable deadline.
+        AND (
+          p.payment_due_at IS NULL
+          OR r.payment_due_at IS NULL
+          OR p.payment_due_at IS DISTINCT FROM r.payment_due_at
+          OR p.payment_due_at <= ${input.now}
+        )
+      ORDER BY p.payment_due_at ASC NULLS FIRST, p.id ASC
       LIMIT ${input.limit}
       FOR UPDATE OF p, r SKIP LOCKED`;
     let expiryPending = 0;
@@ -548,12 +573,12 @@ export async function expireDueSquarePaymentHolds(input: {
         INSERT INTO fame_square_payment_link_retirements
           (payment_order_id, market_id, square_environment, square_merchant_id,
            square_location_id, square_payment_link_id, square_order_id,
-           status, created_at, updated_at)
+           status, next_attempt_at, created_at, updated_at)
         VALUES
           (${candidate.payment_order_id}, ${candidate.market_id}, ${candidate.square_environment},
            ${candidate.square_merchant_id}, ${candidate.square_location_id},
            ${candidate.square_payment_link_id}, ${candidate.square_order_id},
-           'pending', ${input.now}, ${input.now})
+           'pending', ${input.now}, ${input.now}, ${input.now})
         ON CONFLICT (payment_order_id) DO NOTHING`;
       expiryPending++;
     }
@@ -603,7 +628,10 @@ export async function claimSquarePaymentLinkRetirement(input: {
       JOIN fame_reservations r ON r.id = p.reservation_id AND r.market_id = p.market_id
       WHERE q.status IN ('pending', 'processing')
         AND p.market_id = ${input.marketId}
-        AND (q.status = 'pending' OR q.locked_until <= ${input.now})
+        AND (
+          (q.status = 'pending' AND q.next_attempt_at <= ${input.now})
+          OR (q.status = 'processing' AND q.locked_until <= ${input.now})
+        )
         AND p.status = 'expiry_pending'
         AND r.state = 'payment_pending'
       ORDER BY q.created_at ASC, q.payment_order_id ASC
@@ -629,10 +657,14 @@ export async function claimSquarePaymentLinkRetirement(input: {
       const [retirement] = await tx`
         UPDATE fame_square_payment_link_retirements
         SET status = 'manual_review', locked_until = NULL, lease_token = NULL,
+            next_attempt_at = NULL,
             last_error_code = ${reason}, updated_at = ${input.now}
         WHERE payment_order_id = ${row.payment_order_id}
           AND status IN ('pending', 'processing')
-          AND (status = 'pending' OR locked_until <= ${input.now})
+          AND (
+            (status = 'pending' AND next_attempt_at <= ${input.now})
+            OR (status = 'processing' AND locked_until <= ${input.now})
+          )
         RETURNING payment_order_id`;
       if (!retirement) return { kind: "in_progress", paymentOrderId: row.payment_order_id };
       const [order] = await tx`
@@ -658,11 +690,15 @@ export async function claimSquarePaymentLinkRetirement(input: {
           attempt_count = attempt_count + 1,
           locked_until = ${new Date(input.now.valueOf() + input.leaseSeconds * 1000)},
           lease_token = ${leaseToken},
+          next_attempt_at = NULL,
           last_error_code = NULL,
           updated_at = ${input.now}
       WHERE payment_order_id = ${row.payment_order_id}
         AND status IN ('pending', 'processing')
-        AND (status = 'pending' OR locked_until <= ${input.now})
+        AND (
+          (status = 'pending' AND next_attempt_at <= ${input.now})
+          OR (status = 'processing' AND locked_until <= ${input.now})
+        )
       RETURNING payment_order_id, market_id, square_environment,
                 square_merchant_id, square_location_id, square_payment_link_id, square_order_id,
                 status, attempt_count, locked_until, lease_token`;
@@ -729,6 +765,7 @@ export async function completeSquarePaymentLinkRetirement(input: {
       await tx`
         UPDATE fame_square_payment_link_retirements
         SET status = 'manual_review', locked_until = NULL, lease_token = NULL,
+            next_attempt_at = NULL,
             last_error_code = 'square_retirement_parent_mapping_mismatch',
             updated_at = ${input.retiredAt}
         WHERE payment_order_id = ${input.paymentOrderId}
@@ -750,6 +787,7 @@ export async function completeSquarePaymentLinkRetirement(input: {
       await tx`
         UPDATE fame_square_payment_link_retirements
         SET status = 'manual_review', locked_until = NULL, lease_token = NULL,
+            next_attempt_at = NULL,
             last_error_code = 'square_retirement_cancelled_order_mismatch',
             updated_at = ${input.retiredAt}
         WHERE payment_order_id = ${input.paymentOrderId}
@@ -760,6 +798,7 @@ export async function completeSquarePaymentLinkRetirement(input: {
       await tx`
         UPDATE fame_square_payment_link_retirements
         SET status = 'manual_review', locked_until = NULL, lease_token = NULL,
+            next_attempt_at = NULL,
             last_error_code = 'payment_state_changed_before_retirement',
             updated_at = ${input.retiredAt}
         WHERE payment_order_id = ${input.paymentOrderId}
@@ -770,6 +809,7 @@ export async function completeSquarePaymentLinkRetirement(input: {
       await tx`
         UPDATE fame_square_payment_link_retirements
         SET status = 'manual_review', locked_until = NULL, lease_token = NULL,
+            next_attempt_at = NULL,
             last_error_code = 'reservation_state_changed_before_retirement',
             updated_at = ${input.retiredAt}
         WHERE payment_order_id = ${input.paymentOrderId}
@@ -804,6 +844,7 @@ export async function completeSquarePaymentLinkRetirement(input: {
       SET status = 'retired',
           locked_until = NULL,
           lease_token = NULL,
+          next_attempt_at = NULL,
           last_error_code = NULL,
           retired_square_order_id = ${input.cancelledOrderId},
           retired_at = ${input.retiredAt},
@@ -829,16 +870,29 @@ export async function failSquarePaymentLinkRetirement(input: {
     throw new Error("Square payment-link retirement failure input is invalid.");
   }
   const safeCode = input.code.replace(/[^A-Za-z0-9_.:-]/g, "_").slice(0, 96) || "square_link_retirement_error";
-  await sql`
-    UPDATE fame_square_payment_link_retirements
-    SET status = ${input.retryable ? "pending" : "manual_review"},
-        locked_until = NULL,
-        lease_token = NULL,
-        last_error_code = ${safeCode},
-        updated_at = ${input.attemptedAt}
-    WHERE payment_order_id = ${input.paymentOrderId}
-      AND status = 'processing'
-      AND lease_token = ${input.leaseToken}`;
+  await sql.begin(async tx => {
+    const [retirement] = await tx<{ attempt_count: number | string }[]>`
+      SELECT attempt_count
+      FROM fame_square_payment_link_retirements
+      WHERE payment_order_id = ${input.paymentOrderId}
+        AND status = 'processing'
+        AND lease_token = ${input.leaseToken}
+      FOR UPDATE`;
+    if (!retirement) return;
+    const attemptCount = Number(retirement.attempt_count);
+    const nextAttemptAt = input.retryable ? retirementRetryAt(input.attemptedAt, attemptCount) : null;
+    await tx`
+      UPDATE fame_square_payment_link_retirements
+      SET status = ${input.retryable ? "pending" : "manual_review"},
+          locked_until = NULL,
+          lease_token = NULL,
+          next_attempt_at = ${nextAttemptAt},
+          last_error_code = ${safeCode},
+          updated_at = ${input.attemptedAt}
+      WHERE payment_order_id = ${input.paymentOrderId}
+        AND status = 'processing'
+        AND lease_token = ${input.leaseToken}`;
+  });
 }
 
 /**

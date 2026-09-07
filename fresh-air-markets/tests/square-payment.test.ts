@@ -187,6 +187,23 @@ test("permanent provider failure requires review and never invents a checkout li
   });
 });
 
+test("an invalid provider checkout timestamp is permanently quarantined instead of retried", async () => {
+  let failure: unknown;
+  const result = await dispatchSquareSandboxCheckout({
+    marketId: "market-1", reservationId: "reservation-1", square, now,
+    store: store({ failCheckout: async value => { failure = value; } }),
+    transport: (async () => Response.json({ payment_link: {
+      id: "link-1", order_id: "square-order-1", url: "https://square.link/checkout",
+      created_at: "2026-02-30T12:00:00Z",
+    } })) as typeof fetch,
+  });
+  assert.deepEqual(result, { kind: "failed", paymentOrderId: "payment-order" });
+  assert.deepEqual(failure, {
+    paymentOrderId: "payment-order", leaseToken: "lease-1",
+    code: "square_provider_created_at_invalid", retryable: false, attemptedAt: now,
+  });
+});
+
 test("nonprofit, expired, cancelled/declined, and in-progress orders never create a second checkout", async () => {
   for (const claim of [
     { kind: "not_payable" as const, reason: "nonprofit" as const },

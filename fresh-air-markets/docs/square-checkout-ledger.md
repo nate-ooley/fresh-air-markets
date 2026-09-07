@@ -14,8 +14,10 @@ payment successful from a browser return.
 3. Apply `012-square-webhook-events.sql` before enabling a Sandbox checkout.
 4. Apply `013-final-reservation-writer.sql`; it is the only writer that creates
    a checkout-eligible reservation and requires `FAME_BOOTH_CAPACITY`.
-5. Apply `014-square-payment-expiry.sql`, which atomically expires unpaid
-   holds and queues idempotent hosted-link retirement.
+5. Apply `014-square-payment-expiry.sql`, then
+   `015-square-payment-expiry-retry-schedule.sql`, which atomically expires
+   unpaid holds and queues idempotent hosted-link retirement with durable retry
+   scheduling.
 6. Deploy the matching Preview revision with its private Square variables and
    `CRON_SECRET` for the trusted expiry endpoint.
 7. Run the read-only Sandbox identity verification in
@@ -84,6 +86,12 @@ manager authentication, and request-body substitution attempts. These are
 isolated tests; they do not create a Square payment or contact a vendor.
 
 The remaining release evidence is a deployed QA database with the final
-reservation writer and migration `014`, an authenticated expiry scheduler,
+reservation writer and migrations `014` and `015`, an authenticated expiry scheduler,
 Preview webhook subscription, and real Sandbox tests for successful, declined,
 abandoned, expired and retried payment attempts.
+
+Square's `payment_link.created_at` must be a strict RFC 3339 calendar timestamp
+with an explicit timezone and may be no more than five minutes ahead of the
+server clock. A malformed, timezone-less, impossible, or implausibly future
+value permanently fails the checkout and sends the held reservation to manager
+review; it is never retried into a new payment window.

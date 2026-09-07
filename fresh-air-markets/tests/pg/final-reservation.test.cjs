@@ -23,6 +23,10 @@ const locationId = 'qa-final-reservation-location';
 const now = new Date('2026-10-01T12:00:00.000Z');
 const calendarDates = ['2026-10-03', '2026-10-10'];
 
+// postgres returns a Result array subclass. Convert only query results used in
+// structural assertions so the test checks rows rather than a driver prototype.
+const rows = result => Array.from(result, row => ({ ...row }));
+
 const config = (boothCapacity = 2) => ({
   marketId,
   seasonId: '2026-2027',
@@ -147,7 +151,7 @@ test('100 concurrent exact reserves create one immutable hold, exact provenance,
   const [reservation] = await first`
     SELECT state, payment_required, total_cents, final_booth_quantity, final_dates
     FROM fame_reservations`;
-  assert.deepEqual(reservation, {
+  assert.deepEqual({ ...reservation, total_cents: Number(reservation.total_cents) }, {
     state: 'held', payment_required: true, total_cents: 8000,
     final_booth_quantity: 1, final_dates: calendarDates,
   });
@@ -166,7 +170,7 @@ test('100 concurrent exact reserves create one immutable hold, exact provenance,
     food_license_required: false,
   });
   const allocations = await first`SELECT market_date::text, booth_quantity FROM fame_reservation_allocations ORDER BY market_date`;
-  assert.deepEqual(allocations, calendarDates.map(market_date => ({ market_date, booth_quantity: 1 })));
+  assert.deepEqual(rows(allocations), calendarDates.map(market_date => ({ market_date, booth_quantity: 1 })));
   await assert.rejects(
     first`UPDATE fame_reservation_finalizations SET full_season = TRUE`,
     error => error.code === '55000',

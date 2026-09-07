@@ -15,7 +15,7 @@ function loadRoute({ checkout, webhook, handle, persist, qaSupport, qaSigner, qa
   mod.paths = module.paths;
   mod.require = (id) => {
     if (id === '@/lib/square') return {
-      squareCheckoutConfig: checkout || (() => ({ environment: 'sandbox', accessToken: 'qa', locationId: 'location' })),
+      squarePreviewSandboxRuntimeConfig: checkout || (() => ({ environment: 'sandbox', accessToken: 'qa', locationId: 'location' })),
       squareWebhookConfig: webhook || (() => ({ webhookSignatureKey: 'key', webhookUrl: 'https://unit-test.invalid/webhook' })),
     };
     if (id === '@/lib/square-webhook') return { handleSquarePaymentWebhook: handle || (async (_request, _config, write) => {
@@ -91,6 +91,14 @@ test('Square webhook route blocks production, malformed configuration, and persi
     const broken = loadRoute({ checkout: () => { throw new Error('private access token'); } });
     const body = await (await broken.POST(new Request('https://unit-test.invalid/', { method: 'POST' }))).json();
     assert.deepEqual(body, { error: 'Square payment processing is not configured.' });
+
+    let runtimeCalls = 0;
+    const previewGateFailure = loadRoute({
+      checkout: () => { throw new Error('not Preview'); },
+      handle: async () => { runtimeCalls++; return Response.json({ status: 'paid' }); },
+    });
+    assert.equal((await previewGateFailure.POST(new Request('https://unit-test.invalid/', { method: 'POST' }))).status, 503);
+    assert.equal(runtimeCalls, 0);
 
     const unsafeQaControl = loadRoute({
       qaSupport: () => { throw new Error('QA controls are not permitted here'); },

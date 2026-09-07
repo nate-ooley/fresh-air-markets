@@ -4,7 +4,7 @@ import {
   postgresSquarePaymentLinkRetirementStore,
 } from "@/lib/square-payment-pg";
 import { dispatchSquarePaymentLinkRetirement } from "@/lib/square-payment";
-import { squareSandboxSetupConfig, verifySquareSandboxSetup } from "@/lib/square";
+import { squarePreviewSandboxRuntimeConfig, verifySquareSandboxSetup } from "@/lib/square";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -38,6 +38,15 @@ export async function GET(request: Request): Promise<Response> {
     return Response.json({ error: "Square payment expiry market scope is not configured." }, { status: 503 });
   }
 
+  let setup;
+  try {
+    // Check the local Preview/Sandbox gate before claiming anything. A copied
+    // Sandbox setting in Production must not mutate payment holds.
+    setup = squarePreviewSandboxRuntimeConfig(process.env);
+  } catch {
+    return Response.json({ error: "Square payment expiry is unavailable." }, { status: 503 });
+  }
+
   let expiry;
   try {
     expiry = await expireDueSquarePaymentHolds({ marketId, now: new Date(), limit: EXPIRY_LIMIT });
@@ -47,7 +56,6 @@ export async function GET(request: Request): Promise<Response> {
 
   let square;
   try {
-    const setup = squareSandboxSetupConfig(process.env);
     const identity = await verifySquareSandboxSetup(setup);
     square = {
       environment: "sandbox" as const,

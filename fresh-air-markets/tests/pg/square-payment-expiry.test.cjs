@@ -35,6 +35,10 @@ const createdAt = new Date('2026-10-01T12:00:00.000Z');
 const dueAt = new Date('2026-10-03T12:00:00.000Z');
 const calendarDates = ['2026-10-03'];
 
+// postgres returns a Result array subclass. Convert only query results used in
+// structural assertions so the test checks rows rather than a driver prototype.
+const rows = result => Array.from(result, row => ({ ...row }));
+
 const config = (boothCapacity = 1) => ({
   marketId,
   seasonId: '2026-2027',
@@ -71,6 +75,7 @@ before(async () => {
       '012-square-webhook-events.sql',
       '013-final-reservation-writer.sql',
       '014-square-payment-expiry.sql',
+      '015-square-payment-expiry-retry-schedule.sql',
     ]) await migration.unsafe(fs.readFileSync(path.join(__dirname, '../../docs/migrations', file), 'utf8'));
   } finally {
     await migration.end();
@@ -231,7 +236,7 @@ test('exactly one concurrent expiry claims the 48-hour hold, then provider retir
     paymentOrderId: order.paymentOrderId, leaseToken: claim.leaseToken,
     cancelledOrderId: order.squareOrderId, retiredAt: dueAt,
   }, first), { kind: 'retired' });
-  assert.deepEqual(await first`SELECT state FROM fame_reservations WHERE id = ${order.reservationId}`, [{ state: 'expired' }]);
+  assert.deepEqual(rows(await first`SELECT state FROM fame_reservations WHERE id = ${order.reservationId}`), [{ state: 'expired' }]);
   const nextApplication = await seedEligibleApplication(second);
   const next = await reserveFinalApplication({
     marketId,
@@ -244,11 +249,11 @@ test('exactly one concurrent expiry claims the 48-hour hold, then provider retir
   assert.equal(next.kind, 'created');
 });
 
-test('retirement leases survive provider failure while the claimed hold keeps capacity', async () => {
+test('retirement leases back off after provider failure while the claimed hold keeps capacity', async () => {
   const order = await checkoutForApplication();
   assert.deepEqual(await expire(), { expiryPending: 1, manualReview: 0 });
   const square = { environment: 'sandbox', merchantId, locationId: squareLocationId };
-  const firstClaim = await claimSquarePaymentLinkRetirement({ marketId, square, now: dueAt, leaseSeconds: 60 });
+  const firstClaim = await claimSquarePaymentLinkRetirement({ marketId, square, now: dueAt, leaseSeconds: 60 }, first);
   assert.equal(firstClaim.kind, 'retirement_required');
   await failSquarePaymentLinkRetirement({
     paymentOrderId: order.paymentOrderId,
@@ -256,24 +261,31 @@ test('retirement leases survive provider failure while the claimed hold keeps ca
     code: 'square_http_503',
     retryable: true,
     attemptedAt: dueAt,
-  });
+  }, first);
   const [pending] = await first`
-    SELECT status, attempt_count, locked_until, lease_token, last_error_code
+    SELECT status, attempt_count, locked_until, lease_token, next_attempt_at, last_error_code
     FROM fame_square_payment_link_retirements
     WHERE payment_order_id = ${order.paymentOrderId}`;
-  assert.deepEqual(pending, {
-    status: 'pending', attempt_count: 1, locked_until: null, lease_token: null, last_error_code: 'square_http_503',
-  });
-  assert.deepEqual(await first`SELECT state FROM fame_reservations WHERE id = ${order.reservationId}`, [{ state: 'payment_pending' }]);
-  assert.deepEqual(await first`SELECT status FROM fame_payment_orders WHERE id = ${order.paymentOrderId}`, [{ status: 'expiry_pending' }]);
-  const retry = await claimSquarePaymentLinkRetirement({ marketId, square, now: dueAt, leaseSeconds: 60 }, second);
+  assert.equal(pending.status, 'pending');
+  assert.equal(pending.attempt_count, 1);
+  assert.equal(pending.locked_until, null);
+  assert.equal(pending.lease_token, null);
+  assert.equal(pending.last_error_code, 'square_http_503');
+  const retryAt = new Date(dueAt.valueOf() + 15_000);
+  assert.equal(new Date(pending.next_attempt_at).toISOString(), retryAt.toISOString());
+  assert.deepEqual(rows(await first`SELECT state FROM fame_reservations WHERE id = ${order.reservationId}`), [{ state: 'payment_pending' }]);
+  assert.deepEqual(rows(await first`SELECT status FROM fame_payment_orders WHERE id = ${order.paymentOrderId}`), [{ status: 'expiry_pending' }]);
+  // The route can loop over other due rows, but this failed row is not eligible
+  // again in the same invocation/time slice.
+  assert.deepEqual(await claimSquarePaymentLinkRetirement({ marketId, square, now: dueAt, leaseSeconds: 60 }, second), { kind: 'no_work' });
+  const retry = await claimSquarePaymentLinkRetirement({ marketId, square, now: retryAt, leaseSeconds: 60 }, second);
   assert.equal(retry.kind, 'retirement_required');
   assert.equal(retry.retirement.attempt, 2);
   assert.deepEqual(await completeSquarePaymentLinkRetirement({
     paymentOrderId: order.paymentOrderId,
     leaseToken: retry.leaseToken,
     cancelledOrderId: order.squareOrderId,
-    retiredAt: dueAt,
+    retiredAt: retryAt,
   }, second), { kind: 'retired' });
   const [retired] = await first`
     SELECT status, attempt_count, retired_at, retired_square_order_id, locked_until, lease_token
@@ -281,11 +293,11 @@ test('retirement leases survive provider failure while the claimed hold keeps ca
     WHERE payment_order_id = ${order.paymentOrderId}`;
   assert.equal(retired.status, 'retired');
   assert.equal(retired.attempt_count, 2);
-  assert.equal(new Date(retired.retired_at).toISOString(), dueAt.toISOString());
+  assert.equal(new Date(retired.retired_at).toISOString(), retryAt.toISOString());
   assert.equal(retired.retired_square_order_id, order.squareOrderId);
   assert.equal(retired.locked_until, null);
   assert.equal(retired.lease_token, null);
-  assert.deepEqual(await first`SELECT state FROM fame_reservations WHERE id = ${order.reservationId}`, [{ state: 'expired' }]);
+  assert.deepEqual(rows(await first`SELECT state FROM fame_reservations WHERE id = ${order.reservationId}`), [{ state: 'expired' }]);
 });
 
 test('payment completion and expiry serialize; a signed event fences expiry-pending capacity for review', async () => {
@@ -293,7 +305,7 @@ test('payment completion and expiry serialize; a signed event fences expiry-pend
   const onTime = paymentEvent(paidFirst);
   assert.deepEqual(await persistSquarePaymentWebhook(onTime, { environment: 'sandbox', now: dueAt }, second), { kind: 'paid' });
   assert.deepEqual(await expire(first, dueAt), { expiryPending: 0, manualReview: 0 });
-  assert.deepEqual(await first`SELECT state FROM fame_reservations WHERE id = ${paidFirst.reservationId}`, [{ state: 'paid' }]);
+  assert.deepEqual(rows(await first`SELECT state FROM fame_reservations WHERE id = ${paidFirst.reservationId}`), [{ state: 'paid' }]);
 
   // A distinct record exercises the opposite ordering. The provider timestamp
   // is before the deadline, but expiry claimed its link first. The signed
@@ -306,12 +318,12 @@ test('payment completion and expiry serialize; a signed event fences expiry-pend
     payment: { updatedAt: new Date(dueAt.valueOf() - 1).toISOString() },
   });
   assert.deepEqual(await persistSquarePaymentWebhook(delayedOnTime, { environment: 'sandbox', now: dueAt }, second), { kind: 'manual_review' });
-  assert.deepEqual(await first`SELECT state FROM fame_reservations WHERE id = ${expiredFirst.reservationId}`, [{ state: 'manual_review' }]);
-  assert.deepEqual(await first`SELECT status FROM fame_payment_orders WHERE id = ${expiredFirst.paymentOrderId}`, [{ status: 'manual_review' }]);
-  assert.deepEqual(await first`
+  assert.deepEqual(rows(await first`SELECT state FROM fame_reservations WHERE id = ${expiredFirst.reservationId}`), [{ state: 'manual_review' }]);
+  assert.deepEqual(rows(await first`SELECT status FROM fame_payment_orders WHERE id = ${expiredFirst.paymentOrderId}`), [{ status: 'manual_review' }]);
+  assert.deepEqual(rows(await first`
     SELECT status, last_error_code
     FROM fame_square_payment_link_retirements
-    WHERE payment_order_id = ${expiredFirst.paymentOrderId}`,
+    WHERE payment_order_id = ${expiredFirst.paymentOrderId}`),
   [{ status: 'manual_review', last_error_code: 'payment_order_or_reservation_not_payable' }]);
   const retirement = await claimSquarePaymentLinkRetirement({
     marketId, square: { environment: 'sandbox', merchantId, locationId: squareLocationId }, now: dueAt, leaseSeconds: 60,
@@ -336,10 +348,36 @@ test('a corrupted deadline goes to manual review and keeps capacity held instead
     SET payment_due_at = ${new Date(dueAt.valueOf() + 1000)}
     WHERE id = ${order.reservationId}`;
   assert.deepEqual(await expire(first, dueAt), { expiryPending: 0, manualReview: 1 });
-  assert.deepEqual(await first`SELECT state FROM fame_reservations WHERE id = ${order.reservationId}`, [{ state: 'manual_review' }]);
-  assert.deepEqual(await first`SELECT status, last_error_code FROM fame_payment_orders WHERE id = ${order.paymentOrderId}`,
+  assert.deepEqual(rows(await first`SELECT state FROM fame_reservations WHERE id = ${order.reservationId}`), [{ state: 'manual_review' }]);
+  assert.deepEqual(rows(await first`SELECT status, last_error_code FROM fame_payment_orders WHERE id = ${order.paymentOrderId}`),
     [{ status: 'manual_review', last_error_code: 'payment_deadline_missing_or_mismatched' }]);
   assert.equal((await first`SELECT * FROM fame_square_payment_link_retirements WHERE payment_order_id = ${order.paymentOrderId}`).length, 0);
+});
+
+test('missing or future-mismatched deadline copies are fenced before either deadline is due', async () => {
+  const beforeDue = new Date(dueAt.valueOf() - 60 * 60 * 1000);
+  const missing = await checkoutForApplication();
+  await first`
+    UPDATE fame_payment_orders
+    SET payment_due_at = NULL
+    WHERE id = ${missing.paymentOrderId}`;
+  assert.deepEqual(await expire(first, beforeDue), { expiryPending: 0, manualReview: 1 });
+  assert.deepEqual(rows(await first`SELECT state FROM fame_reservations WHERE id = ${missing.reservationId}`), [{ state: 'manual_review' }]);
+  assert.deepEqual(rows(await first`SELECT status, last_error_code FROM fame_payment_orders WHERE id = ${missing.paymentOrderId}`),
+    [{ status: 'manual_review', last_error_code: 'payment_deadline_missing_or_mismatched' }]);
+  assert.equal((await first`SELECT * FROM fame_reservation_allocations WHERE reservation_id = ${missing.reservationId}`).length, 1);
+
+  await first`TRUNCATE fame_applications CASCADE`;
+  const mismatched = await checkoutForApplication();
+  await first`
+    UPDATE fame_reservations
+    SET payment_due_at = ${new Date(dueAt.valueOf() + 60_000)}
+    WHERE id = ${mismatched.reservationId}`;
+  assert.deepEqual(await expire(first, beforeDue), { expiryPending: 0, manualReview: 1 });
+  assert.deepEqual(rows(await first`SELECT state FROM fame_reservations WHERE id = ${mismatched.reservationId}`), [{ state: 'manual_review' }]);
+  assert.deepEqual(rows(await first`SELECT status, last_error_code FROM fame_payment_orders WHERE id = ${mismatched.paymentOrderId}`),
+    [{ status: 'manual_review', last_error_code: 'payment_deadline_missing_or_mismatched' }]);
+  assert.equal((await first`SELECT * FROM fame_reservation_allocations WHERE reservation_id = ${mismatched.reservationId}`).length, 1);
 });
 
 test('a retirement row that no longer maps to its parent is fenced before any provider call or capacity release', async () => {
@@ -353,14 +391,14 @@ test('a retirement row that no longer maps to its parent is fenced before any pr
     marketId, square: { environment: 'sandbox', merchantId, locationId: squareLocationId }, now: dueAt, leaseSeconds: 60,
   }, first);
   assert.deepEqual(claim, { kind: 'manual_review', paymentOrderId: order.paymentOrderId });
-  assert.deepEqual(await first`SELECT status FROM fame_payment_orders WHERE id = ${order.paymentOrderId}`,
+  assert.deepEqual(rows(await first`SELECT status FROM fame_payment_orders WHERE id = ${order.paymentOrderId}`),
     [{ status: 'manual_review' }]);
-  assert.deepEqual(await first`SELECT state FROM fame_reservations WHERE id = ${order.reservationId}`,
+  assert.deepEqual(rows(await first`SELECT state FROM fame_reservations WHERE id = ${order.reservationId}`),
     [{ state: 'manual_review' }]);
-  assert.deepEqual(await first`
+  assert.deepEqual(rows(await first`
     SELECT status, last_error_code
     FROM fame_square_payment_link_retirements
-    WHERE payment_order_id = ${order.paymentOrderId}`,
+    WHERE payment_order_id = ${order.paymentOrderId}`),
   [{ status: 'manual_review', last_error_code: 'square_retirement_parent_mapping_mismatch' }]);
 });
 
@@ -371,13 +409,98 @@ test('a configured Square identity mismatch fences the order, reservation, and r
     marketId, square: { environment: 'sandbox', merchantId: 'wrong-merchant', locationId: squareLocationId }, now: dueAt, leaseSeconds: 60,
   }, first);
   assert.deepEqual(claim, { kind: 'manual_review', paymentOrderId: order.paymentOrderId });
-  assert.deepEqual(await first`SELECT status FROM fame_payment_orders WHERE id = ${order.paymentOrderId}`,
+  assert.deepEqual(rows(await first`SELECT status FROM fame_payment_orders WHERE id = ${order.paymentOrderId}`),
     [{ status: 'manual_review' }]);
-  assert.deepEqual(await first`SELECT state FROM fame_reservations WHERE id = ${order.reservationId}`,
+  assert.deepEqual(rows(await first`SELECT state FROM fame_reservations WHERE id = ${order.reservationId}`),
     [{ state: 'manual_review' }]);
-  assert.deepEqual(await first`
+  assert.deepEqual(rows(await first`
     SELECT status, last_error_code
     FROM fame_square_payment_link_retirements
-    WHERE payment_order_id = ${order.paymentOrderId}`,
+    WHERE payment_order_id = ${order.paymentOrderId}`),
   [{ status: 'manual_review', last_error_code: 'square_retirement_identity_mismatch' }]);
+});
+
+test('migration 015 quarantines proofless legacy retirements and their active parents', async () => {
+  const legacySchema = 'qa_square_payment_expiry_legacy';
+  await admin.unsafe(`DROP SCHEMA IF EXISTS ${legacySchema} CASCADE`);
+  await admin.unsafe(`CREATE SCHEMA ${legacySchema}`);
+  const legacy = postgres(url.toString(), {
+    max: 1,
+    prepare: false,
+    connection: { search_path: legacySchema },
+  });
+  try {
+    await legacy.unsafe(`
+      CREATE TABLE fame_reservations (
+        id TEXT PRIMARY KEY,
+        market_id TEXT NOT NULL,
+        state TEXT NOT NULL,
+        updated_at TIMESTAMPTZ
+      );
+      CREATE TABLE fame_payment_orders (
+        id TEXT PRIMARY KEY,
+        reservation_id TEXT NOT NULL,
+        market_id TEXT NOT NULL,
+        status TEXT NOT NULL,
+        locked_until TIMESTAMPTZ,
+        lease_token TEXT,
+        last_error_code TEXT,
+        updated_at TIMESTAMPTZ
+      );
+      CREATE TABLE fame_square_payment_link_retirements (
+        payment_order_id TEXT PRIMARY KEY,
+        status TEXT NOT NULL,
+        square_order_id TEXT,
+        retired_square_order_id TEXT,
+        retired_at TIMESTAMPTZ,
+        locked_until TIMESTAMPTZ,
+        lease_token TEXT,
+        last_error_code TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ
+      );
+      INSERT INTO fame_reservations (id, market_id, state) VALUES
+        ('legacy-reservation-missing', 'legacy-market', 'payment_pending'),
+        ('legacy-reservation-mismatch', 'legacy-market', 'payment_pending'),
+        ('legacy-reservation-no-time', 'legacy-market', 'payment_pending');
+      INSERT INTO fame_payment_orders (id, reservation_id, market_id, status) VALUES
+        ('legacy-order-missing', 'legacy-reservation-missing', 'legacy-market', 'checkout_created'),
+        ('legacy-order-mismatch', 'legacy-reservation-mismatch', 'legacy-market', 'checkout_created'),
+        ('legacy-order-no-time', 'legacy-reservation-no-time', 'legacy-market', 'checkout_created');
+      INSERT INTO fame_square_payment_link_retirements
+        (payment_order_id, status, square_order_id, retired_square_order_id, retired_at)
+      VALUES
+        ('legacy-order-missing', 'retired', 'square-order-missing', NULL, '2026-10-03T12:00:00.000Z'),
+        ('legacy-order-mismatch', 'retired', 'square-order-mismatch', 'other-square-order', '2026-10-03T12:00:00.000Z'),
+        ('legacy-order-no-time', 'retired', 'square-order-no-time', 'square-order-no-time', NULL);
+    `);
+    await legacy.unsafe(fs.readFileSync(path.join(__dirname, '../../docs/migrations/015-square-payment-expiry-retry-schedule.sql'), 'utf8'));
+    assert.deepEqual(rows(await legacy`
+      SELECT id, status, last_error_code
+      FROM fame_payment_orders
+      ORDER BY id`), [
+      { id: 'legacy-order-mismatch', status: 'manual_review', last_error_code: 'legacy_retired_without_cancellation_proof' },
+      { id: 'legacy-order-missing', status: 'manual_review', last_error_code: 'legacy_retired_without_cancellation_proof' },
+      { id: 'legacy-order-no-time', status: 'manual_review', last_error_code: 'legacy_retired_without_cancellation_proof' },
+    ]);
+    assert.deepEqual(rows(await legacy`
+      SELECT state
+      FROM fame_reservations
+      ORDER BY id`), [
+      { state: 'manual_review' },
+      { state: 'manual_review' },
+      { state: 'manual_review' },
+    ]);
+    assert.deepEqual(rows(await legacy`
+      SELECT status, retired_at, retired_square_order_id, next_attempt_at, last_error_code
+      FROM fame_square_payment_link_retirements
+      ORDER BY payment_order_id`), [
+      { status: 'manual_review', retired_at: null, retired_square_order_id: null, next_attempt_at: null, last_error_code: 'legacy_retired_without_cancellation_proof' },
+      { status: 'manual_review', retired_at: null, retired_square_order_id: null, next_attempt_at: null, last_error_code: 'legacy_retired_without_cancellation_proof' },
+      { status: 'manual_review', retired_at: null, retired_square_order_id: null, next_attempt_at: null, last_error_code: 'legacy_retired_without_cancellation_proof' },
+    ]);
+  } finally {
+    await legacy.end();
+    await admin.unsafe(`DROP SCHEMA IF EXISTS ${legacySchema} CASCADE`);
+  }
 });

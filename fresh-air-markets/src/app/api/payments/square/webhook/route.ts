@@ -1,4 +1,4 @@
-import { squareCheckoutConfig, squareWebhookConfig } from "@/lib/square";
+import { squarePreviewSandboxRuntimeConfig, squareWebhookConfig } from "@/lib/square";
 import {
   QA_SIGNER_HEADER,
   squareQaSignerAuthorization,
@@ -25,7 +25,7 @@ export async function POST(request: Request): Promise<Response> {
     const qaSupport = squareQaSupportConfig(process.env);
     const qaSigner = squareQaSignerAuthorization(request.headers.get(QA_SIGNER_HEADER), qaSupport);
     if (qaSigner === "unauthorized") return Response.json({ error: "Unauthorized." }, { status: 401 });
-    const checkout = squareCheckoutConfig(process.env);
+    const checkout = squarePreviewSandboxRuntimeConfig(process.env);
     const webhook = squareWebhookConfig(process.env);
     // The only wired payment flow is Sandbox. A production configuration must
     // receive an explicit launch implementation rather than processing live

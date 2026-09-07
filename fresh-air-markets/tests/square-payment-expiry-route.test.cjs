@@ -23,7 +23,7 @@ function loadRoute({ authorized = true, expiry, configured = true, verified = tr
       postgresSquarePaymentLinkRetirementStore: { qa: true },
     };
     if (id === '@/lib/square') return {
-      squareSandboxSetupConfig: () => {
+      squarePreviewSandboxRuntimeConfig: () => {
         if (!configured) throw new Error('not configured');
         return { environment: 'sandbox', accessToken: 'private-token', locationId: 'sandbox-location' };
       },
@@ -120,14 +120,16 @@ test('payment expiry claims durable holds before it calls only the verified Sand
 test('provider identity failure leaves the claimed hold queued and never invokes retirement', async () => {
   await withSchedulerEnv(async () => {
     let dispatched = 0;
+    let claimed = 0;
     const route = loadRoute({
-      expiry: async () => ({ expiryPending: 1, manualReview: 0 }),
+      expiry: async () => { claimed++; return { expiryPending: 1, manualReview: 0 }; },
       configured: false,
       dispatch: async () => { dispatched++; return { kind: 'no_work' }; },
     });
     const response = await route.GET(new Request('https://unit-test.invalid'));
     assert.equal(response.status, 503);
-    assert.deepEqual(await response.json(), { error: 'Square payment-link retirement is unavailable.' });
+    assert.deepEqual(await response.json(), { error: 'Square payment expiry is unavailable.' });
+    assert.equal(claimed, 0);
     assert.equal(dispatched, 0);
   });
 });

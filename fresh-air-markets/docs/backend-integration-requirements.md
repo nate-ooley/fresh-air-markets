@@ -102,7 +102,8 @@ The adapter and contract tests are prepared; checkout endpoints, durable webhook
 - Clock tests cover just before/exactly at/after deadline and daylight-saving
   transitions. The durable scheduler also has PostgreSQL concurrency tests for
   expiry, capacity release, payment replay, and provider-delete retry. Deploy
-  migration `014-square-payment-expiry.sql` and follow
+  migrations `014-square-payment-expiry.sql` and
+  `015-square-payment-expiry-retry-schedule.sql`, then follow
   [square-payment-expiry.md](square-payment-expiry.md) before calling L18 green.
 
 ## Document and form requirements

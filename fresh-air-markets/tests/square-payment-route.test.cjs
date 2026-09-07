@@ -17,7 +17,7 @@ function loadRoute({ authenticated = true, configured = true, verifiedIdentity, 
   mod.require = (id) => {
     if (id === '@/lib/auth') return { getSessionAccountId: async () => authenticated ? 'qa-market' : null };
     if (id === '@/lib/square') return {
-      squareSandboxSetupConfig: () => {
+      squarePreviewSandboxRuntimeConfig: () => {
         if (!configured) throw new Error('not configured');
         return { environment: 'sandbox', accessToken: 'private-token', locationId: 'configured-location' };
       },
@@ -62,7 +62,7 @@ test('checkout route requires a manager session before configuration or provider
   assert.equal(calls, 0);
 });
 
-test('checkout route fails closed for missing durable storage, bad reservation IDs, and missing Sandbox setup', async () => {
+test('checkout route fails closed for missing durable storage, bad reservation IDs, and a missing Preview Sandbox gate', async () => {
   const original = process.env.DATABASE_URL;
   delete process.env.DATABASE_URL;
   try {
@@ -73,7 +73,13 @@ test('checkout route fails closed for missing durable storage, bad reservation I
   }
   await withDatabase(async () => {
     assert.equal((await loadRoute().POST(request(), { params: Promise.resolve({ id: '../bad' }) })).status, 400);
-    assert.equal((await loadRoute({ configured: false }).POST(request(), { params: Promise.resolve({ id: 'reservation-1' }) })).status, 503);
+    let configuredDispatches = 0;
+    const previewGateFailure = loadRoute({
+      configured: false,
+      dispatch: async () => { configuredDispatches++; return { kind: 'not_found' }; },
+    });
+    assert.equal((await previewGateFailure.POST(request(), { params: Promise.resolve({ id: 'reservation-1' }) })).status, 503);
+    assert.equal(configuredDispatches, 0);
     let dispatched = 0;
     const unsafeQaControl = loadRoute({
       qaSupport: () => { throw new Error('QA controls are not permitted here'); },

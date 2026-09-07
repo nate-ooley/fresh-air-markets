@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSessionAccountId } from "@/lib/auth";
-import { squareSandboxSetupConfig, verifySquareSandboxSetup } from "@/lib/square";
+import { squarePreviewSandboxRuntimeConfig, verifySquareSandboxSetup } from "@/lib/square";
 import { dispatchSquareSandboxCheckout, validSquareReservationId } from "@/lib/square-payment";
 import { postgresSquarePaymentCheckoutStore } from "@/lib/square-payment-pg";
 import { squareQaCheckoutTransport, squareQaSupportConfig } from "@/lib/square-qa-faults";
@@ -56,7 +56,7 @@ export async function POST(_request: NextRequest, { params }: { params: Promise<
 
   let setup;
   try {
-    setup = squareSandboxSetupConfig(process.env);
+    setup = squarePreviewSandboxRuntimeConfig(process.env);
   } catch {
     return NextResponse.json({ error: "Square Sandbox checkout is not configured." }, { status: 503 });
   }

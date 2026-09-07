@@ -217,6 +217,7 @@ async function placeInManualReview(
     SET status = 'manual_review',
         locked_until = NULL,
         lease_token = NULL,
+        next_attempt_at = NULL,
         last_error_code = ${reason},
         updated_at = ${now}
     WHERE payment_order_id = ${target.id}

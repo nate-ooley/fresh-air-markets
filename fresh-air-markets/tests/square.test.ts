@@ -6,6 +6,7 @@ import {
   squareConfig,
   squareWebhookConfig,
   squareSandboxSetupConfig,
+  squarePreviewSandboxRuntimeConfig,
   verifySquareSandboxSetup,
   createSquareCheckout,
   verifySquareWebhook,
@@ -13,7 +14,7 @@ import {
   paymentDeadline,
 } from "../src/lib/square.ts";
 
-const settings = { SQUARE_ACCESS_TOKEN: "test-token", SQUARE_LOCATION_ID: "test-location", SQUARE_MERCHANT_ID: "test-merchant", SQUARE_WEBHOOK_SIGNATURE_KEY: "test-key", SQUARE_WEBHOOK_URL: "https://unit-test.invalid/api/payments/square/webhook" };
+const settings = { SQUARE_ENVIRONMENT: "sandbox", SQUARE_ALLOW_LIVE_PAYMENTS: "false", SQUARE_ACCESS_TOKEN: "test-token", SQUARE_LOCATION_ID: "test-location", SQUARE_MERCHANT_ID: "test-merchant", SQUARE_WEBHOOK_SIGNATURE_KEY: "test-key", SQUARE_WEBHOOK_URL: "https://unit-test.invalid/api/payments/square/webhook" };
 const sandboxSettings = { SQUARE_ENVIRONMENT: "sandbox", SQUARE_ALLOW_LIVE_PAYMENTS: "false", SQUARE_ACCESS_TOKEN: "sandbox-token", SQUARE_LOCATION_ID: "sandbox-location" };
 const config = squareConfig(settings);
 const approved = { reservationId: "qa-reservation", revision: 1, totalCents: 28000, description: "Four market dates, two booths", paymentDeadline: "2026-10-03T12:00:00Z" };
@@ -21,7 +22,7 @@ const now = Date.parse("2026-10-01T12:00:00Z");
 
 test("Square splits checkout, webhook, and setup configuration while blocking accidental live mode", () => {
   assert.equal(config.environment, "sandbox");
-  for (const key of ["SQUARE_ACCESS_TOKEN", "SQUARE_LOCATION_ID", "SQUARE_WEBHOOK_SIGNATURE_KEY", "SQUARE_WEBHOOK_URL"]) assert.throws(() => squareConfig({ ...settings, [key]: "" }));
+  for (const key of ["SQUARE_ACCESS_TOKEN", "SQUARE_LOCATION_ID", "SQUARE_WEBHOOK_SIGNATURE_KEY", "SQUARE_WEBHOOK_URL", "SQUARE_ALLOW_LIVE_PAYMENTS"]) assert.throws(() => squareConfig({ ...settings, [key]: "" }));
   assert.equal(squareConfig({ ...settings, SQUARE_MERCHANT_ID: "" }).merchantId, undefined);
   assert.deepEqual(squareCheckoutConfig(sandboxSettings), { environment: "sandbox", accessToken: "sandbox-token", locationId: "sandbox-location", merchantId: undefined });
   assert.deepEqual(squareSandboxSetupConfig(sandboxSettings), { environment: "sandbox", accessToken: "sandbox-token", locationId: "sandbox-location", merchantId: undefined });
@@ -31,9 +32,29 @@ test("Square splits checkout, webhook, and setup configuration while blocking ac
   assert.throws(() => squareConfig({ ...settings, SQUARE_ENVIRONMENT: "production" }));
   assert.throws(() => squareConfig({ ...settings, SQUARE_ENVIRONMENT: "invalid" }));
   assert.throws(() => squareConfig({ ...settings, SQUARE_WEBHOOK_URL: "http://unit-test.invalid" }));
+  for (const setting of [undefined, "true", "", "FALSE", "false "]) {
+    assert.throws(() => squareSandboxSetupConfig({ ...sandboxSettings, SQUARE_ALLOW_LIVE_PAYMENTS: setting }));
+  }
   assert.throws(() => squareSandboxSetupConfig({ ...sandboxSettings, SQUARE_ENVIRONMENT: "production", SQUARE_ALLOW_LIVE_PAYMENTS: "true" }));
-  assert.throws(() => squareSandboxSetupConfig({ ...sandboxSettings, SQUARE_ALLOW_LIVE_PAYMENTS: "true" }));
   assert.equal(squareConfig({ ...settings, SQUARE_ENVIRONMENT: "production", SQUARE_ALLOW_LIVE_PAYMENTS: "true" }).environment, "production");
+});
+
+test("Sandbox payment routes require Vercel Preview while the read-only verifier remains locally runnable", () => {
+  const previewSandbox = { ...sandboxSettings, VERCEL: "1", VERCEL_ENV: "preview" };
+  assert.deepEqual(squarePreviewSandboxRuntimeConfig(previewSandbox), {
+    environment: "sandbox", accessToken: "sandbox-token", locationId: "sandbox-location", merchantId: undefined,
+  });
+  // The verifier deliberately consumes only the Sandbox credentials so it can
+  // run locally through `vercel env run` without pretending to be a deployment.
+  assert.deepEqual(squareSandboxSetupConfig(sandboxSettings), {
+    environment: "sandbox", accessToken: "sandbox-token", locationId: "sandbox-location", merchantId: undefined,
+  });
+  for (const invalid of [
+    { ...previewSandbox, VERCEL: undefined },
+    { ...previewSandbox, VERCEL_ENV: "production" },
+    { ...previewSandbox, SQUARE_ENVIRONMENT: "production", SQUARE_ALLOW_LIVE_PAYMENTS: "true" },
+    { ...previewSandbox, SQUARE_ALLOW_LIVE_PAYMENTS: undefined },
+  ]) assert.throws(() => squarePreviewSandboxRuntimeConfig(invalid));
 });
 
 test("Sandbox setup retrieves the selected merchant and fences the configured active location", async () => {
@@ -142,6 +163,25 @@ test("Square provider failures and incomplete responses do not report success or
   }
   for (const body of [null, {}, { payment_link: { id: "x" } }]) {
     await assert.rejects(createSquareCheckout(config, approved, (async () => Response.json(body)) as typeof fetch, now));
+  }
+});
+
+test("malformed, timezone-less, impossible, and future Square timestamps permanently fail checkout creation", async () => {
+  const invalidTimestamps = [
+    "2026-10-01T12:00:00",
+    "2026-02-30T12:00:00Z",
+    "2026-10-01T12:00:00+24:00",
+    "2026-10-01T12:00:00+01:60",
+    "2026-10-01T12:06:00.000Z",
+  ];
+  for (const createdAt of invalidTimestamps) {
+    await assert.rejects(
+      createSquareCheckout(config, approved, (async () => Response.json({ payment_link: {
+        id: "link", order_id: "order", url: "https://square.link/qa", created_at: createdAt,
+      } })) as typeof fetch, now),
+      error => (error as { code?: string; retryable?: boolean }).code === "square_provider_created_at_invalid"
+        && (error as { retryable?: boolean }).retryable === false,
+    );
   }
 });
 

@@ -39,8 +39,11 @@ export function squareCheckoutConfig(env: Record<string, string | undefined>): S
   if (environment === "production" && env.SQUARE_ALLOW_LIVE_PAYMENTS !== "true") {
     throw new Error("Live Square payments are disabled.");
   }
-  if (environment === "sandbox" && env.SQUARE_ALLOW_LIVE_PAYMENTS === "true") {
-    throw new Error("Live Square payments cannot be enabled for Sandbox.");
+  // Sandbox is intentionally an explicit, fail-closed QA mode. Treat a
+  // missing, misspelled, or live-enabled toggle as unsafe even though the
+  // adapter below selects the Sandbox base URL.
+  if (environment === "sandbox" && env.SQUARE_ALLOW_LIVE_PAYMENTS !== "false") {
+    throw new Error("Square Sandbox requires live payments to be disabled.");
   }
   const merchantId = env.SQUARE_MERCHANT_ID?.trim() || undefined;
   return {
@@ -73,6 +76,19 @@ export function squareSandboxSetupConfig(env: Record<string, string | undefined>
   const config = squareCheckoutConfig(env);
   if (config.environment !== "sandbox") throw new Error("Square setup verification requires Sandbox.");
   return { ...config, environment: "sandbox" };
+}
+
+/**
+ * The deployed payment paths are QA-only. Keep the local read-only verifier
+ * usable through `vercel env run`, but require actual Vercel Preview runtime
+ * markers before a checkout, receipt, or expiry route can run.
+ */
+export function squarePreviewSandboxRuntimeConfig(env: Record<string, string | undefined>): SquareSandboxSetupConfig {
+  const config = squareSandboxSetupConfig(env);
+  if (env.VERCEL !== "1" || env.VERCEL_ENV !== "preview") {
+    throw new Error("Square Sandbox payment processing requires Vercel Preview.");
+  }
+  return config;
 }
 
 export interface SquareSandboxIdentity {
@@ -155,10 +171,38 @@ export interface ApprovedCheckout {
   paymentDeadline: string;
 }
 
+/**
+ * Square gives us a provider-owned timestamp that anchors the 48-hour hold.
+ * Do not let JavaScript's permissive Date.parse normalize impossible dates or
+ * accept a timezone-less value: either could create an unintended deadline.
+ */
 function canonicalProviderTimestamp(value: unknown): string | null {
   if (typeof value !== "string") return null;
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,9})?(Z|[+-]\d{2}:\d{2})$/.exec(value);
+  if (!match) return null;
+  const [, yearText, monthText, dayText, hourText, minuteText, secondText, offset] = match;
+  const year = Number(yearText);
+  const month = Number(monthText);
+  const day = Number(dayText);
+  const hour = Number(hourText);
+  const minute = Number(minuteText);
+  const second = Number(secondText);
+  const offsetMatch = offset === "Z" ? null : /^([+-])(\d{2}):(\d{2})$/.exec(offset);
+  const offsetHour = offsetMatch ? Number(offsetMatch[2]) : 0;
+  const offsetMinute = offsetMatch ? Number(offsetMatch[3]) : 0;
+  const daysInMonth = month >= 1 && month <= 12 ? new Date(Date.UTC(year, month, 0)).getUTCDate() : 0;
+  if (month < 1 || month > 12 || day < 1 || day > daysInMonth
+    || hour > 23 || minute > 59 || second > 59
+    || offsetHour > 23 || offsetMinute > 59) return null;
   const timestamp = Date.parse(value);
   return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : null;
+}
+
+function invalidProviderCheckoutTimestamp(): Error & { code: string; retryable: false } {
+  const error = new Error("Square returned an invalid checkout creation timestamp.") as Error & { code: string; retryable: false };
+  error.code = "square_provider_created_at_invalid";
+  error.retryable = false;
+  return error;
 }
 
 /** Retries must use the same reservation revision and immutable amount. */
@@ -180,7 +224,8 @@ export async function createSquareCheckout(config: Pick<SquareCheckoutConfig, "e
   const data = await response.json();
   const link = data?.payment_link;
   const createdAt = canonicalProviderTimestamp(link?.created_at);
-  if (!link?.id || !link?.order_id || typeof link?.url !== "string" || !link.url.startsWith("https://") || !createdAt) {
+  if (!createdAt || Date.parse(createdAt) > now + 5 * 60 * 1000) throw invalidProviderCheckoutTimestamp();
+  if (!link?.id || !link?.order_id || typeof link?.url !== "string" || !link.url.startsWith("https://")) {
     throw new Error("Square returned an incomplete checkout response.");
   }
   return { paymentLinkId: String(link.id), orderId: String(link.order_id), checkoutUrl: link.url, createdAt, idempotencyKey };

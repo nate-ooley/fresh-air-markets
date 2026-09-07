@@ -22,6 +22,10 @@ const market = 'qa-square-webhook-market';
 const now = new Date('2026-10-01T12:00:00.000Z');
 const dueAt = new Date('2026-10-03T12:00:00.000Z');
 
+// postgres returns a Result array subclass. Convert only query results used in
+// structural assertions so the test checks rows rather than a driver prototype.
+const rows = result => Array.from(result, row => ({ ...row }));
+
 before(async () => {
   await admin.unsafe(`CREATE SCHEMA ${schema}`);
   await first`CREATE TABLE accounts (id TEXT PRIMARY KEY)`;
@@ -128,7 +132,7 @@ test('100 concurrent exact Square event deliveries create one receipt and one pa
   const receipts = await first`SELECT disposition, raw_body_sha256 FROM fame_square_webhook_events`;
   assert.deepEqual(payment, { status: 'paid', payment_id: event.payment.id, payment_status: 'COMPLETED' });
   assert.equal(reservation.state, 'paid');
-  assert.deepEqual(receipts, [{ disposition: 'paid', raw_body_sha256: event.rawBodySha256 }]);
+  assert.deepEqual(rows(receipts), [{ disposition: 'paid', raw_body_sha256: event.rawBodySha256 }]);
 });
 
 test('out-of-order payment updates never regress the newest provider state or make an old completion paid', async () => {
@@ -215,7 +219,7 @@ test('an exact replay is duplicate and altered reuse of its event ID is a confli
   const altered = { ...event, rawBodySha256: hash('altered-signed-raw-body') };
   assert.deepEqual(await persist(altered), { kind: 'conflict' });
   const receipts = await first`SELECT event_id, raw_body_sha256, disposition, manual_review_reason FROM fame_square_webhook_events`;
-  assert.deepEqual(receipts, [{
+  assert.deepEqual(rows(receipts), [{
     event_id: event.eventId,
     raw_body_sha256: event.rawBodySha256,
     disposition: 'manual_review',
