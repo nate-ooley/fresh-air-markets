@@ -2,7 +2,7 @@
 
 Run `npm test` with Node 22. Tests compile the existing store and session modules into `.test-build`, then run directly against the code. They do not start a server, connect to HighLevel or Square, send messages, or change production data. The in-memory test vendors use the two addresses authorized for QA.
 
-The current 51 tests cover:
+The current 56 tests cover:
 
 - All 2,160 combinations of application, agreement, insurance, food-license requirement and food-license status in the test matrix. Only two complete states qualify for date selection.
 - $30 full-season, $35 four-or-more consecutive market dates and $40 standard pricing, multiplied by final booth quantity.
@@ -31,3 +31,9 @@ These are component/contract passes. Square transport is replaced with a test do
 The advisory booking rules are not yet integrated into the portal routes or HighLevel. These are code-level tests, not proof of live workflow behavior. Memory-store concurrency is not PostgreSQL concurrency. Real database transaction tests, public-form submissions, trigger-link routing, document signing, inbox delivery, duplicate workflow enrollment, Square payment outcomes and payment webhook replay must still be tested in their intended environments.
 
 The portal's current demo calendar and prices remain separate from the new Fresh Air rules. Do not use the demo portal as the production reservation/payment system until the calendar, CHECK/RESERVE and payment integration are complete.
+
+## Continuous integration
+
+The repository workflow `.github/workflows/ci.yml` runs the isolated suite and a production build on pull requests and pushes to main using Node 22. It has read-only repository permissions, receives no production credentials, and does not deploy.
+
+Five additional public inquiry route scenarios reject malformed text fields, invalid optional fields, text overflow and malformed/excessive dates; the positive scenario verifies email normalization, duplicate-date normalization, punctuation and market ownership. These are in-process route tests with a CRM double, not public-browser or real email evidence.
