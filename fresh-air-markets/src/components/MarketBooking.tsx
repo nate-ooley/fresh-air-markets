@@ -151,7 +151,7 @@ export default function MarketBooking({ weekends, slug, marketName }: MarketBook
               {
                 n: "3",
                 title: "Get approved & sell",
-                body: "You'll hear from us by email or text with your approval and payment details. Then just show up, set up, and meet your customers.",
+                body: "You'll hear from us by email with your approval and payment details. Then just show up, set up, and meet your customers.",
               },
             ].map((s) => (
               <div key={s.n} className="rounded-2xl bg-cream p-6 shadow-sm ring-1 ring-pine/10">

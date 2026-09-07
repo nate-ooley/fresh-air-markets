@@ -32,7 +32,7 @@ const FEATURES = [
   {
     icon: "🔗",
     title: "GoHighLevel built in",
-    body: "Every inquiry, approval, and decline tags the vendor's contact in GHL automatically — plug it straight into your existing email and SMS workflows.",
+    body: "Every inquiry, approval, and decline tags the vendor's contact in GHL automatically — plug it straight into your existing email workflows.",
   },
 ];
 
