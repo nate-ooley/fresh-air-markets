@@ -1,3 +1,4 @@
+import { readObjectBody } from "@/lib/request-body";
 import { NextRequest, NextResponse } from "next/server";
 import { getStore } from "@/lib/store";
 import { getSessionAccountId } from "@/lib/auth";
@@ -13,7 +14,9 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
   const marketId = await getSessionAccountId();
   if (!marketId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   const { id } = await params;
-  const { action } = await req.json().catch(() => ({ action: "" }));
+  const body = await readObjectBody(req);
+  if (!body) return NextResponse.json({ error: "A JSON object body is required." }, { status: 400 });
+  const { action } = body;
   const store = await getStore();
 
   if (action === "approve") {
@@ -27,8 +30,10 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
         { status: detail ? 409 : 404 },
       );
     }
-    const booth = await store.getBooth(marketId, result.booking.boothId);
-    await syncBookingToGhl(result.booking, "booth-approved", booth?.label ?? result.booking.boothId);
+    if (!result.alreadyApproved) {
+      const booth = await store.getBooth(marketId, result.booking.boothId);
+      await syncBookingToGhl(result.booking, "booth-approved", booth?.label ?? result.booking.boothId);
+    }
     return NextResponse.json({ booking: result.booking });
   }
 

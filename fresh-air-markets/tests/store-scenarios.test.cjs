@@ -66,3 +66,29 @@ test('tampered sessions, including non-ASCII signatures, are rejected without th
   parts[2] = 'é'.repeat(64);
   assert.equal(verifySessionToken(parts.join('.')), null);
 });
+
+test('late approval cannot revive rejected or cancelled bookings', async () => {
+  for (const status of ['rejected', 'cancelled']) {
+    const store = new MemoryStore();
+    const marketId = `qa-terminal-${status}`;
+    const boothId = `${marketId}-booth`;
+    await store.createBooth(booth(marketId, boothId));
+    const booking = await store.createInquiry(marketId, { ...vendor, boothId, dates: ['2026-10-03'] }, 40);
+    await store.setBookingStatus(marketId, booking.id, status);
+    assert.equal((await store.approveBooking(marketId, booking.id)).ok, false);
+    assert.equal((await store.getBooking(marketId, booking.id)).status, status);
+    assert.equal((await store.boothsWithAvailability(marketId, ['2026-10-03'], false))[0].status, 'available');
+  }
+});
+
+test('repeated approval is recognized without another state transition', async () => {
+  const store = new MemoryStore();
+  await store.createBooth(booth('qa-replay', 'qa-replay-booth'));
+  const booking = await store.createInquiry('qa-replay', { ...vendor, boothId: 'qa-replay-booth', dates: ['2026-10-03'] }, 40);
+  const first = await store.approveBooking('qa-replay', booking.id);
+  const second = await store.approveBooking('qa-replay', booking.id);
+  assert.equal(first.ok, true);
+  assert.equal(first.alreadyApproved, undefined);
+  assert.equal(second.ok, true);
+  assert.equal(second.alreadyApproved, true);
+});

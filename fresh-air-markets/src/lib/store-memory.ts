@@ -114,6 +114,10 @@ export class MemoryStore implements Store {
     const booking = await this.getBooking(marketId, id);
     if (!booking) return { ok: false, conflicts: [] };
     if (!await this.getBooth(marketId, booking.boothId)) return { ok: false, conflicts: [] };
+    // Recheck after the awaits: a cancellation/rejection may have arrived while
+    // looking up the booth. Late approvals must not revive terminal decisions.
+    if (booking.status !== "pending" && booking.status !== "approved") return { ok: false, conflicts: [] };
+    if (booking.status === "approved") return { ok: true, booking, alreadyApproved: true };
     const conflicts = data()
       .bookings.filter((b) => b.marketId === marketId && b.id !== id && b.boothId === booking.boothId && b.status === "approved")
       .flatMap((b) =>

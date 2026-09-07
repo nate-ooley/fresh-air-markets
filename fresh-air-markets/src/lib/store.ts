@@ -1,7 +1,7 @@
 import { Account, Booth, Booking, BoothWithAvailability, InquiryInput } from "./types";
 
 export type ApproveResult =
-  | { ok: true; booking: Booking }
+  | { ok: true; booking: Booking; alreadyApproved?: boolean }
   | { ok: false; conflicts: { date: string; businessName: string }[] };
 
 export interface Store {

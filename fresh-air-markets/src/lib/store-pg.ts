@@ -283,6 +283,8 @@ export class PgStore implements Store {
         `${BOOKING_SELECT} WHERE b.market_id = $1 AND b.id = $2 FOR UPDATE OF b`, [marketId, id]);
       if (!target[0]) return { ok: false, conflicts: [] };
       const booking = toBooking(target[0]);
+      if (booking.status !== "pending" && booking.status !== "approved") return { ok: false, conflicts: [] };
+      if (booking.status === "approved") return { ok: true, booking, alreadyApproved: true };
       // Different applications have different booking rows. Lock their shared
       // booth before checking availability so competing approvals serialize.
       // The next statement then sees the preceding approval's committed dates.

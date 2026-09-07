@@ -1,3 +1,4 @@
+import { readObjectBody } from "@/lib/request-body";
 import { randomUUID } from "crypto";
 import { NextRequest, NextResponse } from "next/server";
 import { getStore, slugify } from "@/lib/store";
@@ -12,7 +13,8 @@ const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 /** Create a Fresh Air account: license + seeded market + session, in one step. */
 export async function POST(req: NextRequest) {
-  const body = await req.json().catch(() => ({}));
+  const body = await readObjectBody(req);
+  if (!body) return NextResponse.json({ error: "A JSON object body is required." }, { status: 400 });
   const ownerName = String(body.ownerName ?? "").trim();
   const email = String(body.email ?? "").trim().toLowerCase();
   const password = String(body.password ?? "");
@@ -62,3 +64,4 @@ export async function POST(req: NextRequest) {
   res.cookies.set(SESSION_COOKIE, makeSessionToken(account.id), sessionCookieOptions());
   return res;
 }
+

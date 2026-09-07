@@ -1,8 +1,9 @@
+import { readObjectBody } from "@/lib/request-body";
 import { NextRequest, NextResponse } from "next/server";
 import { getStore } from "@/lib/store";
 import { bookableDates } from "@/lib/dates";
 import { syncBookingToGhl } from "@/lib/ghl";
-import { InquiryInput, VENDOR_CATEGORIES } from "@/lib/types";
+import { VENDOR_CATEGORIES } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 
@@ -15,12 +16,8 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ slu
   const account = await store.getAccountBySlug(slug);
   if (!account) return NextResponse.json({ error: "Market not found." }, { status: 404 });
 
-  let body: Partial<InquiryInput>;
-  try {
-    body = await req.json();
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON body." }, { status: 400 });
-  }
+  const body = await readObjectBody(req);
+  if (!body) return NextResponse.json({ error: "A JSON object body is required." }, { status: 400 });
 
   const errors: string[] = [];
   const name = String(body.name ?? "").trim();
@@ -73,3 +70,4 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ slu
 
   return NextResponse.json({ booking, totalPrice, ghlSynced }, { status: 201 });
 }
+

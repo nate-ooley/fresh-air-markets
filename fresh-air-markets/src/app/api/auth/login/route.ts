@@ -1,3 +1,4 @@
+import { readObjectBody } from "@/lib/request-body";
 import { NextRequest, NextResponse } from "next/server";
 import { getStore } from "@/lib/store";
 import { makeSessionToken, SESSION_COOKIE, sessionCookieOptions, verifyPassword } from "@/lib/auth";
@@ -6,7 +7,8 @@ import { toPublicAccount } from "@/lib/types";
 export const dynamic = "force-dynamic";
 
 export async function POST(req: NextRequest) {
-  const body = await req.json().catch(() => ({}));
+  const body = await readObjectBody(req);
+  if (!body) return NextResponse.json({ error: "A JSON object body is required." }, { status: 400 });
   const email = String(body.email ?? "").trim().toLowerCase();
   const password = String(body.password ?? "");
 
@@ -26,3 +28,4 @@ export async function DELETE() {
   res.cookies.delete(SESSION_COOKIE);
   return res;
 }
+
