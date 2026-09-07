@@ -6,7 +6,11 @@ import { test } from "node:test";
 // The test runner executes TypeScript tests as ESM, while the helper's local
 // extensionless imports are intentionally compiled to CommonJS for route tests.
 const require = createRequire(import.meta.url);
-const { handleApplicationDocumentIngress, handleApplicationDocumentScan } = require("../.test-build/application-document-ingress.js") as typeof import("../src/lib/application-document-ingress");
+const {
+  handleApplicationDocumentIngress,
+  handleApplicationDocumentScan,
+  handleHighLevelApplicationDocumentIngress,
+} = require("../.test-build/application-document-ingress.js") as typeof import("../src/lib/application-document-ingress");
 const { MAX_APPLICATION_DOCUMENT_BYTES } = require("../.test-build/application-document.js");
 
 const documentId = "11111111-1111-4111-8111-111111111111";
@@ -20,6 +24,7 @@ const scannerConfig = {
   secret: "qa-document-scanner-secret-with-at-least-32-characters",
   marketId: config.marketId,
 };
+const highLevelConfig = { ...config, seasonId: "2026-2027" };
 const firstBytes = Buffer.from("%PDF-1.7\n1 0 obj\n");
 const lastBytes = Buffer.from("\n%%EOF");
 
@@ -52,6 +57,16 @@ function request(value: unknown, secret = config.secret) {
     headers: { authorization: `Bearer ${secret}`, "content-type": "application/json" },
     body: JSON.stringify(value),
   });
+}
+
+function highLevelBody(patch: Record<string, unknown> = {}) {
+  const { applicationId: _applicationId, ...value } = body();
+  return {
+    ...value,
+    contactId: "qa-contact",
+    opportunityId: "qa-opportunity",
+    ...patch,
+  };
 }
 
 function capturedResult() {
@@ -149,6 +164,70 @@ test("document ingress distinguishes a harmless retry, a conflicting replay, and
   const unavailable = await handleApplicationDocumentIngress(request(body()), config, async () => { throw new Error("storage-password"); });
   assert.equal(unavailable.status, 503);
   assert.equal((await unavailable.text()).includes("storage-password"), false);
+});
+
+test("HighLevel document ingress resolves only the exact stored contact, opportunity, location, and season", async () => {
+  let resolved: unknown;
+  let received: unknown;
+  const response = await handleHighLevelApplicationDocumentIngress(request(highLevelBody({
+    // A caller-supplied portal ID must never select the target application.
+    applicationId: "33333333-3333-4333-8333-333333333333",
+  })), highLevelConfig, async input => {
+    resolved = input;
+    return { kind: "ready", applicationId };
+  }, async event => {
+    received = event;
+    return capturedResult();
+  });
+
+  assert.equal(response.status, 201);
+  assert.deepEqual(resolved, {
+    marketId: config.marketId,
+    locationId: config.locationId,
+    seasonId: highLevelConfig.seasonId,
+    contactId: "qa-contact",
+    opportunityId: "qa-opportunity",
+  });
+  assert.deepEqual(received, {
+    eventId: "qa-upload-event-1",
+    applicationId,
+    locationId: config.locationId,
+    marketId: config.marketId,
+    kind: "insurance",
+    submittedAt: "2026-09-07T20:00:00.000Z",
+    file: capturedResult().document.file,
+  });
+});
+
+test("HighLevel document ingress rejects cross-record identities before a write and fails closed for an absent application", async () => {
+  let resolves = 0;
+  let writes = 0;
+  const resolve = async () => { resolves++; return { kind: "ready" as const, applicationId }; };
+  const persist = async () => { writes++; return capturedResult(); };
+  assert.equal((await handleHighLevelApplicationDocumentIngress(
+    request(highLevelBody({ locationId: "other-location" })), highLevelConfig, resolve, persist,
+  )).status, 400);
+  assert.equal((await handleHighLevelApplicationDocumentIngress(
+    request(highLevelBody({ contactId: "not/a-valid-contact" })), highLevelConfig, resolve, persist,
+  )).status, 400);
+  assert.equal((await handleHighLevelApplicationDocumentIngress(
+    request(highLevelBody({ opportunityId: "" })), highLevelConfig, resolve, persist,
+  )).status, 400);
+  assert.equal(resolves, 0);
+  assert.equal(writes, 0);
+
+  const missing = await handleHighLevelApplicationDocumentIngress(
+    request(highLevelBody()), highLevelConfig, async () => ({ kind: "not_found" }), persist,
+  );
+  assert.equal(missing.status, 404);
+  assert.equal(writes, 0);
+
+  const unavailable = await handleHighLevelApplicationDocumentIngress(
+    request(highLevelBody()), highLevelConfig, async () => { throw new Error("database-password"); }, persist,
+  );
+  assert.equal(unavailable.status, 503);
+  assert.equal((await unavailable.text()).includes("database-password"), false);
+  assert.equal(writes, 0);
 });
 
 test("scanner callbacks are separately authenticated, exact-version bound, and keep stale or duplicate outcomes explicit", async () => {

@@ -10,6 +10,7 @@ const {
   persistApplicationDocumentSource,
   recordApplicationDocumentReview,
   recordApplicationDocumentScan,
+  resolveApplicationDocumentSourceTarget,
   retryApplicationDocumentOutbox,
 } = require('../../.test-build/application-document-pg.js');
 
@@ -413,6 +414,29 @@ test('outbox defers when its exact application has no stored opportunity and nev
   assert.equal(calls, 0);
   const [stored] = await first`SELECT status, last_error_code FROM fame_document_outbox`;
   assert.deepEqual(stored, { status: 'pending', last_error_code: 'document_identity_missing' });
+});
+
+test('HighLevel document source mapping resolves only the stored contact, opportunity, location, market, and season', async () => {
+  const identity = {
+    marketId,
+    locationId,
+    seasonId: '2026-2027',
+    contactId: 'qa-contact',
+    opportunityId: 'qa-opportunity',
+  };
+  assert.deepEqual(await resolveApplicationDocumentSourceTarget(identity, first), {
+    kind: 'ready', applicationId,
+  });
+  for (const patch of [
+    { marketId: 'qa-market-b' },
+    { locationId: 'other-location' },
+    { seasonId: '2027-2028' },
+    { contactId: 'other-contact' },
+    { opportunityId: 'other-opportunity' },
+  ]) {
+    assert.deepEqual(await resolveApplicationDocumentSourceTarget({ ...identity, ...patch }, first), { kind: 'not_found' });
+  }
+  assert.deepEqual(await resolveApplicationDocumentSourceTarget({ ...identity, opportunityId: 'not/a-valid-opportunity' }, first), { kind: 'not_found' });
 });
 
 test('an application can receive its first opportunity ID but cannot be reassigned to a newer opportunity', async () => {

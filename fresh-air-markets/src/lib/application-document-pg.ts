@@ -5,6 +5,7 @@ import {
   applicationDocumentScanFingerprint,
   applicationDocumentSourceFingerprint,
   documentReviewState,
+  validApplicationDocumentId,
   type ApplicationDocumentKind,
   type ApplicationDocumentSourceEvent,
   type DocumentReviewAction,
@@ -139,6 +140,23 @@ export interface ApplicationDocumentDeliveryTarget {
   documentKind: ApplicationDocumentKind;
   version: number;
 }
+
+/**
+ * Identity supplied by a HighLevel-bound transfer worker before it can attach
+ * a file to an internal application.  These are all stable IDs captured by
+ * the application handoff; this is deliberately not an email/name lookup.
+ */
+export interface ApplicationDocumentSourceTargetInput {
+  marketId: string;
+  locationId: string;
+  seasonId: string;
+  contactId: string;
+  opportunityId: string;
+}
+
+export type ApplicationDocumentSourceTargetResolution =
+  | { kind: "ready"; applicationId: string }
+  | { kind: "not_found" };
 
 export type ApplicationDocumentDeliveryTargetResolution =
   | { kind: "ready"; target: ApplicationDocumentDeliveryTarget }
@@ -853,6 +871,34 @@ export async function resolveApplicationDocumentDeliveryTarget(
       version: Number(row.version),
     },
   };
+}
+
+/**
+ * Resolve the one internal application that a HighLevel document-upload event
+ * may address.  The query is an exact equality match over IDs stored during
+ * the application handoff, so an upload can never fall back to a contact
+ * search, a name match, or the newest opportunity.
+ */
+export async function resolveApplicationDocumentSourceTarget(
+  input: ApplicationDocumentSourceTargetInput,
+  sql: Sql = configuredClient(),
+): Promise<ApplicationDocumentSourceTargetResolution> {
+  if (!validDeliveryIdentifier(input.marketId)
+    || !validDeliveryIdentifier(input.locationId)
+    || !validDeliveryIdentifier(input.seasonId)
+    || !validDeliveryIdentifier(input.contactId)
+    || !validDeliveryIdentifier(input.opportunityId)) return { kind: "not_found" };
+  const [application] = await sql<{ id: string }[]>`
+    SELECT id
+    FROM fame_applications
+    WHERE market_id = ${input.marketId}
+      AND location_id = ${input.locationId}
+      AND season_id = ${input.seasonId}
+      AND contact_id = ${input.contactId}
+      AND opportunity_id = ${input.opportunityId}`;
+  return application && validApplicationDocumentId(application.id)
+    ? { kind: "ready", applicationId: application.id }
+    : { kind: "not_found" };
 }
 
 function deliveryFailure(error: unknown, attempt: number): { code: string; delaySeconds: number } {

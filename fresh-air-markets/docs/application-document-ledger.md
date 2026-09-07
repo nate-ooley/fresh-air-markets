@@ -15,6 +15,16 @@ storage keys, invalid digests, and simple truncated/spoofed samples. The
 database stores the private storage key and digest, never raw document bytes or
 public source URLs.
 
+`transferPrivateApplicationDocument` is the worker primitive for that transfer.
+It requires a server-side `PrivateDocumentObjectStore` adapter and an
+authenticated byte stream, enforces the 10 MiB ceiling while bytes are moving,
+derives the digest and leading/trailing samples from those same bytes, and
+removes the private object after a rejected, interrupted, unconsumed, or
+failed transfer. It intentionally includes no cloud-storage provider,
+credential, public URL, or malware scanner. A deployment must supply one
+private storage adapter and invoke the primitive before it calls document
+ingress.
+
 A successful source event is still `pending_scan`. A trusted malware/deep-file
 scanner must call `recordApplicationDocumentScan` for the same current document
 version. Only `ready_for_review` documents can receive a manager decision.
@@ -72,11 +82,21 @@ canonical UTC; it does not accept a browser upload or a public file URL. `POST
 exact version-bound manager decision through `PATCH
 /api/admin/documents/:id/review` with an `Idempotency-Key`.
 
+For a HighLevel upload, use `POST /api/integrations/highlevel/documents`
+instead of accepting an internal `applicationId` from the source. It uses the
+same private transfer-worker credential and inspected file metadata, but the
+payload supplies only `contactId` and `opportunityId` alongside the configured
+location and season. The route resolves one existing `fame_applications` row
+by exact market, location, season, contact, and immutable opportunity ID before
+it writes any document record. A missing or substituted identity produces no
+ledger write, HighLevel search, message, or file exposure. It does not make the
+form's file storage private on its own; the worker must still transfer the
+source bytes into private object storage before calling either ingress route.
+
 Before enabling the route, the deployment still needs: an object-storage
-transfer worker, a malware/deep-file scanner, a HighLevel source-event mapper
-that passes an internal application ID, a provider adapter that consumes only
-the exact delivery envelope, an outbox delivery worker, migrations 001, 006
-and 008, and the five QA upload scenarios in the launch grid. The endpoints do
-not send email, update a HighLevel opportunity, or expose a document publicly;
-those downstream mappings need explicit implementation and QA evidence before
-L08 can be marked green.
+transfer worker, a malware/deep-file scanner, a provider adapter that consumes
+only the exact delivery envelope, an outbox delivery worker, migrations 001,
+006 and 008, and the five QA upload scenarios in the launch grid. The endpoints
+do not send email, update a HighLevel opportunity, or expose a document
+publicly; those downstream mappings need explicit implementation and QA
+evidence before L08 can be marked green.
