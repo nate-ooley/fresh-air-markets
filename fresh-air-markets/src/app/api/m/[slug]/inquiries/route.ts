@@ -19,6 +19,24 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ slu
   const body = await readObjectBody(req);
   if (!body) return NextResponse.json({ error: "A JSON object body is required." }, { status: 400 });
 
+  // Validate types before normalization: String(array/object) can otherwise turn
+  // malformed input into a seemingly valid vendor name, email or booth ID.
+  const textLimits: Record<string, number> = {
+    name: 200, businessName: 200, email: 254, phone: 40,
+    category: 100, boothId: 200, message: 2000,
+  };
+  for (const [field, limit] of Object.entries(textLimits)) {
+    const value = body[field];
+    if (value !== undefined && (typeof value !== "string" || value.trim().length > limit)) {
+      return NextResponse.json({ error: `${field} must be text of at most ${limit} characters.` }, { status: 400 });
+    }
+  }
+  const valid = bookableDates();
+  if (!Array.isArray(body.dates) || body.dates.length > valid.size ||
+      body.dates.some((date) => typeof date !== "string" || !valid.has(date))) {
+    return NextResponse.json({ error: "Select valid open market days." }, { status: 400 });
+  }
+
   const errors: string[] = [];
   const name = String(body.name ?? "").trim();
   const businessName = String(body.businessName ?? "").trim();
@@ -36,7 +54,6 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ slu
     errors.push("Please pick a vendor category.");
   if (dates.length === 0) errors.push("Select at least one market day.");
 
-  const valid = bookableDates();
   if (dates.some((d) => !valid.has(d))) errors.push("One or more selected dates are not open market days.");
 
   const booth = boothId ? await store.getBooth(account.id, boothId) : null;
@@ -70,4 +87,3 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ slu
 
   return NextResponse.json({ booking, totalPrice, ghlSynced }, { status: 201 });
 }
-
