@@ -129,7 +129,9 @@ test('simultaneous new upload events get a complete immutable version history wi
   const documents = await first`SELECT version, is_current, storage_key FROM fame_application_documents ORDER BY version`;
   assert.deepEqual(documents.map(row => Number(row.version)), Array.from({ length: 20 }, (_, index) => index + 1));
   assert.equal(documents.filter(row => row.is_current).length, 1);
-  assert.equal(documents.find(row => row.is_current).storage_key, 'documents/qa/insurance-v20.pdf');
+  const current = documents.find(row => row.is_current);
+  assert.ok(current);
+  assert.equal(current.storage_key, `documents/qa/insurance-v${current.version}.pdf`);
 });
 
 test('review cannot bypass scanning; exact scanner/reviewer retries enqueue only one result each', async () => {
@@ -203,7 +205,7 @@ test('a corrected resubmission blocks stale prior-version scan and approval, inc
   }, first);
   assert.deepEqual(blocked, { kind: 'awaiting_validation', validationState: 'rejected' });
   const documents = await first`SELECT version, is_current, validation_state, review_state FROM fame_application_documents ORDER BY version`;
-  assert.deepEqual(documents, [
+  assert.deepEqual(Array.from(documents), [
     { version: 1, is_current: false, validation_state: 'ready_for_review', review_state: 'submitted' },
     { version: 2, is_current: true, validation_state: 'rejected', review_state: 'submitted' },
   ]);
@@ -248,7 +250,7 @@ test('a queued v1 approval is fenced and retired when a newer current upload arr
   assert.deepEqual(result, { delivered: 1, deferred: 0, superseded: 3, stale: 0 });
   assert.deepEqual(delivered.map(payload => [payload.topic, payload.version]), [['document-submitted', 2]]);
   const retired = await first`SELECT topic, last_error_code FROM fame_document_outbox WHERE last_error_code = 'superseded' ORDER BY topic`;
-  assert.deepEqual(retired, [
+  assert.deepEqual(Array.from(retired), [
     { topic: 'document-ready-for-review', last_error_code: 'superseded' },
     { topic: 'document-review', last_error_code: 'superseded' },
     { topic: 'document-submitted', last_error_code: 'superseded' },

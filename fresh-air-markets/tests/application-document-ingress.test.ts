@@ -6,7 +6,7 @@ import { test } from "node:test";
 // The test runner executes TypeScript tests as ESM, while the helper's local
 // extensionless imports are intentionally compiled to CommonJS for route tests.
 const require = createRequire(import.meta.url);
-const { handleApplicationDocumentIngress, handleApplicationDocumentScan } = require("../.test-build/application-document-ingress.js");
+const { handleApplicationDocumentIngress, handleApplicationDocumentScan } = require("../.test-build/application-document-ingress.js") as typeof import("../src/lib/application-document-ingress");
 const { MAX_APPLICATION_DOCUMENT_BYTES } = require("../.test-build/application-document.js");
 
 const documentId = "11111111-1111-4111-8111-111111111111";
