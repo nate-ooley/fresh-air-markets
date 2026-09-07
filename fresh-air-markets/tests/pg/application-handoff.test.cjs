@@ -20,7 +20,10 @@ before(async () => {
   // The handoff migration depends only on accounts(id), not the rest of the portal schema.
   await first`CREATE TABLE IF NOT EXISTS accounts (id TEXT PRIMARY KEY)`;
   await first`INSERT INTO accounts (id) VALUES ('qa-market-a'), ('qa-market-b') ON CONFLICT DO NOTHING`;
-  await first.unsafe(fs.readFileSync(path.join(__dirname, '../../docs/migrations/001-application-handoff.sql'), 'utf8'));
+  // The migration contains BEGIN/COMMIT, so pin its entire script to one connection.
+  const migration = postgres(url.toString(), { max: 1, prepare: false });
+  try { await migration.unsafe(fs.readFileSync(path.join(__dirname, '../../docs/migrations/001-application-handoff.sql'), 'utf8')); }
+  finally { await migration.end(); }
 });
 beforeEach(async () => { await first`TRUNCATE fame_application_events, fame_applications`; });
 after(async () => { await first.end(); await second.end(); });
