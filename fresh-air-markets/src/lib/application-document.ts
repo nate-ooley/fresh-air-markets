@@ -171,7 +171,12 @@ export function validateApplicationDocumentUpload(input: DocumentUploadInspectio
   if (typeof input.sha256 !== "string" || !SHA256.test(input.sha256)) return { ok: false, code: "invalid_sha256" };
   if (!(input.firstBytes instanceof Uint8Array) || !(input.lastBytes instanceof Uint8Array)
     || input.firstBytes.byteLength > APPLICATION_DOCUMENT_SAMPLE_BYTES
-    || input.lastBytes.byteLength > APPLICATION_DOCUMENT_SAMPLE_BYTES) return { ok: false, code: "invalid_sample" };
+    || input.lastBytes.byteLength > APPLICATION_DOCUMENT_SAMPLE_BYTES
+    // A transfer worker cannot obtain a leading/trailing sample longer than
+    // the object it counted. Reject impossible metadata before it can enter
+    // the private-document ledger.
+    || input.firstBytes.byteLength > input.sizeBytes
+    || input.lastBytes.byteLength > input.sizeBytes) return { ok: false, code: "invalid_sample" };
   if (signatureType(input.firstBytes, input.lastBytes) !== contentType) return { ok: false, code: "signature_mismatch" };
   return {
     ok: true,

@@ -135,7 +135,8 @@ test("document ingress refuses spoofed signatures, noncanonical samples, and ove
   const spoofed = body({ file: { ...body().file as Record<string, unknown>, firstBytesBase64: Buffer.from("not a PDF").toString("base64") } });
   const noncanonical = body({ file: { ...body().file as Record<string, unknown>, firstBytesBase64: `${firstBytes.toString("base64")}\n` } });
   const oversized = body({ file: { ...body().file as Record<string, unknown>, sizeBytes: MAX_APPLICATION_DOCUMENT_BYTES + 1 } });
-  for (const value of [spoofed, noncanonical, oversized]) {
+  const impossibleSamples = body({ file: { ...body().file as Record<string, unknown>, sizeBytes: 1 } });
+  for (const value of [spoofed, noncanonical, oversized, impossibleSamples]) {
     assert.equal((await handleApplicationDocumentIngress(request(value), config, persist)).status, 400);
   }
   assert.equal(writes, 0);

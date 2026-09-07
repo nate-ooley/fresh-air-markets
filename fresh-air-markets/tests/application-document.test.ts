@@ -85,11 +85,13 @@ test("upload guard enforces a counted bounded object, private reference and dige
   const oversized = validateApplicationDocumentUpload(inspection({ sizeBytes: MAX_APPLICATION_DOCUMENT_BYTES + 1 }));
   const badDigest = validateApplicationDocumentUpload(inspection({ sha256: "not-a-digest" }));
   const unboundedSample = validateApplicationDocumentUpload(inspection({ firstBytes: new Uint8Array(APPLICATION_DOCUMENT_SAMPLE_BYTES + 1) }));
+  const impossibleSample = validateApplicationDocumentUpload(inspection({ sizeBytes: 1 }));
   assert.deepEqual(unsafeReference, { ok: false, code: "invalid_storage_key" });
   assert.deepEqual(empty, { ok: false, code: "invalid_size" });
   assert.deepEqual(oversized, { ok: false, code: "file_too_large" });
   assert.deepEqual(badDigest, { ok: false, code: "invalid_sha256" });
   assert.deepEqual(unboundedSample, { ok: false, code: "invalid_sample" });
+  assert.deepEqual(impossibleSample, { ok: false, code: "invalid_sample" });
 });
 
 test("document source event binds a validated upload to one configured market/location application", () => {
