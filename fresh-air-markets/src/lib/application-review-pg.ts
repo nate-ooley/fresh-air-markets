@@ -66,6 +66,7 @@ export interface ApplicationReviewOutboxMessage {
 export interface ApplicationReviewDispatchResult {
   delivered: number;
   deferred: number;
+  failed: number;
   stale: number;
 }
 
@@ -338,6 +339,7 @@ export async function markApplicationReviewOutboxDelivered(
     SET status = 'delivered', delivered_at = statement_timestamp(), locked_until = NULL,
         lease_token = NULL, last_error_code = NULL
     WHERE id = ${id} AND status = 'processing' AND lease_token = ${leaseToken}
+      AND locked_until > statement_timestamp()
     RETURNING id`;
   return rows.length === 1;
 }
@@ -361,15 +363,46 @@ export async function retryApplicationReviewOutbox(
         next_attempt_at = statement_timestamp() + (${delaySeconds} * interval '1 second'),
         locked_until = NULL, lease_token = NULL, last_error_code = ${errorCode}
     WHERE id = ${id} AND status = 'processing' AND lease_token = ${leaseToken}
+      AND locked_until > statement_timestamp()
+    RETURNING id`;
+  return rows.length === 1;
+}
+
+/**
+ * Permanent identity, mapping, or provider rejections must be visible for an
+ * operator to correct. Failed rows are intentionally excluded from claims.
+ */
+export async function failApplicationReviewOutbox(
+  id: string,
+  leaseToken: string,
+  errorCode: string,
+  sql: Sql = configuredClient(),
+): Promise<boolean> {
+  if (!/^[a-z0-9_.:-]{1,64}$/.test(errorCode)) throw new Error("Outbox error code is invalid.");
+  const rows = await sql`
+    UPDATE fame_application_outbox
+    SET status = 'failed', failed_at = statement_timestamp(),
+        locked_until = NULL, lease_token = NULL, last_error_code = ${errorCode}
+    WHERE id = ${id} AND status = 'processing' AND lease_token = ${leaseToken}
+      AND locked_until > statement_timestamp()
     RETURNING id`;
   return rows.length === 1;
 }
 
 export type ApplicationReviewDelivery = (message: ApplicationReviewOutboxMessage) => Promise<void>;
 
-function deliveryFailure(error: unknown, attempt: number): { code: string; delaySeconds: number } {
+const TERMINAL_REVIEW_DELIVERY_CODES = new Set([
+  "ghl_config_missing",
+  "ghl_identity_mismatch",
+  "ghl_pipeline_mismatch",
+  "ghl_rejected",
+  "ghl_stage_diverged",
+  "ghl_status_diverged",
+]);
+
+function deliveryFailure(error: unknown, attempt: number): { code: string; delaySeconds: number; terminal: boolean } {
   const fallback = Math.min(3600, 30 * 2 ** Math.min(attempt - 1, 6));
-  if (!error || typeof error !== "object") return { code: "delivery_failed", delaySeconds: fallback };
+  if (!error || typeof error !== "object") return { code: "delivery_failed", delaySeconds: fallback, terminal: false };
   const candidate = error as { code?: unknown; retryAfterSeconds?: unknown };
   const code = typeof candidate.code === "string" && /^[a-z0-9_.:-]{1,64}$/.test(candidate.code)
     ? candidate.code
@@ -380,7 +413,7 @@ function deliveryFailure(error: unknown, attempt: number): { code: string; delay
     && Number(retryAfterSeconds) <= 3600
     ? Number(retryAfterSeconds)
     : fallback;
-  return { code, delaySeconds };
+  return { code, delaySeconds, terminal: TERMINAL_REVIEW_DELIVERY_CODES.has(code) };
 }
 
 async function dispatchClaimedApplicationReviewOutbox(
@@ -390,6 +423,7 @@ async function dispatchClaimedApplicationReviewOutbox(
 ): Promise<ApplicationReviewDispatchResult> {
   let delivered = 0;
   let deferred = 0;
+  let failed = 0;
   let stale = 0;
   for (const job of jobs) {
     try {
@@ -398,11 +432,14 @@ async function dispatchClaimedApplicationReviewOutbox(
       else stale++;
     } catch (error) {
       const failure = deliveryFailure(error, job.attempt);
-      if (await retryApplicationReviewOutbox(job.id, job.leaseToken, failure.code, failure.delaySeconds, sql)) deferred++;
+      if (failure.terminal) {
+        if (await failApplicationReviewOutbox(job.id, job.leaseToken, failure.code, sql)) failed++;
+        else stale++;
+      } else if (await retryApplicationReviewOutbox(job.id, job.leaseToken, failure.code, failure.delaySeconds, sql)) deferred++;
       else stale++;
     }
   }
-  return { delivered, deferred, stale };
+  return { delivered, deferred, failed, stale };
 }
 
 /**

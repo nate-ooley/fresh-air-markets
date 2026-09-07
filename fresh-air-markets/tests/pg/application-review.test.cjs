@@ -37,6 +37,7 @@ before(async () => {
   try {
     await migration.unsafe(fs.readFileSync(path.join(__dirname, '../../docs/migrations/001-application-handoff.sql'), 'utf8'));
     await migration.unsafe(fs.readFileSync(path.join(__dirname, '../../docs/migrations/004-application-review-outbox.sql'), 'utf8'));
+    await migration.unsafe(fs.readFileSync(path.join(__dirname, '../../docs/migrations/010-application-review-terminal-state.sql'), 'utf8'));
   } finally {
     await migration.end();
   }
@@ -165,6 +166,7 @@ test('outbox leases prevent duplicate delivery and recover safely after worker f
   assert.equal(jobs.length, 1);
   const original = jobs[0];
   await first`UPDATE fame_application_outbox SET locked_until = statement_timestamp() - interval '1 second' WHERE id = ${original.id}`;
+  assert.equal(await markApplicationReviewOutboxDelivered(original.id, original.leaseToken, first), false);
   const [replacement] = await claimApplicationReviewOutbox(1, 30, second);
   assert.ok(replacement);
   assert.notEqual(replacement.leaseToken, original.leaseToken);
@@ -173,20 +175,38 @@ test('outbox leases prevent duplicate delivery and recover safely after worker f
   await first`UPDATE fame_application_outbox SET next_attempt_at = statement_timestamp() - interval '1 second' WHERE id = ${replacement.id}`;
   const received = [];
   const failed = await dispatchApplicationReviewOutbox(async () => { throw new Error('private upstream diagnostic'); }, { sql: first });
-  assert.deepEqual(failed, { delivered: 0, deferred: 1, stale: 0 });
+  assert.deepEqual(failed, { delivered: 0, deferred: 1, failed: 0, stale: 0 });
   const [afterFailure] = await first`SELECT attempts, last_error_code, next_attempt_at FROM fame_application_outbox WHERE id = ${replacement.id}`;
   assert.equal(afterFailure.last_error_code, 'delivery_failed');
   await first`UPDATE fame_application_outbox SET next_attempt_at = statement_timestamp() - interval '1 second' WHERE id = ${replacement.id}`;
   const success = await dispatchApplicationReviewOutbox(async job => { received.push(job); }, { sql: second });
-  assert.deepEqual(success, { delivered: 1, deferred: 0, stale: 0 });
+  assert.deepEqual(success, { delivered: 1, deferred: 0, failed: 0, stale: 0 });
   assert.equal(received.length, 1);
   assert.equal(received[0].payload.applicationId, application.applicationId);
   assert.equal(received[0].payload.opportunityId, application.opportunityId);
-  assert.deepEqual(await dispatchApplicationReviewOutbox(async () => { throw new Error('must not run'); }, { sql: first }), { delivered: 0, deferred: 0, stale: 0 });
+  assert.deepEqual(await dispatchApplicationReviewOutbox(async () => { throw new Error('must not run'); }, { sql: first }), { delivered: 0, deferred: 0, failed: 0, stale: 0 });
   const [stored] = await first`SELECT status, attempts, delivered_at FROM fame_application_outbox WHERE id = ${replacement.id}`;
   assert.equal(stored.status, 'delivered');
   assert.ok(stored.attempts >= 4);
   assert.ok(stored.delivered_at);
+});
+
+test('a permanent HighLevel mapping failure is terminal, visible, and never replayed by the scheduler', async () => {
+  const application = await seedApplication();
+  assert.equal((await recordApplicationReview(decision(application), first)).kind, 'applied');
+  const terminal = await dispatchApplicationReviewOutbox(async () => {
+    const error = new Error('stage changed outside the review workflow');
+    error.code = 'ghl_stage_diverged';
+    throw error;
+  }, { sql: first });
+  assert.deepEqual(terminal, { delivered: 0, deferred: 0, failed: 1, stale: 0 });
+  const [stored] = await first`SELECT status, last_error_code, failed_at FROM fame_application_outbox`;
+  assert.equal(stored.status, 'failed');
+  assert.equal(stored.last_error_code, 'ghl_stage_diverged');
+  assert.ok(stored.failed_at);
+  assert.deepEqual(await dispatchApplicationReviewOutbox(async () => { throw new Error('must not run'); }, { sql: second }), {
+    delivered: 0, deferred: 0, failed: 0, stale: 0,
+  });
 });
 
 test('an immediate exact-job delivery and a concurrent scheduler sweep claim one job and make one provider call', async () => {

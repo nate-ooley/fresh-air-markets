@@ -131,7 +131,11 @@ test('a separate event for the same verified source file keeps the approved vers
   const duplicate = await persistApplicationDocumentSource(source({
     eventId: 'qa-document-event-same-file',
     submittedAt: '2026-09-07T20:00:00.000Z',
-    file: { ...source().file, storageKey: 'documents/qa/retransferred-insurance-v1.pdf' },
+    file: {
+      ...source().file,
+      sourceFileId: 'qa-file-retransferred-v1',
+      storageKey: 'documents/qa/retransferred-insurance-v1.pdf',
+    },
   }), second);
   assert.equal(duplicate.kind, 'duplicate');
   if (duplicate.kind !== 'duplicate') return;

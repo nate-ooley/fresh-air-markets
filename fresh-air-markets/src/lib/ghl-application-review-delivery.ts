@@ -76,6 +76,7 @@ interface OpportunityIdentity {
   contactId: string;
   pipelineId: string;
   pipelineStageId: string;
+  status: "open" | "won" | "lost" | "abandoned";
   locationId?: string;
 }
 
@@ -105,9 +106,11 @@ function opportunityFromResponse(body: Record<string, unknown> | null): Opportun
   const contactId = value(candidate, "contactId", "contact_id");
   const pipelineId = value(candidate, "pipelineId", "pipeline_id");
   const pipelineStageId = value(candidate, "pipelineStageId", "pipeline_stage_id");
+  const status = value(candidate, "status", "status");
   const locationId = value(candidate, "locationId", "location_id");
   return id && contactId && pipelineId && pipelineStageId
-    ? { id, contactId, pipelineId, pipelineStageId, locationId }
+    && (status === "open" || status === "won" || status === "lost" || status === "abandoned")
+    ? { id, contactId, pipelineId, pipelineStageId, status, locationId }
     : null;
 }
 
@@ -156,7 +159,7 @@ function exactOpportunity(
   if (!opportunity
     || opportunity.id !== message.payload.opportunityId
     || opportunity.contactId !== message.payload.contactId
-    || (opportunity.locationId !== undefined && opportunity.locationId !== message.payload.locationId)) {
+    || opportunity.locationId !== message.payload.locationId) {
     throw new ApplicationReviewDeliveryError("ghl_identity_mismatch", "HighLevel opportunity identity did not match the review record.");
   }
   if (opportunity.pipelineId !== config.pipelineId) {
@@ -190,11 +193,19 @@ export async function deliverApplicationReviewToGhl(
   config: ApplicationReviewDeliveryConfig,
   transport: FetchTransport = fetch,
 ): Promise<void> {
+  if (message.payload.locationId !== config.locationId) {
+    throw new ApplicationReviewDeliveryError("ghl_identity_mismatch", "Review location did not match the HighLevel configuration.");
+  }
   const targetStageId = config.stageForOutcome[outcomeFor(message)];
   const before = await getExactOpportunity(message, config, transport);
   if (before.pipelineStageId === targetStageId) return;
   if (before.pipelineStageId !== config.reviewStageId) {
     throw new ApplicationReviewDeliveryError("ghl_stage_diverged", "HighLevel opportunity was not in the configured review stage.");
+  }
+  // An application review changes a stage; it must never reopen an
+  // opportunity that an operator closed while this record was queued.
+  if (before.status !== "open") {
+    throw new ApplicationReviewDeliveryError("ghl_status_diverged", "HighLevel opportunity was not open for application review.");
   }
 
   const update = await request(transport, config, `/opportunities/${encodeURIComponent(message.payload.opportunityId)}`, {
@@ -202,13 +213,13 @@ export async function deliverApplicationReviewToGhl(
     body: JSON.stringify({
       pipelineId: config.pipelineId,
       pipelineStageId: targetStageId,
-      status: "open",
+      status: before.status,
     }),
   });
   if (!update.ok) throw providerError(update);
 
   const after = await getExactOpportunity(message, config, transport);
-  if (after.pipelineStageId !== targetStageId) {
+  if (after.pipelineStageId !== targetStageId || after.status !== before.status) {
     throw new ApplicationReviewDeliveryError("ghl_stage_diverged", "HighLevel did not confirm the requested review stage.");
   }
 }

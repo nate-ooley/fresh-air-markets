@@ -63,7 +63,9 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
     // When delivery is configured, try only this committed outbox item right
     // away; the authenticated worker route owns later retry/recovery.
     let delivery: "delivered" | "queued" = "queued";
-    if (result.kind === "applied" && applicationReviewDeliveryConfigured(process.env)) {
+    if ((result.kind === "applied" || result.kind === "duplicate")
+      && result.outboxId
+      && applicationReviewDeliveryConfigured(process.env)) {
       try {
         const config = readApplicationReviewDeliveryConfig(process.env);
         const dispatched = await dispatchApplicationReviewOutboxById(

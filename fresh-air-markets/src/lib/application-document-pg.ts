@@ -443,9 +443,9 @@ export async function persistApplicationDocumentSource(
     // Source systems can deliver the same uploaded file more than once with
     // different webhook event IDs. Bind that later event to its immutable
     // document instead of creating a new pending version that could displace
-    // an already reviewed certificate. Storage keys may differ when a worker
-    // retransfers the same source file, so stable source identity plus the
-    // verified object properties are the comparison boundary.
+    // an already reviewed certificate. A source system can assign a new file
+    // ID or storage key when it retries the exact same bytes, so the verified
+    // content type, size, and digest are the duplicate boundary here.
     const [existingDocument] = await tx<DocumentRow[]>`
       SELECT id, application_id, market_id, kind, version, source_event_id, source_file_id,
              storage_key, filename, content_type, size_bytes, content_sha256,
@@ -454,7 +454,6 @@ export async function persistApplicationDocumentSource(
       WHERE application_id = ${application.id}
         AND market_id = ${application.market_id}
         AND kind = ${event.kind}
-        AND source_file_id = ${event.file.sourceFileId}
         AND content_type = ${event.file.contentType}
         AND size_bytes = ${event.file.sizeBytes}
         AND content_sha256 = ${event.file.sha256}

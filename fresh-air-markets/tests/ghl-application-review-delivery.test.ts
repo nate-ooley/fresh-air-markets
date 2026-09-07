@@ -48,6 +48,7 @@ function opportunity(stage: string, patch: Record<string, unknown> = {}): Respon
       locationId: env.GHL_LOCATION_ID,
       pipelineId: env.GHL_APPLICATION_PIPELINE_ID,
       pipelineStageId: stage,
+      status: "open",
       ...patch,
     },
   });
@@ -93,7 +94,7 @@ test("each review result maps only to its configured HighLevel stage", async () 
 });
 
 test("identity and pipeline mismatches fail before a HighLevel PUT", async () => {
-  for (const patch of [{ contactId: "another_contact" }, { pipelineId: "another_pipeline" }, { locationId: "another_location" }]) {
+  for (const patch of [{ id: "another_opportunity" }, { contactId: "another_contact" }, { pipelineId: "another_pipeline" }, { locationId: "another_location" }, { locationId: undefined }]) {
     const script = scripted([opportunity(env.GHL_APPLICATION_REVIEW_STAGE_ID, patch)]);
     await assert.rejects(
       () => deliverApplicationReviewToGhl(message(), config, script.transport),
@@ -102,6 +103,13 @@ test("identity and pipeline mismatches fail before a HighLevel PUT", async () =>
     );
     assert.equal(script.calls.length, 1);
   }
+  const wrongConfiguredLocation = readApplicationReviewDeliveryConfig({ ...env, GHL_LOCATION_ID: "another_location" });
+  const script = scripted([]);
+  await assert.rejects(
+    () => deliverApplicationReviewToGhl(message(), wrongConfiguredLocation, script.transport),
+    error => error instanceof ApplicationReviewDeliveryError && error.code === "ghl_identity_mismatch",
+  );
+  assert.equal(script.calls.length, 0);
 });
 
 test("a target-stage preflight is a no-PUT recovery after a crash following a successful update", async () => {
@@ -109,6 +117,35 @@ test("a target-stage preflight is a no-PUT recovery after a crash following a su
   await deliverApplicationReviewToGhl(message(), config, script.transport);
   assert.equal(script.calls.length, 1);
   assert.equal(script.calls[0].init?.method, "GET");
+});
+
+test("an unexpected source stage or closed opportunity is never overwritten", async () => {
+  for (const source of [
+    opportunity("manual_other_stage"),
+    opportunity(env.GHL_APPLICATION_REVIEW_STAGE_ID, { status: "won" }),
+  ]) {
+    const script = scripted([source]);
+    await assert.rejects(
+      () => deliverApplicationReviewToGhl(message(), config, script.transport),
+      error => error instanceof ApplicationReviewDeliveryError
+        && ["ghl_stage_diverged", "ghl_status_diverged"].includes(error.code),
+    );
+    assert.equal(script.calls.length, 1);
+    assert.equal(script.calls[0].init?.method, "GET");
+  }
+});
+
+test("the post-update readback rejects a provider lifecycle-status change", async () => {
+  const script = scripted([
+    opportunity(env.GHL_APPLICATION_REVIEW_STAGE_ID),
+    opportunity(env.GHL_APPLICATION_APPROVED_STAGE_ID),
+    opportunity(env.GHL_APPLICATION_APPROVED_STAGE_ID, { status: "lost" }),
+  ]);
+  await assert.rejects(
+    () => deliverApplicationReviewToGhl(message(), config, script.transport),
+    error => error instanceof ApplicationReviewDeliveryError && error.code === "ghl_stage_diverged",
+  );
+  assert.equal(script.calls.length, 3);
 });
 
 test("rate limits and bad configuration remain safe and report bounded retry signals", async () => {

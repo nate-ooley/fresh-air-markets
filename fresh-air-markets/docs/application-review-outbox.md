@@ -26,8 +26,9 @@ audit trail.
 
 ## Transaction and recovery model
 
-Apply `docs/migrations/004-application-review-outbox.sql` after migration 001.
-It adds a portal-only review state to `fame_applications`, append-only
+Apply `docs/migrations/004-application-review-outbox.sql` after migration 001,
+then `docs/migrations/010-application-review-terminal-state.sql`. It adds a
+portal-only review state to `fame_applications`, append-only
 `fame_application_review_events`, and `fame_application_outbox`.
 
 One transaction changes the portal review state, records the decision, and
@@ -42,10 +43,13 @@ be overwritten. After a correction, another decision requires a newer captured
 source event.
 
 Workers use `claimApplicationReviewOutbox`, then either
-`markApplicationReviewOutboxDelivered` or `retryApplicationReviewOutbox` with
-the returned lease token. Expired leases can be reclaimed. A stale worker
-cannot mark a newer worker's job delivered. Only an allow-listed short error
-code is saved; raw provider responses remain out of the application ledger.
+`markApplicationReviewOutboxDelivered`, `retryApplicationReviewOutbox`, or
+`failApplicationReviewOutbox` with the returned unexpired lease token. Expired
+leases can be reclaimed. A stale worker cannot mark a newer worker's job
+delivered. Permanent identity, stage, status and provider-rejection failures
+become inspectable `failed` rows instead of retrying indefinitely; a corrected
+mapping must be explicitly requeued. Only an allow-listed short error code is
+saved; raw provider responses remain out of the application ledger.
 
 `dispatchApplicationReviewOutbox` takes an injected delivery function for a
 scheduled, authenticated integration worker. The included L06 adapter uses
@@ -59,12 +63,14 @@ search. It needs these private deployment variables:
 - `CRON_SECRET`, a 32+ character credential for the recovery endpoint.
 
 The manager review route first commits the review and outbox transaction, then
-tries that **same outbox ID** immediately. It reads the immutable opportunity
-ID, contact ID, pipeline and optional returned location ID before moving the
-record. It accepts only the configured Review stage, moves it to the stage for
-the saved decision, then reads it again to verify the destination. If a retry
-starts after a successful provider update, finding the target stage is a
-successful no-op rather than a second workflow trigger.
+tries that **same outbox ID** immediately. It checks the payload location
+against the configured location before any request, then reads the immutable
+opportunity ID, contact ID, pipeline and returned location ID before moving the
+record. It accepts only the configured Review stage on an open opportunity,
+moves it to the stage for the saved decision without changing lifecycle status,
+then reads it again to verify the destination and status. If a retry starts
+after a successful provider update, finding the target stage is a successful
+no-op rather than a second workflow trigger.
 
 `GET /api/internal/cron/application-review-outbox` is the recovery path. It
 requires `Authorization: Bearer <CRON_SECRET>`, returns counts only, and does
