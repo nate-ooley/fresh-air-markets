@@ -2,7 +2,7 @@
 
 Run `npm test` with Node 22. Tests compile the existing store and session modules into `.test-build`, then run directly against the code. They do not start a server, connect to HighLevel or Square, send messages, or change production data. The in-memory test vendors use the two addresses authorized for QA.
 
-The current 65 isolated tests cover:
+The current 70 isolated tests cover:
 
 - All 2,160 combinations of application, agreement, insurance, food-license requirement and food-license status in the test matrix. Only two complete states qualify for date selection.
 - $30 full-season, $35 four-or-more consecutive market dates and $40 standard pricing, multiplied by final booth quantity.
@@ -30,7 +30,7 @@ These are component/contract passes. Square transport is replaced with a test do
 
 The advisory booking rules are not yet integrated into the portal routes or HighLevel. These are code-level tests, not proof of live workflow behavior. Memory-store concurrency is not PostgreSQL concurrency. Production database verification, complete CHECK/RESERVE integration, public-form submissions, trigger-link routing, document signing, inbox delivery, duplicate workflow enrollment, Square payment outcomes and payment webhook replay must still be tested in their intended environments.
 
-The portal's current demo calendar and prices remain separate from the new Fresh Air rules. Do not use the demo portal as the production reservation/payment system until the calendar, CHECK/RESERVE and payment integration are complete.
+The configured Fresh Air account now uses its confirmed calendar. Other demo accounts and the existing booth-price calculation remain separate from the final Fresh Air pricing rules. Do not use the demo portal as the production reservation/payment system until the calendar, CHECK/RESERVE and payment integration are complete.
 
 ## Continuous integration
 
@@ -51,3 +51,8 @@ Five application-handoff database checks cover 100 concurrent duplicate deliveri
 ## PostgreSQL booth booking tests
 
 Five additional real-store scenarios verify twenty competing approvals and twenty concurrent replays, partial-date conflicts and cancellation/terminal-state handling, market isolation including inquiry creation, full rollback after a failed date insert, and committed state across fresh connections with inactive-booth rejection. The actual full schema initializer runs in a separate disposable schema. These tests exposed and now cover a schema-upgrade DDL parameter failure; inquiry writes also enforce active booth ownership inside the transaction. See docs/postgres-booking-verification.md for evidence scope and remaining production/CHECK/RESERVE gaps.
+
+
+## Configured Fresh Air calendar
+
+Five additional cases cover the 35-Saturday calendar, exact market/season configuration, New York date boundaries and retained admin history, real public/admin availability handlers, and inquiry acceptance/rejection before writes or CRM sync. Both server pages and all three relevant APIs share this calendar. Map selectors expose every supplied date. Browser verification, persisted production alignment and final pricing/quantity integration remain open; see docs/market-calendar-integration.md.

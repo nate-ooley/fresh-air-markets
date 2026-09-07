@@ -1,7 +1,7 @@
 /** Fresh Air North Port season. Source: saved HighLevel booking options,
  * with final Saturday May 29, 2027 explicitly confirmed by owner Sep 7, 2026.
  * This configuration is market-specific; it must not replace other tenants' calendars.
- * Wire to persisted market dates before launch; no production schema is changed here.
+ * Used by the configured market calendar; persisted production alignment remains a release check.
  */
 export const FRESH_AIR_SEASON_DATES = [
   "2026-10-03",

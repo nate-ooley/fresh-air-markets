@@ -2,7 +2,7 @@ import { readInquiryBody } from "@/lib/inquiry-body";
 import { consumeInquiryLimit, inquiryClient } from "@/lib/inquiry-rate-limit";
 import { NextRequest, NextResponse } from "next/server";
 import { getStore } from "@/lib/store";
-import { bookableDates } from "@/lib/dates";
+import { marketBookableDates } from "@/lib/market-calendar";
 import { syncBookingToGhl } from "@/lib/ghl";
 import { VENDOR_CATEGORIES } from "@/lib/types";
 
@@ -50,7 +50,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ slu
       return NextResponse.json({ error: `${field} must be text of at most ${limit} characters.` }, { status: 400 });
     }
   }
-  const valid = bookableDates();
+  const valid = marketBookableDates(account.id);
   if (!Array.isArray(body.dates) || body.dates.length > valid.size ||
       body.dates.some((date) => typeof date !== "string" || !valid.has(date))) {
     return NextResponse.json({ error: "Select valid open market days." }, { status: 400 });

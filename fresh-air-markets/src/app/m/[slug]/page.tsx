@@ -1,5 +1,5 @@
 import { notFound } from "next/navigation";
-import { upcomingWeekends } from "@/lib/dates";
+import { marketWeekends } from "@/lib/market-calendar";
 import { getStore } from "@/lib/store";
 import MarketBooking from "@/components/MarketBooking";
 
@@ -13,9 +13,10 @@ export default async function MarketPage({ params }: { params: Promise<{ slug: s
   if (!account) notFound();
   return (
     <MarketBooking
-      weekends={upcomingWeekends()}
+      weekends={marketWeekends(account.id)}
       slug={account.slug}
       marketName={account.marketName}
     />
   );
 }
+

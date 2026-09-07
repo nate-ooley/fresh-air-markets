@@ -90,21 +90,18 @@ export default function MarketBooking({ weekends, slug, marketName }: MarketBook
               <strong>{weekend?.label}</strong>.
             </p>
           </div>
-          <div className="flex flex-wrap gap-2">
-            {weekends.slice(0, 5).map((w) => (
-              <button
-                key={w.key}
-                onClick={() => setViewedWeekend(w.key)}
-                className={`rounded-full px-4 py-2 text-sm font-semibold transition ${
-                  w.key === viewedWeekend
-                    ? "bg-pine text-cream shadow"
-                    : "bg-parchment text-pine hover:bg-pine/10"
-                }`}
-              >
-                {w.label}
-              </button>
-            ))}
-          </div>
+          <label className="flex items-center gap-2 text-sm font-semibold text-pine">
+            Market date
+            <select
+              value={viewedWeekend}
+              onChange={(event) => setViewedWeekend(event.target.value)}
+              disabled={weekends.length === 0}
+              className="rounded-xl bg-parchment px-4 py-2 ring-1 ring-pine/20"
+            >
+              {weekends.length === 0 && <option value="">No upcoming market dates</option>}
+              {weekends.map((w) => <option key={w.key} value={w.key}>{w.label}</option>)}
+            </select>
+          </label>
         </div>
 
         <div className="grid gap-8 lg:grid-cols-[1fr_380px]">

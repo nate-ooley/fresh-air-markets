@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getStore } from "@/lib/store";
-import { bookableDates } from "@/lib/dates";
+import { marketBookableDates } from "@/lib/market-calendar";
 import { getSessionAccountId } from "@/lib/auth";
 import { toPublicAccount } from "@/lib/types";
 
@@ -14,7 +14,7 @@ export async function GET(req: NextRequest) {
   const account = await store.getAccountById(accountId);
   if (!account) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-  const valid = bookableDates();
+  const valid = marketBookableDates(account.id, process.env, new Date(), true);
   const dates = (req.nextUrl.searchParams.get("dates") ?? "")
     .split(",")
     .filter((d) => valid.has(d));
@@ -24,3 +24,4 @@ export async function GET(req: NextRequest) {
   ]);
   return NextResponse.json({ account: toPublicAccount(account), booths, bookings });
 }
+
