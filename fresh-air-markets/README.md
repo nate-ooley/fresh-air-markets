@@ -81,12 +81,16 @@ See `.env.example`. Summary:
 
 ## Deploying on Vercel
 
-1. Import the repo in Vercel and set **Root Directory** to `farmers-market/`.
+1. Import the repo in Vercel and set **Root Directory** to `fresh-air-markets/`.
 2. (Optional but recommended) Storage → Create Database → **Neon Postgres**;
-   Vercel injects `DATABASE_URL` automatically. Tables create, migrate, and
-   seed themselves on the first request.
+   Vercel injects `DATABASE_URL` automatically. Base booking tables seed on
+   first request, while reviewed integration migrations are applied separately.
 3. Set `AUTH_SECRET` and your `GHL_API_TOKEN` + `GHL_LOCATION_ID` env vars.
 4. Deploy.
+
+For the Fresh Air L06–L08 workflows, follow the exact migration, private
+environment-variable, HighLevel event-mapping and QA evidence steps in
+[`docs/l06-l08-deployment-qa-runbook.md`](docs/l06-l08-deployment-qa-runbook.md).
 
 ## Architecture
 
