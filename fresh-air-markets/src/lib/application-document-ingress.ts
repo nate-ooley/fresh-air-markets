@@ -48,11 +48,15 @@ function authorized(request: Request, secret: string): boolean {
 async function readObject(request: Request, maximumBytes: number): Promise<Record<string, unknown> | null | "too_large"> {
   const declared = request.headers.get("content-length");
   if (declared && /^\d+$/.test(declared) && Number(declared) > maximumBytes) return "too_large";
-  const reader = request.body?.getReader();
-  if (!reader) return null;
+  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
   const chunks: Uint8Array[] = [];
   let bytes = 0;
   try {
+    // getReader itself throws for a body an intermediary has already locked.
+    // Treat that exactly like malformed input instead of escaping a route's
+    // safe 400 response path.
+    reader = request.body?.getReader();
+    if (!reader) return null;
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
@@ -68,10 +72,10 @@ async function readObject(request: Request, maximumBytes: number): Promise<Recor
       ? parsed as Record<string, unknown>
       : null;
   } catch {
-    await reader.cancel().catch(() => {});
+    await reader?.cancel().catch(() => {});
     return null;
   } finally {
-    reader.releaseLock();
+    reader?.releaseLock();
   }
 }
 

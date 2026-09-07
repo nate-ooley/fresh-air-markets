@@ -126,12 +126,13 @@ test('simultaneous new upload events get a complete immutable version history wi
     },
   }), index % 2 ? first : second)));
   assert.equal(results.filter(result => result.kind === 'captured').length, 20);
-  const documents = await first`SELECT version, is_current, storage_key FROM fame_application_documents ORDER BY version`;
+  const documents = await first`SELECT version, is_current, storage_key, source_event_id FROM fame_application_documents ORDER BY version`;
   assert.deepEqual(documents.map(row => Number(row.version)), Array.from({ length: 20 }, (_, index) => index + 1));
   assert.equal(documents.filter(row => row.is_current).length, 1);
   const current = documents.find(row => row.is_current);
   assert.ok(current);
-  assert.equal(current.storage_key, `documents/qa/insurance-v${current.version}.pdf`);
+  const submittedIndex = current.source_event_id.replace('qa-document-event-', '');
+  assert.equal(current.storage_key, `documents/qa/insurance-v${submittedIndex}.pdf`);
 });
 
 test('review cannot bypass scanning; exact scanner/reviewer retries enqueue only one result each', async () => {

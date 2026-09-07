@@ -223,6 +223,30 @@ export function buildApplicationDocumentSourceEvent(
     || !validApplicationDocumentSourceId(config.marketId)
     || !validApplicationDocumentSourceId(config.locationId)
     || !isValidatedUpload(input.file)) return null;
+  // The transfer worker requires a timezone-bearing RFC3339 string, then
+  // normalizes it to UTC. Date() otherwise turns values such as `null` and
+  // `0` into legitimate-looking 1970 timestamps when an untyped webhook
+  // reaches here. Validate the local components too: Date() normalizes an
+  // impossible day such as February 31 instead of rejecting it.
+  if (typeof input.submittedAt !== "string") return null;
+  const timestamp = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?(Z|[+-]\d{2}:\d{2})$/.exec(input.submittedAt);
+  if (!timestamp) return null;
+  const [, yearText, monthText, dayText, hourText, minuteText, secondText, fractionText = "", offset] = timestamp;
+  const year = Number(yearText);
+  const month = Number(monthText);
+  const day = Number(dayText);
+  const hour = Number(hourText);
+  const minute = Number(minuteText);
+  const second = Number(secondText);
+  const milliseconds = Number(fractionText.padEnd(3, "0"));
+  if (month < 1 || month > 12 || day < 1 || hour > 23 || minute > 59 || second > 59) return null;
+  if (offset !== "Z") {
+    const [offsetHourText, offsetMinuteText] = offset.slice(1).split(":");
+    if (Number(offsetHourText) > 23 || Number(offsetMinuteText) > 59) return null;
+  }
+  const local = new Date(Date.UTC(year, month - 1, day, hour, minute, second, milliseconds));
+  if (local.getUTCFullYear() !== year || local.getUTCMonth() !== month - 1 || local.getUTCDate() !== day
+    || local.getUTCHours() !== hour || local.getUTCMinutes() !== minute || local.getUTCSeconds() !== second) return null;
   const submittedAt = new Date(input.submittedAt);
   if (Number.isNaN(submittedAt.valueOf())) return null;
   return { ...input, marketId: config.marketId, submittedAt: submittedAt.toISOString() };

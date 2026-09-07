@@ -113,6 +113,22 @@ test("document ingress rejects bad authorization, configuration, location, and m
   assert.equal(writes, 0);
 });
 
+test("document ingress rejects untyped or noncanonical timestamps and safely handles a locked request body", async () => {
+  let writes = 0;
+  const persist = async () => { writes++; return capturedResult(); };
+  for (const submittedAt of [null, 0, true, "2026-09-07T20:00:00", "2026-02-31T20:00:00.000Z"]) {
+    assert.equal((await handleApplicationDocumentIngress(request(body({ submittedAt })), config, persist)).status, 400);
+  }
+  const locked = request(body());
+  const lock = locked.body?.getReader();
+  try {
+    assert.equal((await handleApplicationDocumentIngress(locked, config, persist)).status, 400);
+  } finally {
+    lock?.releaseLock();
+  }
+  assert.equal(writes, 0);
+});
+
 test("document ingress refuses spoofed signatures, noncanonical samples, and oversized transfers before persistence", async () => {
   let writes = 0;
   const persist = async () => { writes++; return capturedResult(); };

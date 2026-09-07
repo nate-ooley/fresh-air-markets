@@ -37,7 +37,8 @@ only a bounded JSON record from a trusted post-transfer worker and derives the
 market from server configuration. Its bearer secret is
 `DOCUMENT_INGRESS_WEBHOOK_SECRET`; the payload includes a private object key,
 stable source file ID, counted size, SHA-256 and bounded Base64 samples. It
-does not accept a browser upload or a public file URL. `POST
+uses a timezone-bearing RFC3339 `submittedAt` timestamp and stores it in
+canonical UTC; it does not accept a browser upload or a public file URL. `POST
 /api/integrations/documents/:id/scan` uses the separate
 `DOCUMENT_SCANNER_WEBHOOK_SECRET`, and a signed-in market session submits an
 exact version-bound manager decision through `PATCH
