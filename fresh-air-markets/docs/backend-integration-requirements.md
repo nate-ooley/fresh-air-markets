@@ -66,7 +66,9 @@ retrieves the merchant for the token and treats a nonblank configured value as
 an additional mismatch guard. The durable order ledger stores the verified
 merchant ID with each order. Set `SQUARE_WEBHOOK_SIGNATURE_KEY` and
 `SQUARE_WEBHOOK_URL` only after the deployed webhook route and its subscription
-are ready. The staged setup instructions are in
+are ready. For the protected QA Preview, keep Vercel Authentication enabled and
+use its dedicated automation-bypass query value in the exact stored webhook URL;
+Square signs that exact URL, including the query. The staged setup instructions are in
 [`square-sandbox-setup.md`](square-sandbox-setup.md).
 Square username/password stays in Square. It is not used as an API token.
 Prepared adapter: create hosted payment links with a stable reservation/revision idempotency key, integer USD cents, correct location and tipping disabled. It refuses expired, missing or zero-dollar requests. No live Square calls were made.

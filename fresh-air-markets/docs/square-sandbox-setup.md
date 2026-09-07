@@ -109,7 +109,7 @@ Keep `SQUARE_ENVIRONMENT=sandbox` and `SQUARE_ALLOW_LIVE_PAYMENTS=false` for
 every QA run. Do not reuse a Sandbox token, location, merchant, webhook key or
 webhook subscription in Production.
 
-## 5. Create the Sandbox webhook subscription after the route is ready
+## 5. Create the Sandbox webhook subscription without opening the Preview
 
 Complete this section only after the migration order in
 [square-checkout-ledger.md](./square-checkout-ledger.md) has been applied to
@@ -119,19 +119,33 @@ and `013-final-reservation-writer.sql`. The Preview deployment must contain
 the durable final-reservation and webhook handlers, and the exact URL must be
 reachable over HTTPS.
 
-1. Set `SQUARE_WEBHOOK_URL` in the same Preview branch to the exact stable
-   QA hostname plus `/api/payments/square/webhook`. Establish a stable Preview
-   alias or dedicated QA hostname first. Do not register a placeholder or a
-   changing deployment URL; Square signs the exact URL string.
-2. In Square Developer Console, keep **Sandbox** selected and open
+The current QA Preview is protected by Vercel Authentication. Keep that
+protection enabled. A Square webhook cannot sign in through Vercel, so use
+Vercel's **Protection Bypass for Automation** for this one external endpoint
+instead of sharing the Preview or disabling its protection. The bypass value is
+an external secret: never add it to source, GitHub, Asana, Linear, a browser
+recording, or chat.
+
+1. In **Vercel → Farmers Market → Settings → Deployment Protection**, create a
+   dedicated QA **Protection Bypass for Automation** secret. Leave Vercel
+   Authentication enabled for the Preview.
+2. Build the destination from the stable QA branch alias:
+   `https://farmers-market-git-codex-1670af-nateooley68-gmailcoms-projects.vercel.app/api/payments/square/webhook?x-vercel-protection-bypass=<Vercel-automation-secret>`.
+   Confirm the alias still resolves to the current QA branch before using it.
+3. Set that exact full destination as `SQUARE_WEBHOOK_URL` in the same
+   Preview branch. The Square subscription must use the exact same string,
+   including the query value: Square signs the configured notification URL.
+   Do not register a placeholder, a changing deployment URL, or a URL without
+   the protection bypass.
+4. In Square Developer Console, keep **Sandbox** selected and open
    **Webhooks → Subscriptions → Add subscription**.
-3. Name it `Farmers Market QA payments`, choose the current Square API version,
+5. Name it `Farmers Market QA payments`, choose the current Square API version,
    paste the exact `SQUARE_WEBHOOK_URL`, and select `payment.created` and
    `payment.updated`.
-4. Save the subscription. Open **Endpoint details → Signature key → Show**,
+6. Save the subscription. Open **Endpoint details → Signature key → Show**,
    then add the generated value as the sensitive Preview-only
    `SQUARE_WEBHOOK_SIGNATURE_KEY` value.
-5. Redeploy the Preview so the URL and signature key are loaded together, then
+7. Redeploy the Preview so the URL and signature key are loaded together, then
    send a Sandbox payment event and capture the durable receipt and exact order
    match.
 
@@ -141,6 +155,9 @@ currency before payment state changes. It must respond quickly with a `2xx`
 only after its receipt path succeeds. Square's [webhook overview](https://developer.squareup.com/docs/webhooks/overview)
 and [subscription guide](https://developer.squareup.com/docs/webhooks/step2subscribe)
 cover the Developer Console steps.
+
+Vercel documents the automation-bypass query method for third-party webhooks
+in its [Deployment Protection guide](https://vercel.com/docs/deployment-protection/methods-to-bypass-deployment-protection/protection-bypass-automation).
 
 ## 6. Run controlled Preview-only negative paths
 

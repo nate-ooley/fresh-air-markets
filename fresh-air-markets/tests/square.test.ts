@@ -4,6 +4,7 @@ import { createHmac } from "node:crypto";
 import {
   squareCheckoutConfig,
   squareConfig,
+  squareWebhookConfig,
   squareSandboxSetupConfig,
   verifySquareSandboxSetup,
   createSquareCheckout,
@@ -152,6 +153,16 @@ test("Square signature requires exact URL and raw body; malformed and Unicode si
   assert.equal(verifySquareWebhook(raw + " ", signature, config), false);
   assert.equal(verifySquareWebhook(raw, signature, { ...config, webhookUrl: config.webhookUrl + "/" }), false);
   for (const invalid of [null, "", "é".repeat(44), "A".repeat(43) + "="]) assert.equal(verifySquareWebhook(raw, invalid, config), false);
+});
+
+test("Square preserves a protected Preview automation query in its signed webhook URL", () => {
+  const webhookUrl = "https://farmers-market-qa.invalid/api/payments/square/webhook?x-vercel-protection-bypass=qa-bypass-token";
+  const protectedConfig = squareWebhookConfig({ ...settings, SQUARE_WEBHOOK_URL: webhookUrl });
+  const raw = '{"event_id":"qa-protected-preview"}';
+  const signature = createHmac("sha256", protectedConfig.webhookSignatureKey).update(webhookUrl + raw).digest("base64");
+  assert.equal(protectedConfig.webhookUrl, webhookUrl);
+  assert.equal(verifySquareWebhook(raw, signature, protectedConfig), true);
+  assert.equal(verifySquareWebhook(raw, signature, { ...protectedConfig, webhookUrl: "https://farmers-market-qa.invalid/api/payments/square/webhook" }), false);
 });
 
 test("Square official signature sample matches independently supplied expected value", () => {

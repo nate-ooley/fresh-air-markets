@@ -41,7 +41,7 @@ end-to-end result below.
 | Portal access | The same Preview has a QA-only `DATABASE_URL`, private `AUTH_SECRET`, and a signed-in QA manager account for the same market. | L18–L19 |
 | Database | The portal migration chain through `010`, then `011-square-payment-checkout-ledger.sql`, `012-square-webhook-events.sql`, `013-final-reservation-writer.sql`, and `014-square-payment-expiry.sql`, applied to the QA database in that order. | L18–L19 |
 | Reservation source | The final CHECK/RESERVE writer creates an immutable QA `fame_reservations` row. Do not seed a row directly and call that an end-to-end pass. | L18–L19 |
-| Webhook subscription | After L18 has a stable Preview URL, set the exact `SQUARE_WEBHOOK_URL` ending in `/api/payments/square/webhook`, create a **Sandbox-only** subscription for `payment.created` and `payment.updated`, then store its Preview-only `SQUARE_WEBHOOK_SIGNATURE_KEY`. | L19 |
+| Webhook subscription | Keep Vercel Preview protection enabled. On the protected stable QA alias, set `SQUARE_WEBHOOK_URL` to the exact webhook endpoint including a dedicated Vercel `x-vercel-protection-bypass` automation query value. Use that same exact string in the **Sandbox-only** Square subscription for `payment.created` and `payment.updated`, then store its Preview-only `SQUARE_WEBHOOK_SIGNATURE_KEY`. | L19 |
 | Negative-path harness | Preview-only `SQUARE_QA_*` controls with `VERCEL=1`, `VERCEL_ENV=preview`, Sandbox, and live payments disabled; a locally held signer secret; and one exact QA reservation/event target. The controls must be absent from Production. | L18-04, L18-05, L19-02–L19-05 |
 
 `SQUARE_MERCHANT_ID` is optional. The read-only verifier obtains the actual
@@ -112,8 +112,8 @@ environment:
    `014-square-payment-expiry.sql` in that order.
 3. The final CHECK/RESERVE writer that produces the immutable reservation used
    by the checkout route.
-4. A stable HTTPS Preview URL and the Sandbox-only Square subscription with
-   its matching signature key.
+4. A stable HTTPS Preview URL with a Vercel automation-bypass endpoint for
+   Square, plus the Sandbox-only subscription with its matching signature key.
 5. Preview-only QA fault controls and local signer configuration, removed after
    each case and never configured in Production.
 
