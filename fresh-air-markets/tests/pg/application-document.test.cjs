@@ -49,10 +49,10 @@ const source = (patch = {}) => ({
   ...patch,
 });
 
-async function insertApplication(sql = first) {
+async function insertApplication(sql = first, opportunityId = 'qa-opportunity') {
   await sql`
     INSERT INTO fame_applications (id, market_id, location_id, contact_id, season_id, opportunity_id)
-    VALUES (${applicationId}, ${marketId}, ${locationId}, 'qa-contact', '2026-2027', 'qa-opportunity')`;
+    VALUES (${applicationId}, ${marketId}, ${locationId}, 'qa-contact', '2026-2027', ${opportunityId})`;
 }
 
 before(async () => {
@@ -113,6 +113,77 @@ test('reusing a source event with changed file metadata conflicts without replac
     storage_key: 'documents/qa/insurance-v1.pdf',
     content_sha256: 'a'.repeat(64),
   });
+});
+
+test('a separate event for the same verified source file keeps the approved version and creates no duplicate submission job', async () => {
+  const firstVersion = await persistApplicationDocumentSource(source(), first);
+  assert.equal(firstVersion.kind, 'captured');
+  if (firstVersion.kind !== 'captured') return;
+  await recordApplicationDocumentScan({
+    documentId: firstVersion.document.id, marketId, expectedVersion: 1,
+    sourceEventId: 'qa-same-source-scan', outcome: 'clean', reason: '',
+  }, first);
+  await recordApplicationDocumentReview({
+    documentId: firstVersion.document.id, marketId, actorAccountId, expectedVersion: 1,
+    idempotencyKey: '12345678-1234-4234-8234-123456789012', action: 'approve', reason: '',
+  }, first);
+
+  const duplicate = await persistApplicationDocumentSource(source({
+    eventId: 'qa-document-event-same-file',
+    submittedAt: '2026-09-07T20:00:00.000Z',
+    file: { ...source().file, storageKey: 'documents/qa/retransferred-insurance-v1.pdf' },
+  }), second);
+  assert.equal(duplicate.kind, 'duplicate');
+  if (duplicate.kind !== 'duplicate') return;
+  assert.equal(duplicate.document.id, firstVersion.document.id);
+  assert.equal(duplicate.document.version, 1);
+  assert.equal(duplicate.document.isCurrent, true);
+  assert.equal(duplicate.document.reviewState, 'approved');
+
+  const documents = await first`SELECT version, is_current, review_state FROM fame_application_documents`;
+  assert.deepEqual(Array.from(documents), [{ version: 1, is_current: true, review_state: 'approved' }]);
+  const events = await first`SELECT event_id, document_id FROM fame_document_source_events ORDER BY event_id`;
+  assert.deepEqual(Array.from(events), [
+    { event_id: 'qa-document-event-1', document_id: firstVersion.document.id },
+    { event_id: 'qa-document-event-same-file', document_id: firstVersion.document.id },
+  ]);
+  const outbox = await first`SELECT topic FROM fame_document_outbox ORDER BY topic`;
+  assert.deepEqual(outbox.map(row => row.topic), [
+    'document-ready-for-review', 'document-review', 'document-submitted',
+  ]);
+});
+
+test('a delayed duplicate of an older source file cannot replace a later current document', async () => {
+  const firstVersion = await persistApplicationDocumentSource(source(), first);
+  assert.equal(firstVersion.kind, 'captured');
+  if (firstVersion.kind !== 'captured') return;
+  const secondVersion = await persistApplicationDocumentSource(source({
+    eventId: 'qa-document-event-2',
+    file: { ...source().file, sourceFileId: 'qa-file-2', storageKey: 'documents/qa/insurance-v2.pdf', sha256: 'b'.repeat(64) },
+  }), second);
+  assert.equal(secondVersion.kind, 'captured');
+  if (secondVersion.kind !== 'captured') return;
+
+  const delayedDuplicate = await persistApplicationDocumentSource(source({
+    eventId: 'qa-document-event-v1-delayed',
+    submittedAt: '2026-09-07T21:00:00.000Z',
+    file: { ...source().file, storageKey: 'documents/qa/retransferred-insurance-v1.pdf' },
+  }), first);
+  assert.equal(delayedDuplicate.kind, 'duplicate');
+  if (delayedDuplicate.kind !== 'duplicate') return;
+  assert.equal(delayedDuplicate.document.id, firstVersion.document.id);
+  assert.equal(delayedDuplicate.document.isCurrent, false);
+
+  const documents = await first`SELECT version, source_file_id, is_current FROM fame_application_documents ORDER BY version`;
+  assert.deepEqual(Array.from(documents), [
+    { version: 1, source_file_id: 'qa-file-1', is_current: false },
+    { version: 2, source_file_id: 'qa-file-2', is_current: true },
+  ]);
+  const outbox = await first`SELECT topic, payload->>'sourceEventId' AS source_event_id FROM fame_document_outbox WHERE topic = 'document-submitted' ORDER BY source_event_id`;
+  assert.deepEqual(Array.from(outbox), [
+    { topic: 'document-submitted', source_event_id: 'qa-document-event-1' },
+    { topic: 'document-submitted', source_event_id: 'qa-document-event-2' },
+  ]);
 });
 
 test('simultaneous new upload events get a complete immutable version history with one current document', async () => {
@@ -212,6 +283,66 @@ test('a corrected resubmission blocks stale prior-version scan and approval, inc
   ]);
 });
 
+test('only the current clean validation phase delivers before manager review', async () => {
+  const captured = await persistApplicationDocumentSource(source(), first);
+  assert.equal(captured.kind, 'captured');
+  if (captured.kind !== 'captured') return;
+  await recordApplicationDocumentScan({
+    documentId: captured.document.id, marketId, expectedVersion: 1,
+    sourceEventId: 'qa-clean-dispatch-scan', outcome: 'clean', reason: '',
+  }, first);
+
+  const delivered = [];
+  const result = await dispatchApplicationDocumentOutbox(async envelope => { delivered.push(envelope); }, { limit: 10, sql: first });
+  assert.deepEqual(result, { delivered: 1, deferred: 0, superseded: 1, stale: 0 });
+  assert.deepEqual(delivered.map(envelope => envelope.event.topic), ['document-ready-for-review']);
+  const retired = await first`SELECT topic, last_error_code FROM fame_document_outbox WHERE last_error_code = 'superseded'`;
+  assert.deepEqual(Array.from(retired), [{ topic: 'document-submitted', last_error_code: 'superseded' }]);
+});
+
+test('only the current rejected validation phase delivers while the document is still submitted', async () => {
+  const captured = await persistApplicationDocumentSource(source(), first);
+  assert.equal(captured.kind, 'captured');
+  if (captured.kind !== 'captured') return;
+  await recordApplicationDocumentScan({
+    documentId: captured.document.id, marketId, expectedVersion: 1,
+    sourceEventId: 'qa-rejected-dispatch-scan', outcome: 'rejected', reason: 'scanner_rejected',
+  }, first);
+
+  const delivered = [];
+  const result = await dispatchApplicationDocumentOutbox(async envelope => { delivered.push(envelope); }, { limit: 10, sql: first });
+  assert.deepEqual(result, { delivered: 1, deferred: 0, superseded: 1, stale: 0 });
+  assert.deepEqual(delivered.map(envelope => envelope.event.topic), ['document-validation-rejected']);
+  const retired = await first`SELECT topic, last_error_code FROM fame_document_outbox WHERE last_error_code = 'superseded'`;
+  assert.deepEqual(Array.from(retired), [{ topic: 'document-submitted', last_error_code: 'superseded' }]);
+});
+
+test('submission and validation jobs are retired after review, leaving only the exact review decision to deliver', async () => {
+  const captured = await persistApplicationDocumentSource(source(), first);
+  assert.equal(captured.kind, 'captured');
+  if (captured.kind !== 'captured') return;
+  await recordApplicationDocumentScan({
+    documentId: captured.document.id, marketId, expectedVersion: 1,
+    sourceEventId: 'qa-reviewed-dispatch-scan', outcome: 'clean', reason: '',
+  }, first);
+  await recordApplicationDocumentReview({
+    documentId: captured.document.id, marketId, actorAccountId, expectedVersion: 1,
+    idempotencyKey: 'f0f0f0f0-f0f0-40f0-80f0-f0f0f0f0f0f0', action: 'approve', reason: '',
+  }, first);
+
+  const delivered = [];
+  const result = await dispatchApplicationDocumentOutbox(async envelope => { delivered.push(envelope); }, { limit: 10, sql: first });
+  assert.deepEqual(result, { delivered: 1, deferred: 0, superseded: 2, stale: 0 });
+  assert.deepEqual(delivered.map(envelope => [envelope.event.topic, envelope.event.reviewState]), [
+    ['document-review', 'approved'],
+  ]);
+  const retired = await first`SELECT topic, last_error_code FROM fame_document_outbox WHERE last_error_code = 'superseded' ORDER BY topic`;
+  assert.deepEqual(Array.from(retired), [
+    { topic: 'document-ready-for-review', last_error_code: 'superseded' },
+    { topic: 'document-submitted', last_error_code: 'superseded' },
+  ]);
+});
+
 test('outbox delivery uses leases and retry does not create extra application document versions', async () => {
   const captured = await persistApplicationDocumentSource(source(), first);
   assert.equal(captured.kind, 'captured');
@@ -268,9 +399,10 @@ test('a queued v1 approval is fenced and retired when a newer current upload arr
 });
 
 test('outbox defers when its exact application has no stored opportunity and never calls a delivery adapter', async () => {
+  await first`DELETE FROM fame_applications WHERE id = ${applicationId}`;
+  await insertApplication(first, null);
   const captured = await persistApplicationDocumentSource(source(), first);
   assert.equal(captured.kind, 'captured');
-  await first`UPDATE fame_applications SET opportunity_id = NULL WHERE id = ${applicationId}`;
   let calls = 0;
   const result = await dispatchApplicationDocumentOutbox(async () => { calls++; }, { limit: 10, sql: first });
   assert.deepEqual(result, { delivered: 0, deferred: 1, superseded: 0, stale: 0 });

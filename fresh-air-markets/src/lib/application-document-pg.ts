@@ -276,11 +276,18 @@ function payloadMatchesCurrentDocument(
   validationState: DocumentValidationState,
   reviewState: DocumentReviewState,
 ): boolean {
-  if (payload.topic === "document-review") return reviewState === payload.reviewState;
-  if (payload.topic === "document-ready-for-review" || payload.topic === "document-validation-rejected") {
-    return validationState === payload.validationState;
+  switch (payload.topic) {
+    // A delayed received-file job must not reset a scan or review result.
+    case "document-submitted":
+      return validationState === "pending_scan" && reviewState === "submitted";
+    // A manager decision moves the document beyond the scanner notification,
+    // so late retries cannot send an obsolete review-ready/correction action.
+    case "document-ready-for-review":
+    case "document-validation-rejected":
+      return validationState === payload.validationState && reviewState === "submitted";
+    case "document-review":
+      return reviewState === payload.reviewState;
   }
-  return true;
 }
 
 function deliveryEvent(payload: ApplicationDocumentOutboxPayload): ApplicationDocumentDeliveryEvent {
@@ -431,6 +438,34 @@ export async function persistApplicationDocumentSource(
         WHERE location_id = ${event.locationId} AND event_id = ${event.eventId}`;
       if (!prior || prior.payload_hash !== payloadHash || !prior.document_id) return { kind: "conflict" };
       return { kind: "duplicate", document: await documentForSourceEvent(tx, prior.document_id) };
+    }
+
+    // Source systems can deliver the same uploaded file more than once with
+    // different webhook event IDs. Bind that later event to its immutable
+    // document instead of creating a new pending version that could displace
+    // an already reviewed certificate. Storage keys may differ when a worker
+    // retransfers the same source file, so stable source identity plus the
+    // verified object properties are the comparison boundary.
+    const [existingDocument] = await tx<DocumentRow[]>`
+      SELECT id, application_id, market_id, kind, version, source_event_id, source_file_id,
+             storage_key, filename, content_type, size_bytes, content_sha256,
+             validation_state, review_state, review_revision, is_current
+      FROM fame_application_documents
+      WHERE application_id = ${application.id}
+        AND market_id = ${application.market_id}
+        AND kind = ${event.kind}
+        AND source_file_id = ${event.file.sourceFileId}
+        AND content_type = ${event.file.contentType}
+        AND size_bytes = ${event.file.sizeBytes}
+        AND content_sha256 = ${event.file.sha256}
+      ORDER BY version DESC
+      LIMIT 1`;
+    if (existingDocument) {
+      await tx`
+        UPDATE fame_document_source_events
+        SET document_id = ${existingDocument.id}
+        WHERE location_id = ${event.locationId} AND event_id = ${event.eventId}`;
+      return { kind: "duplicate", document: documentRecord(existingDocument) };
     }
 
     const [last] = await tx<{ version: number }[]>`

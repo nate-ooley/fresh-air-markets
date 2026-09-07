@@ -11,6 +11,7 @@ Apply these migrations to the reviewed portal database in order:
 1. `001-application-handoff.sql`
 2. `005-agreement-completion-outbox.sql`
 3. `007-agreement-completion-stage-outbox.sql`
+4. `009-agreement-stage-terminal-state.sql`
 
 Set these private server variables in the verified deployment:
 
@@ -77,6 +78,13 @@ using `Authorization: Bearer <CRON_SECRET>`. This endpoint returns aggregate
 counts only. Do not configure a production cron cadence until the Vercel plan
 supports the required frequency. No scheduler or email sender is enabled by
 this repository by itself.
+
+The worker only moves an opportunity that remains in the configured sent stage
+and has `open` status. It preserves that status in the stage update and verifies
+it again after the HighLevel readback. Identity, pipeline, status, source-stage,
+and permanent provider rejections enter a terminal `failed` outbox state with a
+safe error code; they are never automatically retried or reported as delivered.
+Resolve the mapping before an operator explicitly requeues one of those rows.
 
 The route rejects malformed, wrong-template, wrong-location, wrong-season,
 wrong-contact, wrong-opportunity, non-completed, and oversized events before

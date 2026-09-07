@@ -45,6 +45,7 @@ before(async () => {
     await migration.unsafe(fs.readFileSync(path.join(__dirname, '../../docs/migrations/001-application-handoff.sql'), 'utf8'));
     await migration.unsafe(fs.readFileSync(path.join(__dirname, '../../docs/migrations/005-agreement-completion-outbox.sql'), 'utf8'));
     await migration.unsafe(fs.readFileSync(path.join(__dirname, '../../docs/migrations/007-agreement-completion-stage-outbox.sql'), 'utf8'));
+    await migration.unsafe(fs.readFileSync(path.join(__dirname, '../../docs/migrations/009-agreement-stage-terminal-state.sql'), 'utf8'));
   } finally {
     await migration.end();
   }
@@ -247,6 +248,27 @@ test('agreement-stage outbox is independent from notices and fences immediate de
   assert.ok(stored.delivered_at);
   const [notice] = await first`SELECT status FROM fame_agreement_notification_outbox`;
   assert.equal(notice.status, 'pending');
+});
+
+test('a permanent agreement-stage mismatch is terminal, visible, and never replayed by the scheduler', async () => {
+  const application = await seedApplication();
+  const issue = issued(application, { eventId: 'issue:terminal-stage', documentId: 'document:terminal-stage' });
+  await persistAgreementIssuance(issue, first);
+  await persistAgreementCompletion(completed(issue, { eventId: 'complete:terminal-stage' }), second);
+
+  const terminal = await dispatchAgreementStageOutbox(async () => {
+    const error = new Error('stage changed outside the agreement workflow');
+    error.code = 'ghl_stage_diverged';
+    throw error;
+  }, { sql: first });
+  assert.deepEqual(terminal, { delivered: 0, deferred: 0, failed: 1, stale: 0 });
+  const [stored] = await first`SELECT status, last_error_code, failed_at FROM fame_agreement_stage_outbox`;
+  assert.equal(stored.status, 'failed');
+  assert.equal(stored.last_error_code, 'ghl_stage_diverged');
+  assert.ok(stored.failed_at);
+  assert.deepEqual(await dispatchAgreementStageOutbox(async () => { throw new Error('must not run'); }, { sql: second }), {
+    delivered: 0, deferred: 0, failed: 0, stale: 0,
+  });
 });
 
 test('a failed notification-row write rolls back the completion event and admits an exact retry after repair', async () => {

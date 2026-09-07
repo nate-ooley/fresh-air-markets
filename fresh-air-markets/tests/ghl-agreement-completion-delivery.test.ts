@@ -44,6 +44,7 @@ function opportunity(stage: string, patch: Record<string, unknown> = {}): Respon
       locationId: env.GHL_LOCATION_ID,
       pipelineId: env.GHL_AGREEMENT_PIPELINE_ID,
       pipelineStageId: stage,
+      status: "open",
       ...patch,
     },
   });
@@ -113,6 +114,29 @@ test("an unexpected source stage cannot be overwritten", async () => {
     error => error instanceof AgreementStageDeliveryError && error.code === "ghl_stage_diverged",
   );
   assert.equal(script.calls.length, 1);
+});
+
+test("a closed agreement opportunity is never reopened to complete its stage transition", async () => {
+  const script = scripted([opportunity(env.GHL_AGREEMENT_SENT_STAGE_ID, { status: "won" })]);
+  await assert.rejects(
+    () => deliverAgreementStageToGhl(message(), config, script.transport),
+    error => error instanceof AgreementStageDeliveryError && error.code === "ghl_status_diverged",
+  );
+  assert.equal(script.calls.length, 1);
+  assert.equal(script.calls[0].init?.method, "GET");
+});
+
+test("the post-update readback rejects a provider status change", async () => {
+  const script = scripted([
+    opportunity(env.GHL_AGREEMENT_SENT_STAGE_ID),
+    opportunity(env.GHL_AGREEMENT_COMPLETED_STAGE_ID),
+    opportunity(env.GHL_AGREEMENT_COMPLETED_STAGE_ID, { status: "lost" }),
+  ]);
+  await assert.rejects(
+    () => deliverAgreementStageToGhl(message(), config, script.transport),
+    error => error instanceof AgreementStageDeliveryError && error.code === "ghl_stage_diverged",
+  );
+  assert.equal(script.calls.length, 3);
 });
 
 test("rate limits and invalid agreement-stage configuration remain retriable and fail closed", async () => {

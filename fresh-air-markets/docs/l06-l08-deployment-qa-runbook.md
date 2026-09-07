@@ -51,6 +51,7 @@ reviewed QA database:
 4. `docs/migrations/006-application-document-ledger.sql`
 5. `docs/migrations/007-agreement-completion-stage-outbox.sql`
 6. `docs/migrations/008-application-opportunity-identity.sql`
+7. `docs/migrations/009-agreement-stage-terminal-state.sql`
 
 For a PostgreSQL command-line session pointed at the reviewed QA database:
 
@@ -61,6 +62,7 @@ psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f docs/migrations/005-agreement-complet
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f docs/migrations/006-application-document-ledger.sql
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f docs/migrations/007-agreement-completion-stage-outbox.sql
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f docs/migrations/008-application-opportunity-identity.sql
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f docs/migrations/009-agreement-stage-terminal-state.sql
 ```
 
 Record the database target, migration timestamp and commit SHA in the Asana

@@ -65,6 +65,7 @@ interface OpportunityIdentity {
   contactId: string;
   pipelineId: string;
   pipelineStageId: string;
+  status: "open" | "won" | "lost" | "abandoned";
   locationId?: string;
 }
 
@@ -94,9 +95,11 @@ function opportunityFromResponse(body: Record<string, unknown> | null): Opportun
   const contactId = text(candidate, "contactId", "contact_id");
   const pipelineId = text(candidate, "pipelineId", "pipeline_id");
   const pipelineStageId = text(candidate, "pipelineStageId", "pipeline_stage_id");
+  const status = text(candidate, "status", "status");
   const locationId = text(candidate, "locationId", "location_id");
   return id && contactId && pipelineId && pipelineStageId
-    ? { id, contactId, pipelineId, pipelineStageId, locationId }
+    && (status === "open" || status === "won" || status === "lost" || status === "abandoned")
+    ? { id, contactId, pipelineId, pipelineStageId, status, locationId }
     : null;
 }
 
@@ -180,19 +183,25 @@ export async function deliverAgreementStageToGhl(
   if (before.pipelineStageId !== config.sentStageId) {
     throw new AgreementStageDeliveryError("ghl_stage_diverged", "HighLevel opportunity was not in the configured agreement-sent stage.");
   }
+  // Agreement completion is a stage transition, not a lifecycle-status change.
+  // Never reopen a won/lost/abandoned opportunity merely because a stale
+  // completion event arrives after an operator moved it out of the open flow.
+  if (before.status !== "open") {
+    throw new AgreementStageDeliveryError("ghl_status_diverged", "HighLevel opportunity was not open for agreement completion.");
+  }
 
   const update = await request(transport, config, `/opportunities/${encodeURIComponent(message.payload.opportunityId)}`, {
     method: "PUT",
     body: JSON.stringify({
       pipelineId: config.pipelineId,
       pipelineStageId: config.completedStageId,
-      status: "open",
+      status: before.status,
     }),
   });
   if (!update.ok) throw providerError(update);
 
   const after = await getExactOpportunity(message, config, transport);
-  if (after.pipelineStageId !== config.completedStageId) {
-    throw new AgreementStageDeliveryError("ghl_stage_diverged", "HighLevel did not confirm the agreement-completed stage.");
+  if (after.pipelineStageId !== config.completedStageId || after.status !== before.status) {
+    throw new AgreementStageDeliveryError("ghl_stage_diverged", "HighLevel did not confirm the agreement-completed opportunity state.");
   }
 }
