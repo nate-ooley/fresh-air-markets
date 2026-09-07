@@ -16,8 +16,15 @@ const {
 // Destructive fixtures are limited to the disposable local CI database.
 const url = new URL(process.env.DATABASE_TEST_URL || 'postgres://invalid/');
 assert.ok(['localhost', '127.0.0.1'].includes(url.hostname) && url.pathname === '/fresh_air_test', 'Set DATABASE_TEST_URL to local fresh_air_test only');
-const first = postgres(url.toString(), { max: 12, prepare: false });
-const second = postgres(url.toString(), { max: 12, prepare: false });
+const schema = 'qa_application_document';
+const admin = postgres(url.toString(), { max: 1, prepare: false });
+const connect = () => postgres(url.toString(), {
+  max: 12,
+  prepare: false,
+  connection: { search_path: schema, statement_timeout: 15000 },
+});
+const first = connect();
+const second = connect();
 
 const applicationId = '11111111-1111-4111-8111-111111111111';
 const marketId = 'qa-market-a';
@@ -49,9 +56,10 @@ async function insertApplication(sql = first) {
 }
 
 before(async () => {
-  await first`CREATE TABLE IF NOT EXISTS accounts (id TEXT PRIMARY KEY)`;
+  await admin.unsafe(`CREATE SCHEMA ${schema}`);
+  await first`CREATE TABLE accounts (id TEXT PRIMARY KEY)`;
   await first`INSERT INTO accounts (id) VALUES (${marketId}), ('qa-market-b'), (${actorAccountId}) ON CONFLICT DO NOTHING`;
-  const migration = postgres(url.toString(), { max: 1, prepare: false });
+  const migration = postgres(url.toString(), { max: 1, prepare: false, connection: { search_path: schema } });
   try {
     for (const file of ['001-application-handoff.sql', '006-application-document-ledger.sql']) {
       await migration.unsafe(fs.readFileSync(path.join(__dirname, '../../docs/migrations', file), 'utf8'));
@@ -68,7 +76,12 @@ beforeEach(async () => {
   await insertApplication();
 });
 
-after(async () => { await first.end(); await second.end(); });
+after(async () => {
+  await first.end();
+  await second.end();
+  await admin.unsafe(`DROP SCHEMA ${schema} CASCADE`);
+  await admin.end();
+});
 
 test('100 concurrent exact upload deliveries create one pending version and one durable submission job', async () => {
   const results = await Promise.all(Array.from({ length: 100 }, (_, index) => persistApplicationDocumentSource(source(), index % 2 ? first : second)));

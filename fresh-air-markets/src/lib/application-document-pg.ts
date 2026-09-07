@@ -353,18 +353,18 @@ export async function recordApplicationDocumentScan(
       SET validation_state = ${validationState}, validation_reason = ${input.reason},
           validated_at = statement_timestamp()
       WHERE id = ${document.id}`;
-    await tx`
-      INSERT INTO fame_document_validation_events
-        (id, document_id, market_id, source_event_id, payload_hash, outcome, reason, outbox_id)
-      VALUES
-        (${validationEventId}, ${document.id}, ${document.market_id}, ${input.sourceEventId},
-         ${payloadHash}, ${input.outcome}, ${input.reason}, ${outboxId})`;
     const outboxRows = await tx`
       INSERT INTO fame_document_outbox (id, market_id, topic, dedupe_key, payload)
       VALUES (${outboxId}, ${document.market_id}, ${outbox.topic}, ${`document-validation:${validationEventId}`},
               ${tx.json(outbox as unknown as Parameters<typeof tx.json>[0])})
       RETURNING id`;
     if (!outboxRows.length) throw new Error("Document validation outbox write failed.");
+    await tx`
+      INSERT INTO fame_document_validation_events
+        (id, document_id, market_id, source_event_id, payload_hash, outcome, reason, outbox_id)
+      VALUES
+        (${validationEventId}, ${document.id}, ${document.market_id}, ${input.sourceEventId},
+         ${payloadHash}, ${input.outcome}, ${input.reason}, ${outboxId})`;
     return { kind: "applied", documentId: document.id, validationState, validationEventId, outboxId };
   });
 }
@@ -432,6 +432,12 @@ export async function recordApplicationDocumentReview(
           reviewed_at = statement_timestamp(), reviewed_by_account_id = ${input.actorAccountId},
           review_reason = ${input.reason}
       WHERE id = ${document.id}`;
+    const outboxRows = await tx`
+      INSERT INTO fame_document_outbox (id, market_id, topic, dedupe_key, payload)
+      VALUES (${outboxId}, ${document.market_id}, ${outbox.topic}, ${`document-review:${reviewEventId}`},
+              ${tx.json(outbox as unknown as Parameters<typeof tx.json>[0])})
+      RETURNING id`;
+    if (!outboxRows.length) throw new Error("Document review outbox write failed.");
     await tx`
       INSERT INTO fame_document_review_events
         (id, document_id, application_id, market_id, actor_account_id, idempotency_key,
@@ -440,12 +446,6 @@ export async function recordApplicationDocumentReview(
         (${reviewEventId}, ${document.id}, ${document.application_id}, ${document.market_id},
          ${input.actorAccountId}, ${input.idempotencyKey}, ${payloadHash}, ${document.review_state},
          ${reviewState}, ${input.reason}, ${outboxId})`;
-    const outboxRows = await tx`
-      INSERT INTO fame_document_outbox (id, market_id, topic, dedupe_key, payload)
-      VALUES (${outboxId}, ${document.market_id}, ${outbox.topic}, ${`document-review:${reviewEventId}`},
-              ${tx.json(outbox as unknown as Parameters<typeof tx.json>[0])})
-      RETURNING id`;
-    if (!outboxRows.length) throw new Error("Document review outbox write failed.");
     return { kind: "applied", documentId: document.id, reviewState, reviewEventId, outboxId };
   });
 }

@@ -32,7 +32,21 @@ another worker's lease delivered. `dispatchApplicationDocumentOutbox` fences a
 job against the current document/version immediately before delivery; a queued
 notice for a superseded version is retired without a downstream side effect.
 
-No public upload route, object-storage adapter, scanner, HighLevel source-event
-mapping, email dispatch, migration application, or live browser test is enabled
-by this foundation. Those integrations must be completed before L08 can be
-marked green.
+The protected ingress endpoint is `POST /api/integrations/documents`. It accepts
+only a bounded JSON record from a trusted post-transfer worker and derives the
+market from server configuration. Its bearer secret is
+`DOCUMENT_INGRESS_WEBHOOK_SECRET`; the payload includes a private object key,
+stable source file ID, counted size, SHA-256 and bounded Base64 samples. It
+does not accept a browser upload or a public file URL. `POST
+/api/integrations/documents/:id/scan` uses the separate
+`DOCUMENT_SCANNER_WEBHOOK_SECRET`, and a signed-in market session submits an
+exact version-bound manager decision through `PATCH
+/api/admin/documents/:id/review` with an `Idempotency-Key`.
+
+Before enabling the route, the deployment still needs: an object-storage
+transfer worker, a malware/deep-file scanner, a HighLevel source-event mapper
+that passes an internal application ID, an outbox delivery worker, migrations
+004–006, and the five QA upload scenarios in the launch grid. The endpoints do
+not send email, update a HighLevel opportunity, or expose a document publicly;
+those downstream mappings need explicit implementation and QA evidence before
+L08 can be marked green.
