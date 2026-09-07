@@ -1,11 +1,12 @@
 import { createHmac, randomBytes, scryptSync, timingSafeEqual } from "crypto";
 import { cookies } from "next/headers";
+import { signingSecret } from "./auth-secret";
 
 export const SESSION_COOKIE = "bhq_session";
 const SESSION_HOURS = 24 * 7;
 
 function secret(): string {
-  return process.env.AUTH_SECRET || "demo-secret-change-me";
+  return signingSecret(process.env);
 }
 
 /* ── Passwords (scrypt, salt:hash hex) ─────────────────── */

@@ -283,10 +283,18 @@ export class PgStore implements Store {
         `${BOOKING_SELECT} WHERE b.market_id = $1 AND b.id = $2 FOR UPDATE OF b`, [marketId, id]);
       if (!target[0]) return { ok: false, conflicts: [] };
       const booking = toBooking(target[0]);
+      // Different applications have different booking rows. Lock their shared
+      // booth before checking availability so competing approvals serialize.
+      // The next statement then sees the preceding approval's committed dates.
+      const booth = await tx`SELECT id FROM booths
+        WHERE id = ${booking.boothId} AND market_id = ${marketId} AND active
+        FOR UPDATE`;
+      if (!booth.length) return { ok: false, conflicts: [] };
       const conflicts = await tx<{ date: string; business_name: string }[]>`
         SELECT d.date::text AS date, b.business_name
         FROM bookings b JOIN booking_dates d ON d.booking_id = b.id
-        WHERE b.booth_id = ${booking.boothId} AND b.status = 'approved' AND b.id != ${id}
+        WHERE b.market_id = ${marketId} AND b.booth_id = ${booking.boothId}
+          AND b.status = 'approved' AND b.id != ${id}
           AND d.date IN ${tx(booking.dates)}`;
       if (conflicts.length > 0) {
         return {
