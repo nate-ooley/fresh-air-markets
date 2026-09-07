@@ -82,6 +82,9 @@ export function checkVendorBooking(
   if (request.fullSeason && request.selectedDates.length) {
     throw new Error("Choose Full Season or individual dates, not both.");
   }
+  if (new Set(request.selectedDates).size !== request.selectedDates.length) {
+    throw new Error("Select each market date only once.");
+  }
   const dates = request.fullSeason
     ? calendarDates
     : [...new Set(request.selectedDates)].sort();

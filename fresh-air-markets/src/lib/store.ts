@@ -17,7 +17,8 @@ export interface Store {
   /* ── Booths & bookings, always scoped to a market ────── */
   getBooth(marketId: string, id: string): Promise<Booth | null>;
   boothsWithAvailability(marketId: string, dates: string[], admin: boolean): Promise<BoothWithAvailability[]>;
-  createInquiry(marketId: string, input: InquiryInput, totalPrice: number): Promise<Booking>;
+  getInquiryReplay(marketId: string, input: InquiryInput, requestKey: string): Promise<Booking | null>;
+  createInquiry(marketId: string, input: InquiryInput, totalPrice: number, requestKey?: string): Promise<Booking & { replayed?: boolean }>;
   listBookings(marketId: string): Promise<Booking[]>;
   getBooking(marketId: string, id: string): Promise<Booking | null>;
   /** Approve verifies nobody else holds any of the requested booth-dates. */

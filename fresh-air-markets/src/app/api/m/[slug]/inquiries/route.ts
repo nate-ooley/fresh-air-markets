@@ -5,6 +5,7 @@ import { getStore } from "@/lib/store";
 import { marketBookableDates } from "@/lib/market-calendar";
 import { syncBookingToGhl } from "@/lib/ghl";
 import { VENDOR_CATEGORIES } from "@/lib/types";
+import { InquiryConflict, validInquiryKey } from "@/lib/inquiry-idempotency";
 
 export const dynamic = "force-dynamic";
 
@@ -37,6 +38,10 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ slu
   const parsed = await readInquiryBody(req);
   if ("status" in parsed) return NextResponse.json({ error: parsed.error }, { status: parsed.status });
   const { body } = parsed;
+  const requestKey = req.headers.get("Idempotency-Key")?.toLowerCase() ?? null;
+  if (!validInquiryKey(requestKey)) {
+    return NextResponse.json({ error: "A valid submission key is required. Reload the form and retry." }, { status: 400 });
+  }
 
   // Validate types before normalization: String(array/object) can otherwise turn
   // malformed input into a seemingly valid vendor name, email or booth ID.
@@ -51,7 +56,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ slu
     }
   }
   const valid = marketBookableDates(account.id);
-  if (!Array.isArray(body.dates) || body.dates.length > valid.size ||
+  if (!Array.isArray(body.dates) || body.dates.length > valid.size || new Set(body.dates).size !== body.dates.length ||
       body.dates.some((date) => typeof date !== "string" || !valid.has(date))) {
     return NextResponse.json({ error: "Select valid open market days." }, { status: 400 });
   }
@@ -74,6 +79,18 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ slu
   if (dates.length === 0) errors.push("Select at least one market day.");
 
   if (dates.some((d) => !valid.has(d))) errors.push("One or more selected dates are not open market days.");
+
+  if (errors.length > 0) return NextResponse.json({ error: errors.join(" ") }, { status: 400 });
+  const input = { boothId, name, businessName, email, phone, category, dates: dates.sort(), message };
+  try {
+    // A receipt retry must work even if approval or a price/booth edit occurred
+    // after the initial commit. It never changes that existing booking.
+    const prior = await store.getInquiryReplay(account.id, input, requestKey);
+    if (prior) return NextResponse.json({ booking: prior, totalPrice: prior.totalPrice, replayed: true });
+  } catch (error) {
+    return NextResponse.json({ error: error instanceof InquiryConflict ? error.message : "Applications are temporarily unavailable. Please retry." },
+      { status: error instanceof InquiryConflict ? 409 : 503 });
+  }
 
   const booth = boothId ? await store.getBooth(account.id, boothId) : null;
   if (!booth) errors.push("That booth doesn't exist.");
@@ -98,11 +115,15 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ slu
   }
 
   const totalPrice = booth.pricePerDay * dates.length;
-  const booking = await store.createInquiry(
-    account.id,
-    { boothId: booth.id, name, businessName, email, phone, category, dates: dates.sort(), message },
-    totalPrice,
-  );
+  let result;
+  try {
+    result = await store.createInquiry(account.id, input, totalPrice, requestKey);
+  } catch (error) {
+    return NextResponse.json({ error: error instanceof InquiryConflict ? error.message : "Your submission could not be confirmed. Please retry." },
+      { status: error instanceof InquiryConflict ? 409 : 503 });
+  }
+  const { replayed, ...booking } = result;
+  if (replayed) return NextResponse.json({ booking, totalPrice: booking.totalPrice, replayed: true });
 
   // Sync to GoHighLevel so marketing/communication automations fire.
   const ghlSynced = await syncBookingToGhl(booking, "booth-inquiry", booth.label);

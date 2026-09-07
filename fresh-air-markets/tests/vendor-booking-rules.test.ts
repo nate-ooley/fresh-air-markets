@@ -61,11 +61,9 @@ test("partial availability preserves the whole quote and revision reprices", () 
   assert.equal(revised.rateCents, 4000);
 });
 
-test("duplicate selected dates are normalized and input is not mutated", () => {
+test("duplicate selected dates are rejected and input is not mutated", () => {
   const request = { ...base, selectedDates: [dates[1], dates[0], dates[1]] };
-  const quote = checkVendorBooking(calendar, request, empty);
-  assert.deepEqual(quote.dates, dates.slice(0, 2));
-  assert.equal(quote.totalCents, 8000);
+  assert.throws(() => checkVendorBooking(calendar, request, empty), /only once/);
   assert.equal(request.selectedDates.length, 3);
 });
 

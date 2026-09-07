@@ -44,6 +44,7 @@ test('a conflicting multi-date approval does not partially reserve other dates',
 
 test('market isolation blocks another market from viewing or changing a booking', async () => {
   const store = new MemoryStore();
+  await store.createBooth(booth('qa-owner', 'qa-private'));
   const b = await store.createInquiry('qa-owner', { ...vendor, boothId: 'qa-private', dates: ['2026-10-03'] }, 40);
   assert.equal(await store.getBooking('qa-other', b.id), null);
   assert.equal((await store.approveBooking('qa-other', b.id)).ok, false);

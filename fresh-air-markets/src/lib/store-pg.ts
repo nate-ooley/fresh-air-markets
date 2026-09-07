@@ -4,6 +4,7 @@ import { Account, Booth, Booking, BoothWithAvailability, InquiryInput } from "./
 import { ApproveResult, Store, decorateBooth } from "./store";
 import { DEMO_MARKET_ID, DEMO_PASSWORD, defaultBooths, demoAccount, demoBookings } from "./seed";
 import { hashPassword } from "./auth";
+import { InquiryConflict, inquiryFingerprint } from "./inquiry-idempotency";
 
 type Sql = ReturnType<typeof postgres>;
 
@@ -76,6 +77,14 @@ function init(sql: Sql): Promise<void> {
       const legacyMarketDefault = "'" + DEMO_MARKET_ID.replace(/'/g, "''") + "'";
       await sql.unsafe(`ALTER TABLE booths ADD COLUMN IF NOT EXISTS market_id TEXT NOT NULL DEFAULT ${legacyMarketDefault}`);
       await sql.unsafe(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS market_id TEXT NOT NULL DEFAULT ${legacyMarketDefault}`);
+      await sql`CREATE TABLE IF NOT EXISTS inquiry_requests (
+        market_id TEXT NOT NULL,
+        request_key TEXT NOT NULL,
+        payload_hash TEXT NOT NULL,
+        booking_id TEXT NOT NULL REFERENCES bookings(id),
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        PRIMARY KEY (market_id, request_key)
+      )`;
 
       const [{ count }] = await sql`SELECT count(*)::int AS count FROM accounts`;
       if (count === 0) {
@@ -253,10 +262,32 @@ export class PgStore implements Store {
     });
   }
 
-  async createInquiry(marketId: string, input: InquiryInput, totalPrice: number): Promise<Booking> {
+  async getInquiryReplay(marketId: string, input: InquiryInput, requestKey: string): Promise<Booking | null> {
+    const sql = await db(this.connection);
+    const [prior] = await sql`SELECT payload_hash, booking_id FROM inquiry_requests
+      WHERE market_id = ${marketId} AND request_key = ${requestKey}`;
+    if (!prior) return null;
+    if (prior.payload_hash !== inquiryFingerprint(input)) throw new InquiryConflict();
+    const booking = await this.getBooking(marketId, prior.booking_id);
+    if (!booking) throw new Error("Stored application is unavailable.");
+    return booking;
+  }
+
+  async createInquiry(marketId: string, input: InquiryInput, totalPrice: number, requestKey?: string): Promise<Booking & { replayed?: boolean }> {
     const sql = await db(this.connection);
     const id = randomUUID();
-    await sql.begin(async (tx) => {
+    const result = await sql.begin(async (tx) => {
+      if (requestKey) {
+        // All writers for this market/key serialize across processes and pools.
+        // A failed transaction releases the lock and leaves no consumed key.
+        await tx`SELECT pg_advisory_xact_lock(hashtextextended(${JSON.stringify([marketId, requestKey])}, 0))`;
+        const [prior] = await tx`SELECT payload_hash, booking_id FROM inquiry_requests
+          WHERE market_id = ${marketId} AND request_key = ${requestKey}`;
+        if (prior) {
+          if (prior.payload_hash !== inquiryFingerprint(input)) throw new InquiryConflict();
+          return { id: String(prior.booking_id), replayed: true };
+        }
+      }
       // Keep tenant ownership and active state valid until the inquiry commits,
       // including when the booth changes after the route's availability check.
       const owned = await tx`SELECT id FROM booths
@@ -269,8 +300,11 @@ export class PgStore implements Store {
       for (const date of input.dates) {
         await tx`INSERT INTO booking_dates (booking_id, date) VALUES (${id}, ${date})`;
       }
+      if (requestKey) await tx`INSERT INTO inquiry_requests (market_id, request_key, payload_hash, booking_id)
+        VALUES (${marketId}, ${requestKey}, ${inquiryFingerprint(input)}, ${id})`;
+      return { id, replayed: false };
     });
-    return (await this.getBooking(marketId, id))!;
+    return { ...(await this.getBooking(marketId, result.id))!, replayed: result.replayed };
   }
 
   async listBookings(marketId: string): Promise<Booking[]> {

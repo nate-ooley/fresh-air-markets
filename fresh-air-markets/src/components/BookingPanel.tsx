@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { BoothWithAvailability, VENDOR_CATEGORIES } from "@/lib/types";
 import type { MarketWeekend } from "@/lib/dates";
 
@@ -27,6 +27,8 @@ export default function BookingPanel({ booth, weekends, slug, onClose, onSubmitt
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState(false);
+  const inFlight = useRef(false);
+  const attempt = useRef<{ payload: string; key: string } | null>(null);
 
   // Reset date selection when switching booths (keep contact info).
   useEffect(() => {
@@ -59,7 +61,7 @@ export default function BookingPanel({ booth, weekends, slug, onClose, onSubmitt
         <h3 className="mt-4 font-display text-2xl">Inquiry sent!</h3>
         <p className="mt-3 text-sm leading-relaxed text-cream/80">
           Thanks, {form.name.split(" ")[0] || "friend"} — the market team will review your request
-          for booth <strong>{booth.label}</strong> and reach out by email or text with approval and
+          for booth <strong>{booth.label}</strong> and reach out by email with approval and
           payment details. Keep an eye on your inbox.
         </p>
         <button
@@ -95,13 +97,31 @@ export default function BookingPanel({ booth, weekends, slug, onClose, onSubmitt
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (inFlight.current) return;
+    inFlight.current = true;
     setError("");
     setSubmitting(true);
     try {
+      const payload = JSON.stringify({ ...form, boothId: booth.id, dates: [...selectedDates].sort() });
+      if (attempt.current?.payload !== payload) {
+        let key = crypto.randomUUID();
+        // Retain retry identity across a reload in this tab without storing
+        // vendor fields in browser storage. In-memory retry still works if
+        // the browser disallows sessionStorage.
+        try {
+          const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(payload));
+          const fingerprint = Array.from(new Uint8Array(digest), b => b.toString(16).padStart(2, "0")).join("");
+          const storageKey = `fame-inquiry:${slug}:${fingerprint}`;
+          const prior = sessionStorage.getItem(storageKey);
+          if (prior && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(prior)) key = prior as typeof key;
+          sessionStorage.setItem(storageKey, key);
+        } catch { /* Session storage is optional; the request key is not. */ }
+        attempt.current = { payload, key };
+      }
       const res = await fetch(`/api/m/${slug}/inquiries`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...form, boothId: booth.id, dates: [...selectedDates] }),
+        headers: { "Content-Type": "application/json", "Idempotency-Key": attempt.current.key },
+        body: payload,
       });
       const data = await res.json();
       if (!res.ok) {
@@ -113,6 +133,7 @@ export default function BookingPanel({ booth, weekends, slug, onClose, onSubmitt
     } catch {
       setError("Network error — please try again.");
     } finally {
+      inFlight.current = false;
       setSubmitting(false);
     }
   };

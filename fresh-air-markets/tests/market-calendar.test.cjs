@@ -46,6 +46,7 @@ function loadRoute(relative, clock = beforeSeason) {
   const store = {
     getAccountBySlug: async () => account,
     getAccountById: async () => account,
+    getInquiryReplay: async () => null,
     getBooth: async () => ({ id: 'qa-booth', label: 'QA', pricePerDay: 40 }),
     boothsWithAvailability: async (...args) => { calls.availability.push(args); return [{ id: 'qa-booth', bookedDates: [] }]; },
     listBookings: async () => [],
@@ -83,7 +84,7 @@ test('public availability and authenticated admin overview use the same configur
 
 test('inquiry accepts final Saturday and rejects incorrect Thursday, Friday, Sunday and past days before writes', async () => {
   const body = { name: 'QA Vendor', businessName: 'QA Calendar', email: 'nate@autocraftstudios.com', phone: '', category: 'Produce', boothId: 'qa-booth', dates: ['2027-05-29'] };
-  const request = dates => new NextRequest('https://unit-test.invalid/', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ...body, dates }) });
+  const request = dates => new NextRequest('https://unit-test.invalid/', { method: 'POST', headers: { 'content-type': 'application/json', 'idempotency-key': '11111111-1111-4111-8111-111111111111' }, body: JSON.stringify({ ...body, dates }) });
   const good = loadRoute('m/[slug]/inquiries');
   assert.equal((await good.route.POST(request(body.dates), { params: Promise.resolve({ slug: 'qa' }) })).status, 201);
   assert.deepEqual(good.calls.writes[0].input.dates, ['2027-05-29']);
