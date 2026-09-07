@@ -48,10 +48,29 @@ cannot mark a newer worker's job delivered. Only an allow-listed short error
 code is saved; raw provider responses remain out of the application ledger.
 
 `dispatchApplicationReviewOutbox` takes an injected delivery function for a
-scheduled, authenticated integration worker. It intentionally has no built-in
-HighLevel token or HTTP call. The eventual worker must use the payload's exact
-opportunity ID, apply downstream idempotency, and mark a job delivered only
-after the downstream action succeeds.
+scheduled, authenticated integration worker. The included L06 adapter uses
+HighLevel's v3 opportunity endpoint, never a contact lookup or newest-record
+search. It needs these private deployment variables:
+
+- `GHL_API_TOKEN` from the QA sub-account, with `opportunities.readonly` and
+  `opportunities.write`;
+- `GHL_LOCATION_ID`, `GHL_APPLICATION_PIPELINE_ID`, and the four exact stage
+  IDs for Review, Approved, Changes Requested, and Declined;
+- `CRON_SECRET`, a 32+ character credential for the recovery endpoint.
+
+The manager review route first commits the review and outbox transaction, then
+tries that **same outbox ID** immediately. It reads the immutable opportunity
+ID, contact ID, pipeline and optional returned location ID before moving the
+record. It accepts only the configured Review stage, moves it to the stage for
+the saved decision, then reads it again to verify the destination. If a retry
+starts after a successful provider update, finding the target stage is a
+successful no-op rather than a second workflow trigger.
+
+`GET /api/internal/cron/application-review-outbox` is the recovery path. It
+requires `Authorization: Bearer <CRON_SECRET>`, returns counts only, and does
+not expose vendor details. Configure it with an authenticated scheduler only
+after confirming the hosting plan supports the intended cadence. The immediate
+per-decision attempt does not wait for that scheduler.
 
 ## Verification scope
 
@@ -63,6 +82,6 @@ stops, corrected re-submission versus a separate season application, and lease
 recovery after provider failure. It must run in CI or a disposable local
 PostgreSQL database before release.
 
-This does not prove a deployed portal, individual manager identity, HighLevel
-pipeline update, email delivery, or browser workflow. Those remain L06 release
-tests.
+This does not prove a deployed portal, individual manager identity, configured
+HighLevel pipeline/stage IDs, email delivery, or browser workflow. Those remain
+L06 release tests.

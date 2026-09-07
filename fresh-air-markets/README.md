@@ -76,7 +76,7 @@ See `.env.example`. Summary:
 | --- | --- | --- |
 | `DATABASE_URL` | Postgres (Neon) connection string. Schema auto-creates, migrates, and seeds the demo tenant on first request. | unset → demo mode |
 | `AUTH_SECRET` | Signs session cookies. A private value is required in production; the public demo key is rejected. | dev fallback only |
-| `GHL_API_TOKEN` | GHL Private Integration token (scopes: contacts.write, contacts.readonly) | unset → GHL skipped |
+| `GHL_API_TOKEN` | GHL Private Integration token (contacts plus `opportunities.readonly` / `opportunities.write` for L06) | unset → GHL skipped |
 | `GHL_LOCATION_ID` | GHL location (sub-account) id | unset → GHL skipped |
 
 ## Deploying on Vercel

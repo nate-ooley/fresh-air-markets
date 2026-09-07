@@ -59,7 +59,7 @@ test('application review route binds the path ID and market session, ignoring cl
     applicationId: appId, marketId: 'qa-market', actorAccountId: 'qa-market',
     action: 'approve', sourceEventId: 'application:qa:current', reason: '', idempotencyKey: key,
   });
-  assert.deepEqual(await response.json(), { application: { id: appId, reviewState: 'approved' }, reviewEventId: 'event', duplicate: false });
+  assert.deepEqual(await response.json(), { application: { id: appId, reviewState: 'approved' }, reviewEventId: 'event', duplicate: false, delivery: 'queued' });
 });
 
 test('application review route rejects malformed identities/replay keys before persistence', async () => {

@@ -63,6 +63,12 @@ export interface ApplicationReviewOutboxMessage {
   payload: ApplicationReviewOutboxPayload;
 }
 
+export interface ApplicationReviewDispatchResult {
+  delivered: number;
+  deferred: number;
+  stale: number;
+}
+
 interface ApplicationRow {
   id: string;
   market_id: string;
@@ -265,6 +271,27 @@ export async function claimApplicationReviewOutbox(
   leaseSeconds = 300,
   sql: Sql = configuredClient(),
 ): Promise<ApplicationReviewOutboxMessage[]> {
+  return claimApplicationReviewOutboxWhere(null, limit, leaseSeconds, sql);
+}
+
+/** Claim one newly committed job without allowing it to steal an unrelated
+ * ready item. This lets the review screen request an immediate delivery while
+ * the normal scheduler remains the recovery path. */
+export async function claimApplicationReviewOutboxById(
+  id: string,
+  leaseSeconds = 300,
+  sql: Sql = configuredClient(),
+): Promise<ApplicationReviewOutboxMessage[]> {
+  if (!validApplicationId(id)) throw new Error("Application review outbox ID is invalid.");
+  return claimApplicationReviewOutboxWhere(id, 1, leaseSeconds, sql);
+}
+
+async function claimApplicationReviewOutboxWhere(
+  onlyId: string | null,
+  limit: number,
+  leaseSeconds: number,
+  sql: Sql,
+): Promise<ApplicationReviewOutboxMessage[]> {
   if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new Error("Outbox claim limit is invalid.");
   if (!Number.isInteger(leaseSeconds) || leaseSeconds < 10 || leaseSeconds > 3600) throw new Error("Outbox lease is invalid.");
   const leaseToken = randomUUID();
@@ -275,8 +302,9 @@ export async function claimApplicationReviewOutbox(
       WITH next AS (
         SELECT id
         FROM fame_application_outbox
-        WHERE (status = 'pending' AND next_attempt_at <= statement_timestamp())
-           OR (status = 'processing' AND locked_until <= statement_timestamp())
+        WHERE ((status = 'pending' AND next_attempt_at <= statement_timestamp())
+           OR (status = 'processing' AND locked_until <= statement_timestamp()))
+          AND (${onlyId}::TEXT IS NULL OR id = ${onlyId})
         ORDER BY next_attempt_at ASC, created_at ASC
         LIMIT ${limit}
         FOR UPDATE SKIP LOCKED
@@ -339,6 +367,44 @@ export async function retryApplicationReviewOutbox(
 
 export type ApplicationReviewDelivery = (message: ApplicationReviewOutboxMessage) => Promise<void>;
 
+function deliveryFailure(error: unknown, attempt: number): { code: string; delaySeconds: number } {
+  const fallback = Math.min(3600, 30 * 2 ** Math.min(attempt - 1, 6));
+  if (!error || typeof error !== "object") return { code: "delivery_failed", delaySeconds: fallback };
+  const candidate = error as { code?: unknown; retryAfterSeconds?: unknown };
+  const code = typeof candidate.code === "string" && /^[a-z0-9_.:-]{1,64}$/.test(candidate.code)
+    ? candidate.code
+    : "delivery_failed";
+  const retryAfterSeconds = candidate.retryAfterSeconds;
+  const delaySeconds = Number.isInteger(retryAfterSeconds)
+    && Number(retryAfterSeconds) >= 1
+    && Number(retryAfterSeconds) <= 3600
+    ? Number(retryAfterSeconds)
+    : fallback;
+  return { code, delaySeconds };
+}
+
+async function dispatchClaimedApplicationReviewOutbox(
+  jobs: ApplicationReviewOutboxMessage[],
+  deliver: ApplicationReviewDelivery,
+  sql: Sql | undefined,
+): Promise<ApplicationReviewDispatchResult> {
+  let delivered = 0;
+  let deferred = 0;
+  let stale = 0;
+  for (const job of jobs) {
+    try {
+      await deliver(job);
+      if (await markApplicationReviewOutboxDelivered(job.id, job.leaseToken, sql)) delivered++;
+      else stale++;
+    } catch (error) {
+      const failure = deliveryFailure(error, job.attempt);
+      if (await retryApplicationReviewOutbox(job.id, job.leaseToken, failure.code, failure.delaySeconds, sql)) deferred++;
+      else stale++;
+    }
+  }
+  return { delivered, deferred, stale };
+}
+
 /**
  * A scheduler/worker calls this with its authenticated downstream delivery
  * implementation. This module never makes a HighLevel request by itself.
@@ -346,23 +412,19 @@ export type ApplicationReviewDelivery = (message: ApplicationReviewOutboxMessage
 export async function dispatchApplicationReviewOutbox(
   deliver: ApplicationReviewDelivery,
   options: { limit?: number; leaseSeconds?: number; sql?: Sql } = {},
-): Promise<{ delivered: number; deferred: number; stale: number }> {
+): Promise<ApplicationReviewDispatchResult> {
   const jobs = await claimApplicationReviewOutbox(options.limit ?? 10, options.leaseSeconds ?? 300, options.sql);
-  let delivered = 0;
-  let deferred = 0;
-  let stale = 0;
-  for (const job of jobs) {
-    try {
-      await deliver(job);
-      if (await markApplicationReviewOutboxDelivered(job.id, job.leaseToken, options.sql)) delivered++;
-      else stale++;
-    } catch {
-      // Exponential delay is bounded; the provider-specific worker retains raw
-      // diagnostics privately and gives this durable ledger a safe code only.
-      const seconds = Math.min(3600, 30 * 2 ** Math.min(job.attempt - 1, 6));
-      if (await retryApplicationReviewOutbox(job.id, job.leaseToken, "delivery_failed", seconds, options.sql)) deferred++;
-      else stale++;
-    }
-  }
-  return { delivered, deferred, stale };
+  return dispatchClaimedApplicationReviewOutbox(jobs, deliver, options.sql);
+}
+
+/** Attempt exactly one committed review job immediately after a portal
+ * decision. If another worker already holds its lease, it returns no work and
+ * leaves that worker as the sole delivery owner. */
+export async function dispatchApplicationReviewOutboxById(
+  id: string,
+  deliver: ApplicationReviewDelivery,
+  options: { leaseSeconds?: number; sql?: Sql } = {},
+): Promise<ApplicationReviewDispatchResult> {
+  const jobs = await claimApplicationReviewOutboxById(id, options.leaseSeconds ?? 60, options.sql);
+  return dispatchClaimedApplicationReviewOutbox(jobs, deliver, options.sql);
 }

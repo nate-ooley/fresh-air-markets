@@ -1,7 +1,16 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSessionAccountId } from "@/lib/auth";
 import { parseApplicationReview, validApplicationId } from "@/lib/application-review";
-import { getApplicationReviewDetail, recordApplicationReview } from "@/lib/application-review-pg";
+import {
+  dispatchApplicationReviewOutboxById,
+  getApplicationReviewDetail,
+  recordApplicationReview,
+} from "@/lib/application-review-pg";
+import {
+  applicationReviewDeliveryConfigured,
+  deliverApplicationReviewToGhl,
+  readApplicationReviewDeliveryConfig,
+} from "@/lib/ghl-application-review-delivery";
 import { readObjectBody } from "@/lib/request-body";
 
 export const runtime = "nodejs";
@@ -50,10 +59,28 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
     if (result.kind === "terminal") return NextResponse.json({ error: `Application is already ${result.reviewState}.` }, { status: 409 });
     if (result.kind === "awaiting_resubmission") return NextResponse.json({ error: "Awaiting a newer vendor submission before another review." }, { status: 409 });
     if (result.kind === "conflict") return NextResponse.json({ error: "This review key was already used for different content." }, { status: 409 });
+    // A saved decision must remain visible even if HighLevel is unavailable.
+    // When delivery is configured, try only this committed outbox item right
+    // away; the authenticated worker route owns later retry/recovery.
+    let delivery: "delivered" | "queued" = "queued";
+    if (result.kind === "applied" && applicationReviewDeliveryConfigured(process.env)) {
+      try {
+        const config = readApplicationReviewDeliveryConfig(process.env);
+        const dispatched = await dispatchApplicationReviewOutboxById(
+          result.outboxId,
+          message => deliverApplicationReviewToGhl(message, config),
+        );
+        if (dispatched.delivered === 1) delivery = "delivered";
+      } catch {
+        // The outbox transaction has already committed. Keep the decision and
+        // let the authenticated retry worker recover without leaking details.
+      }
+    }
     return NextResponse.json({
       application: { id: result.applicationId, reviewState: result.reviewState },
       reviewEventId: result.reviewEventId,
       duplicate: result.kind === "duplicate",
+      delivery,
     });
   } catch {
     return NextResponse.json({ error: "Application review is unavailable." }, { status: 503 });

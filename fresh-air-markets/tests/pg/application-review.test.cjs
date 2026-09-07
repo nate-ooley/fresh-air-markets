@@ -6,6 +6,7 @@ const { randomUUID } = require('node:crypto');
 const postgres = require('postgres');
 const {
   claimApplicationReviewOutbox,
+  dispatchApplicationReviewOutboxById,
   dispatchApplicationReviewOutbox,
   markApplicationReviewOutboxDelivered,
   recordApplicationReview,
@@ -186,4 +187,20 @@ test('outbox leases prevent duplicate delivery and recover safely after worker f
   assert.equal(stored.status, 'delivered');
   assert.ok(stored.attempts >= 4);
   assert.ok(stored.delivered_at);
+});
+
+test('an immediate exact-job delivery and a concurrent scheduler sweep claim one job and make one provider call', async () => {
+  const application = await seedApplication();
+  const result = await recordApplicationReview(decision(application), first);
+  assert.equal(result.kind, 'applied');
+  const delivered = [];
+  const [immediate, scheduled] = await Promise.all([
+    dispatchApplicationReviewOutboxById(result.outboxId, async job => { delivered.push(`immediate:${job.id}`); }, { sql: first }),
+    dispatchApplicationReviewOutbox(async job => { delivered.push(`scheduled:${job.id}`); }, { sql: second }),
+  ]);
+  assert.equal(immediate.delivered + scheduled.delivered, 1);
+  assert.equal(delivered.length, 1);
+  assert.equal(delivered[0].endsWith(result.outboxId), true);
+  const [stored] = await first`SELECT status FROM fame_application_outbox WHERE id = ${result.outboxId}`;
+  assert.equal(stored.status, 'delivered');
 });
