@@ -91,6 +91,9 @@ See `.env.example`. Summary:
 For the Fresh Air L06–L08 workflows, follow the exact migration, private
 environment-variable, HighLevel event-mapping and QA evidence steps in
 [`docs/l06-l08-deployment-qa-runbook.md`](docs/l06-l08-deployment-qa-runbook.md).
+For the new Square Sandbox application, use the staged
+[`docs/square-sandbox-setup.md`](docs/square-sandbox-setup.md) runbook before
+adding a payment link or webhook subscription.
 
 ## Architecture
 

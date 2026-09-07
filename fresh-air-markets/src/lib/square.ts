@@ -1,31 +1,135 @@
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 
+const SQUARE_API_VERSION = "2026-08-19";
+const SQUARE_SANDBOX_API_BASE = "https://connect.squareupsandbox.com";
+const SQUARE_PRODUCTION_API_BASE = "https://connect.squareup.com";
+
 /** Server-side Square adapter. Call only after a durable reservation is approved.
  * Credentials are entered by the owner in the hosting environment, never a form.
  * This module does not mark CRM records paid or allocate inventory.
  */
-export interface SquareConfig {
+export interface SquareCheckoutConfig {
   environment: "sandbox" | "production";
   accessToken: string;
   locationId: string;
-  merchantId: string;
+  /** Optional operator-entered guard. The verified merchant is stored with an order. */
+  merchantId?: string;
+}
+
+export interface SquareWebhookConfig {
   webhookSignatureKey: string;
   webhookUrl: string;
 }
 
-export function squareConfig(env: Record<string, string | undefined>): SquareConfig {
+export type SquareConfig = SquareCheckoutConfig & SquareWebhookConfig;
+
+function requiredSquareValue(env: Record<string, string | undefined>, key: string): string {
+  const value = env[key]?.trim();
+  if (!value) throw new Error(`Missing Square setting: ${key}`);
+  return value;
+}
+
+/**
+ * Checkout credentials intentionally do not require a webhook or merchant ID.
+ * This permits a read-only Sandbox identity check before either exists.
+ */
+export function squareCheckoutConfig(env: Record<string, string | undefined>): SquareCheckoutConfig {
   const environment = env.SQUARE_ENVIRONMENT ?? "sandbox";
   if (environment !== "sandbox" && environment !== "production") throw new Error("Invalid Square environment.");
   if (environment === "production" && env.SQUARE_ALLOW_LIVE_PAYMENTS !== "true") {
     throw new Error("Live Square payments are disabled.");
   }
-  const keys = ["SQUARE_ACCESS_TOKEN", "SQUARE_LOCATION_ID", "SQUARE_MERCHANT_ID", "SQUARE_WEBHOOK_SIGNATURE_KEY", "SQUARE_WEBHOOK_URL"];
-  const missing = keys.filter(key => !env[key]?.trim());
-  if (missing.length) throw new Error(`Missing Square settings: ${missing.join(", ")}`);
-  const webhookUrl = env.SQUARE_WEBHOOK_URL!;
+  if (environment === "sandbox" && env.SQUARE_ALLOW_LIVE_PAYMENTS === "true") {
+    throw new Error("Live Square payments cannot be enabled for Sandbox.");
+  }
+  const merchantId = env.SQUARE_MERCHANT_ID?.trim() || undefined;
+  return {
+    environment,
+    accessToken: requiredSquareValue(env, "SQUARE_ACCESS_TOKEN"),
+    locationId: requiredSquareValue(env, "SQUARE_LOCATION_ID"),
+    merchantId,
+  };
+}
+
+export function squareWebhookConfig(env: Record<string, string | undefined>): SquareWebhookConfig {
+  const webhookSignatureKey = requiredSquareValue(env, "SQUARE_WEBHOOK_SIGNATURE_KEY");
+  const webhookUrl = requiredSquareValue(env, "SQUARE_WEBHOOK_URL");
   const url = new URL(webhookUrl);
   if (url.protocol !== "https:" || url.username || url.password || url.hash) throw new Error("Square webhook requires a public HTTPS URL.");
-  return { environment, accessToken: env.SQUARE_ACCESS_TOKEN!, locationId: env.SQUARE_LOCATION_ID!, merchantId: env.SQUARE_MERCHANT_ID!, webhookSignatureKey: env.SQUARE_WEBHOOK_SIGNATURE_KEY!, webhookUrl };
+  return { webhookSignatureKey, webhookUrl };
+}
+
+/** Full configuration for a process that creates checkout and verifies webhooks. */
+export function squareConfig(env: Record<string, string | undefined>): SquareConfig {
+  return { ...squareCheckoutConfig(env), ...squareWebhookConfig(env) };
+}
+
+/** Initial Sandbox configuration deliberately excludes webhook values. */
+export interface SquareSandboxSetupConfig extends SquareCheckoutConfig {
+  environment: "sandbox";
+}
+
+export function squareSandboxSetupConfig(env: Record<string, string | undefined>): SquareSandboxSetupConfig {
+  const config = squareCheckoutConfig(env);
+  if (config.environment !== "sandbox") throw new Error("Square setup verification requires Sandbox.");
+  return { ...config, environment: "sandbox" };
+}
+
+export interface SquareSandboxIdentity {
+  merchantId: string;
+  locationId: string;
+}
+
+function asNonBlankString(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value : null;
+}
+
+function asObject(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+}
+
+async function getSquareSandboxJson(config: SquareSandboxSetupConfig, path: string, transport: typeof fetch): Promise<unknown> {
+  let response: Response;
+  try {
+    response = await transport(`${SQUARE_SANDBOX_API_BASE}${path}`, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${config.accessToken}`,
+        "Square-Version": SQUARE_API_VERSION,
+        Accept: "application/json",
+      },
+      signal: AbortSignal.timeout(15000),
+    });
+  } catch {
+    throw new Error("Square sandbox verification request failed.");
+  }
+  // Do not parse or echo non-2xx responses because Square can include private data.
+  if (!response.ok) throw new Error(`Square sandbox verification failed (${response.status}).`);
+  try {
+    return await response.json();
+  } catch {
+    throw new Error("Square sandbox verification returned malformed JSON.");
+  }
+}
+
+/**
+ * Makes only two read-only Sandbox calls. It retrieves the merchant selected by
+ * the access token and fences the configured location to that merchant. A
+ * nonblank SQUARE_MERCHANT_ID is an optional mismatch guard, never a requirement.
+ */
+export async function verifySquareSandboxSetup(config: SquareSandboxSetupConfig, transport: typeof fetch = fetch): Promise<SquareSandboxIdentity> {
+  const merchantPayload = asObject(await getSquareSandboxJson(config, "/v2/merchants/me", transport));
+  const merchant = asObject(merchantPayload?.merchant);
+  const merchantId = asNonBlankString(merchant?.id);
+  if (!merchantId || merchant?.status !== "ACTIVE") throw new Error("Square sandbox merchant identity is invalid or inactive.");
+  if (config.merchantId && config.merchantId !== merchantId) throw new Error("Configured Square merchant does not match the Sandbox access token.");
+
+  const locationPayload = asObject(await getSquareSandboxJson(config, `/v2/locations/${encodeURIComponent(config.locationId)}`, transport));
+  const location = asObject(locationPayload?.location);
+  if (!location || location.id !== config.locationId || location.merchant_id !== merchantId || location.status !== "ACTIVE") {
+    throw new Error("Configured Square location is invalid, inactive, or owned by another merchant.");
+  }
+  return { merchantId, locationId: config.locationId };
 }
 
 export const PAYMENT_WINDOW_MS = 48 * 60 * 60 * 1000;
@@ -43,17 +147,23 @@ export interface ApprovedCheckout {
   paymentDeadline: string;
 }
 
+function canonicalProviderTimestamp(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : null;
+}
+
 /** Retries must use the same reservation revision and immutable amount. */
-export async function createSquareCheckout(config: SquareConfig, approved: ApprovedCheckout, transport: typeof fetch = fetch, now = Date.now()) {
+export async function createSquareCheckout(config: Pick<SquareCheckoutConfig, "environment" | "accessToken" | "locationId">, approved: ApprovedCheckout, transport: typeof fetch = fetch, now = Date.now()) {
   if (!approved.reservationId || !Number.isSafeInteger(approved.revision) || approved.revision < 1) throw new Error("A reservation and revision are required.");
   if (!Number.isSafeInteger(approved.totalCents) || approved.totalCents <= 0) throw new Error("Square requires a positive integer amount; nonprofits bypass payment.");
   if (!approved.description.trim() || approved.description.length > 255) throw new Error("A short checkout description is required.");
   if (!(Date.parse(approved.paymentDeadline) > now)) throw new Error("The payment window has expired or is invalid.");
   const idempotencyKey = createHash("sha256").update(`${config.environment}:${config.locationId}:${approved.reservationId}:${approved.revision}`).digest("hex");
-  const base = config.environment === "sandbox" ? "https://connect.squareupsandbox.com" : "https://connect.squareup.com";
+  const base = config.environment === "sandbox" ? SQUARE_SANDBOX_API_BASE : SQUARE_PRODUCTION_API_BASE;
   const response = await transport(`${base}/v2/online-checkout/payment-links`, {
     method: "POST",
-    headers: { Authorization: `Bearer ${config.accessToken}`, "Square-Version": "2026-08-19", "Content-Type": "application/json" },
+    headers: { Authorization: `Bearer ${config.accessToken}`, "Square-Version": SQUARE_API_VERSION, "Content-Type": "application/json" },
     signal: AbortSignal.timeout(15000),
     body: JSON.stringify({ idempotency_key: idempotencyKey, quick_pay: { name: approved.description, price_money: { amount: approved.totalCents, currency: "USD" }, location_id: config.locationId }, checkout_options: { allow_tipping: false } }),
   });
@@ -61,14 +171,20 @@ export async function createSquareCheckout(config: SquareConfig, approved: Appro
   if (!response.ok) throw new Error(`Square checkout failed (${response.status}); retry the same reservation revision.`);
   const data = await response.json();
   const link = data?.payment_link;
-  if (!link?.id || !link?.order_id || typeof link?.url !== "string" || !link.url.startsWith("https://")) throw new Error("Square returned an incomplete checkout response.");
-  return { paymentLinkId: String(link.id), orderId: String(link.order_id), checkoutUrl: link.url, idempotencyKey };
+  const createdAt = canonicalProviderTimestamp(link?.created_at);
+  if (!link?.id || !link?.order_id || typeof link?.url !== "string" || !link.url.startsWith("https://") || !createdAt) {
+    throw new Error("Square returned an incomplete checkout response.");
+  }
+  return { paymentLinkId: String(link.id), orderId: String(link.order_id), checkoutUrl: link.url, createdAt, idempotencyKey };
 }
 
 /** Verify exact raw bytes and the configured URL, not a caller-supplied host. */
-export function verifySquareWebhook(rawBody: string, signature: string | null, config: Pick<SquareConfig, "webhookSignatureKey" | "webhookUrl">): boolean {
+export function verifySquareWebhook(rawBody: string | Uint8Array, signature: string | null, config: SquareWebhookConfig): boolean {
   if (!config.webhookSignatureKey || !config.webhookUrl || !signature || !/^[A-Za-z0-9+/]{43}=$/.test(signature)) return false;
-  const expected = createHmac("sha256", config.webhookSignatureKey).update(config.webhookUrl + rawBody).digest("base64");
+  const hmac = createHmac("sha256", config.webhookSignatureKey);
+  hmac.update(config.webhookUrl);
+  hmac.update(rawBody);
+  const expected = hmac.digest("base64");
   return timingSafeEqual(Buffer.from(signature), Buffer.from(expected));
 }
 

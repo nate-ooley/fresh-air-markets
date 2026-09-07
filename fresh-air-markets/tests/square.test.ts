@@ -1,27 +1,89 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
-import { squareConfig, createSquareCheckout, verifySquareWebhook, matchCompletedSquarePayment, paymentDeadline } from "../src/lib/square.ts";
+import {
+  squareCheckoutConfig,
+  squareConfig,
+  squareSandboxSetupConfig,
+  verifySquareSandboxSetup,
+  createSquareCheckout,
+  verifySquareWebhook,
+  matchCompletedSquarePayment,
+  paymentDeadline,
+} from "../src/lib/square.ts";
 
 const settings = { SQUARE_ACCESS_TOKEN: "test-token", SQUARE_LOCATION_ID: "test-location", SQUARE_MERCHANT_ID: "test-merchant", SQUARE_WEBHOOK_SIGNATURE_KEY: "test-key", SQUARE_WEBHOOK_URL: "https://unit-test.invalid/api/payments/square/webhook" };
+const sandboxSettings = { SQUARE_ENVIRONMENT: "sandbox", SQUARE_ALLOW_LIVE_PAYMENTS: "false", SQUARE_ACCESS_TOKEN: "sandbox-token", SQUARE_LOCATION_ID: "sandbox-location" };
 const config = squareConfig(settings);
 const approved = { reservationId: "qa-reservation", revision: 1, totalCents: 28000, description: "Four market dates, two booths", paymentDeadline: "2026-10-03T12:00:00Z" };
 const now = Date.parse("2026-10-01T12:00:00Z");
 
-test("Square defaults to sandbox, requires all settings, and blocks accidental live mode", () => {
+test("Square splits checkout, webhook, and setup configuration while blocking accidental live mode", () => {
   assert.equal(config.environment, "sandbox");
-  for (const key of Object.keys(settings)) assert.throws(() => squareConfig({ ...settings, [key]: "" }));
+  for (const key of ["SQUARE_ACCESS_TOKEN", "SQUARE_LOCATION_ID", "SQUARE_WEBHOOK_SIGNATURE_KEY", "SQUARE_WEBHOOK_URL"]) assert.throws(() => squareConfig({ ...settings, [key]: "" }));
+  assert.equal(squareConfig({ ...settings, SQUARE_MERCHANT_ID: "" }).merchantId, undefined);
+  assert.deepEqual(squareCheckoutConfig(sandboxSettings), { environment: "sandbox", accessToken: "sandbox-token", locationId: "sandbox-location", merchantId: undefined });
+  assert.deepEqual(squareSandboxSetupConfig(sandboxSettings), { environment: "sandbox", accessToken: "sandbox-token", locationId: "sandbox-location", merchantId: undefined });
   assert.throws(() => squareConfig({ ...settings, SQUARE_ENVIRONMENT: "production" }));
   assert.throws(() => squareConfig({ ...settings, SQUARE_ENVIRONMENT: "invalid" }));
   assert.throws(() => squareConfig({ ...settings, SQUARE_WEBHOOK_URL: "http://unit-test.invalid" }));
+  assert.throws(() => squareSandboxSetupConfig({ ...sandboxSettings, SQUARE_ENVIRONMENT: "production", SQUARE_ALLOW_LIVE_PAYMENTS: "true" }));
+  assert.throws(() => squareSandboxSetupConfig({ ...sandboxSettings, SQUARE_ALLOW_LIVE_PAYMENTS: "true" }));
   assert.equal(squareConfig({ ...settings, SQUARE_ENVIRONMENT: "production", SQUARE_ALLOW_LIVE_PAYMENTS: "true" }).environment, "production");
+});
+
+test("Sandbox setup retrieves the selected merchant and fences the configured active location", async () => {
+  const calls: { url: string; init: RequestInit | undefined }[] = [];
+  const transport = (async (url, init) => {
+    calls.push({ url: String(url), init });
+    if (String(url).endsWith("/v2/merchants/me")) return Response.json({ merchant: { id: "merchant-1", status: "ACTIVE" } });
+    if (String(url).endsWith("/v2/locations/sandbox-location")) return Response.json({ location: { id: "sandbox-location", merchant_id: "merchant-1", status: "ACTIVE" } });
+    throw new Error("Unexpected URL");
+  }) as typeof fetch;
+  const identity = await verifySquareSandboxSetup(squareSandboxSetupConfig(sandboxSettings), transport);
+  assert.deepEqual(identity, { merchantId: "merchant-1", locationId: "sandbox-location" });
+  assert.deepEqual(calls.map(call => call.url), [
+    "https://connect.squareupsandbox.com/v2/merchants/me",
+    "https://connect.squareupsandbox.com/v2/locations/sandbox-location",
+  ]);
+  assert.equal((calls[0].init?.headers as Record<string, string>).Authorization, "Bearer sandbox-token");
+  assert.equal((calls[0].init?.headers as Record<string, string>)["Square-Version"], "2026-08-19");
+});
+
+test("Sandbox setup rejects a mismatched merchant, inactive or foreign location, malformed payload, and provider-detail leakage", async () => {
+  const validMerchant = (async () => Response.json({ merchant: { id: "merchant-1", status: "ACTIVE" } })) as typeof fetch;
+  await assert.rejects(verifySquareSandboxSetup(squareSandboxSetupConfig({ ...sandboxSettings, SQUARE_MERCHANT_ID: "other-merchant" }), validMerchant));
+
+  for (const location of [
+    { id: "sandbox-location", merchant_id: "other-merchant", status: "ACTIVE" },
+    { id: "sandbox-location", merchant_id: "merchant-1", status: "INACTIVE" },
+    { id: "other-location", merchant_id: "merchant-1", status: "ACTIVE" },
+  ]) {
+    let calls = 0;
+    const transport = (async () => {
+      calls++;
+      return calls === 1
+        ? Response.json({ merchant: { id: "merchant-1", status: "ACTIVE" } })
+        : Response.json({ location });
+    }) as typeof fetch;
+    await assert.rejects(verifySquareSandboxSetup(squareSandboxSetupConfig(sandboxSettings), transport));
+  }
+
+  const malformed = (async () => Response.json({ merchant: { id: "merchant-1", status: "ACTIVE" } })) as typeof fetch;
+  await assert.rejects(verifySquareSandboxSetup(squareSandboxSetupConfig(sandboxSettings), malformed));
+
+  const privateDetail = (async () => new Response("private-provider-detail", { status: 401 })) as typeof fetch;
+  await assert.rejects(
+    verifySquareSandboxSetup(squareSandboxSetupConfig(sandboxSettings), privateDetail),
+    error => !String(error).includes("private-provider-detail") && String(error).includes("401"),
+  );
 });
 
 test("checkout contract sends exact cents, correct location, stable retry key, and no tipping", async () => {
   const calls: { url: string; body: Record<string, any>; headers: Record<string, string> }[] = [];
   const transport = (async (url, init) => {
     calls.push({ url: String(url), body: JSON.parse(String(init?.body)), headers: init?.headers as Record<string, string> });
-    return Response.json({ payment_link: { id: "link", order_id: "order", url: "https://square.link/qa" } });
+    return Response.json({ payment_link: { id: "link", order_id: "order", url: "https://square.link/qa", created_at: "2026-10-01T12:00:00.000Z" } });
   }) as typeof fetch;
   const first = await createSquareCheckout(config, approved, transport, now);
   const retry = await createSquareCheckout(config, approved, transport, now);
@@ -57,6 +119,7 @@ test("Square signature requires exact URL and raw body; malformed and Unicode si
   const raw = '{"event_id":"qa-event"}';
   const signature = createHmac("sha256", config.webhookSignatureKey).update(config.webhookUrl + raw).digest("base64");
   assert.equal(verifySquareWebhook(raw, signature, config), true);
+  assert.equal(verifySquareWebhook(new TextEncoder().encode(raw), signature, config), true);
   assert.equal(verifySquareWebhook(raw + " ", signature, config), false);
   assert.equal(verifySquareWebhook(raw, signature, { ...config, webhookUrl: config.webhookUrl + "/" }), false);
   for (const invalid of [null, "", "é".repeat(44), "A".repeat(43) + "="]) assert.equal(verifySquareWebhook(raw, invalid, config), false);
