@@ -16,6 +16,20 @@ jobs:
   test-and-build:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: qa
+          POSTGRES_PASSWORD: isolated-ci-only
+          POSTGRES_DB: fresh_air_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U qa -d fresh_air_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     defaults:
       run:
         working-directory: fresh-air-markets
@@ -34,5 +48,9 @@ jobs:
         run: npm ci
       - name: Run isolated regression tests
         run: npm test
+      - name: Verify shared limiter against isolated PostgreSQL
+        env:
+          DATABASE_TEST_URL: postgres://qa:isolated-ci-only@127.0.0.1:5432/fresh_air_test
+        run: npm run test:pg
       - name: Build portal
         run: npm run build

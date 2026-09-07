@@ -8,7 +8,7 @@ const { NextRequest } = require('next/server');
 
 // Invoke the real route functions in process. No server, browser, CRM or payment
 // request is made. External boundaries are replaced with observable test doubles.
-function loadRoute(relative, authenticated = true, overrides = {}) {
+function loadRoute(relative, authenticated = true, overrides = {}, limit = async () => ({ allowed: true })) {
   let mutations = 0;
   const store = {
     getAccountBySlug: async () => ({ id: 'qa-route-market' }),
@@ -30,6 +30,7 @@ function loadRoute(relative, authenticated = true, overrides = {}) {
     if (id === '@/lib/store') return { getStore: async () => store };
     if (id === '@/lib/auth') return { getSessionAccountId: async () => authenticated ? 'qa-route-market' : null };
     if (id === '@/lib/ghl') return { syncBookingToGhl: async () => { mutations++; } };
+    if (id === '@/lib/inquiry-rate-limit') return { consumeInquiryLimit: limit, inquiryClient: () => 'qa-client' };
     if (id.startsWith('@/lib/')) return require('../.test-build/' + id.slice(6) + '.js');
     return require(id);
   };
@@ -159,4 +160,59 @@ test('inquiry normalizes email and duplicate dates while preserving punctuation 
   assert.equal(result.writes[0].data.businessName, "QA Nate's Citrus & Crafts");
   assert.deepEqual(result.writes[0].data.dates, [body.dates[0]]);
   assert.equal(result.writes[0].totalPrice, 40);
+});
+
+test('inquiry IP limit stops before body parsing, market lookup, booking writes and CRM sync', async () => {
+  let lookups = 0;
+  const { route, mutations } = loadRoute('m/[slug]/inquiries', true, {
+    getAccountBySlug: async () => { lookups++; },
+  }, async (kind) => { assert.equal(kind, 'ip'); return { allowed: false, retryAfterSeconds: 123 }; });
+  const req = new NextRequest('https://unit-test.invalid/', { method: 'POST', body: '{broken' });
+  const response = await route.POST(req, { params: Promise.resolve({ slug: 'qa' }) });
+  assert.equal(response.status, 429);
+  assert.equal(response.headers.get('retry-after'), '123');
+  assert.equal(response.headers.get('cache-control'), 'no-store');
+  assert.equal(req.bodyUsed, false);
+  assert.equal(lookups + mutations(), 0);
+});
+
+test('inquiry email limit uses normalized market identity and blocks all downstream writes/sends', async () => {
+  let writes = 0;
+  const limits = [];
+  const { route, mutations } = loadRoute('m/[slug]/inquiries', true, {
+    getBooth: async () => ({ id: 'qa-booth', label: 'QA', pricePerDay: 40 }),
+    createInquiry: async () => { writes++; },
+  }, async (kind, subject) => {
+    limits.push([kind, subject]);
+    return { allowed: kind === 'ip', retryAfterSeconds: 600 };
+  });
+  const req = new NextRequest('https://unit-test.invalid/', { method: 'POST', body: JSON.stringify({ ...inquiryBody(), email: ' NATE@AUTOCRAFTSTUDIOS.COM ' }) });
+  const response = await route.POST(req, { params: Promise.resolve({ slug: 'qa' }) });
+  assert.equal(response.status, 429);
+  assert.deepEqual(limits, [['ip', 'qa-client'], ['email', JSON.stringify(['qa-route-market', 'nate@autocraftstudios.com'])]]);
+  assert.equal(writes + mutations(), 0);
+});
+
+test('inquiry fails closed when either shared limiter operation fails', async () => {
+  for (const failedKind of ['ip', 'email']) {
+    const { route, mutations } = loadRoute('m/[slug]/inquiries', true, {
+      getBooth: async () => ({ id: 'qa-booth', label: 'QA', pricePerDay: 40 }),
+    }, async kind => { if (kind === failedKind) throw new Error('Database unavailable'); return { allowed: true }; });
+    const response = await route.POST(new NextRequest('https://unit-test.invalid/', { method: 'POST', body: JSON.stringify(inquiryBody()) }), { params: Promise.resolve({ slug: 'qa' }) });
+    assert.equal(response.status, 503);
+    assert.equal(response.headers.get('retry-after'), '60');
+    assert.equal(mutations(), 0);
+    assert.doesNotMatch(await response.text(), /Database unavailable/);
+  }
+});
+
+test('inquiry blocks oversized bodies even with false or absent content length', async () => {
+  for (const headers of [{}, { 'content-length': '1' }, { 'content-length': '999999' }]) {
+    const { route, mutations } = loadRoute('m/[slug]/inquiries');
+    const response = await route.POST(new NextRequest('https://unit-test.invalid/', {
+      method: 'POST', headers, body: JSON.stringify({ ...inquiryBody(), message: 'x'.repeat(32768) }),
+    }), { params: Promise.resolve({ slug: 'qa' }) });
+    assert.equal(response.status, 413);
+    assert.equal(mutations(), 0);
+  }
 });

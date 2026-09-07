@@ -2,7 +2,7 @@
 
 Run `npm test` with Node 22. Tests compile the existing store and session modules into `.test-build`, then run directly against the code. They do not start a server, connect to HighLevel or Square, send messages, or change production data. The in-memory test vendors use the two addresses authorized for QA.
 
-The current 56 tests cover:
+The current 65 isolated tests cover:
 
 - All 2,160 combinations of application, agreement, insurance, food-license requirement and food-license status in the test matrix. Only two complete states qualify for date selection.
 - $30 full-season, $35 four-or-more consecutive market dates and $40 standard pricing, multiplied by final booth quantity.
@@ -37,3 +37,10 @@ The portal's current demo calendar and prices remain separate from the new Fresh
 The repository workflow `.github/workflows/ci.yml` runs the isolated suite and a production build on pull requests and pushes to main using Node 22. It has read-only repository permissions, receives no production credentials, and does not deploy.
 
 Five additional public inquiry route scenarios reject malformed text fields, invalid optional fields, text overflow and malformed/excessive dates; the positive scenario verifies email normalization, duplicate-date normalization, punctuation and market ownership. These are in-process route tests with a CRM double, not public-browser or real email evidence.
+
+
+## Inquiry abuse protection
+
+Nine new isolated cases cover IP/email limit responses, limiter failure without downstream writes/sends, bounded request bodies, concurrent in-memory boundaries, retention bounds, trusted-header handling and hashed identity scopes. See docs/inquiry-abuse-protection.md for policy and deployment requirements.
+
+After npm test compiles the sources, npm run test:pg runs five additional tests against a disposable local PostgreSQL database. GitHub Actions supplies this service with DATABASE_TEST_URL; the suite rejects remote or non-test database URLs. These checks cover shared counters across two pools with 100 concurrent requests, independent keys, expiry, non-extending blocked retries and persistence across client reconnection. They do not prove production deployment or reservation/application-handoff database behavior.

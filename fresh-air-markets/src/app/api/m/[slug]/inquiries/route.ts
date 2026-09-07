@@ -1,4 +1,5 @@
-import { readObjectBody } from "@/lib/request-body";
+import { readInquiryBody } from "@/lib/inquiry-body";
+import { consumeInquiryLimit, inquiryClient } from "@/lib/inquiry-rate-limit";
 import { NextRequest, NextResponse } from "next/server";
 import { getStore } from "@/lib/store";
 import { bookableDates } from "@/lib/dates";
@@ -9,15 +10,33 @@ export const dynamic = "force-dynamic";
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
+async function enforceLimit(kind: "ip" | "email", subject: string) {
+  try {
+    const decision = await consumeInquiryLimit(kind, subject);
+    if (decision.allowed) return null;
+    return NextResponse.json({ error: "Too many applications. Please wait and try again." }, {
+      status: 429, headers: { "Retry-After": String(decision.retryAfterSeconds), "Cache-Control": "no-store" },
+    });
+  } catch {
+    // A broken/missing shared limiter must not silently permit unbounded CRM sends.
+    return NextResponse.json({ error: "Applications are temporarily unavailable. Please try again shortly." }, {
+      status: 503, headers: { "Retry-After": "60", "Cache-Control": "no-store" },
+    });
+  }
+}
+
 /** Public: a vendor asks to rent a booth at this market. */
 export async function POST(req: NextRequest, { params }: { params: Promise<{ slug: string }> }) {
+  const limited = await enforceLimit("ip", inquiryClient(req.headers));
+  if (limited) return limited;
   const { slug } = await params;
   const store = await getStore();
   const account = await store.getAccountBySlug(slug);
   if (!account) return NextResponse.json({ error: "Market not found." }, { status: 404 });
 
-  const body = await readObjectBody(req);
-  if (!body) return NextResponse.json({ error: "A JSON object body is required." }, { status: 400 });
+  const parsed = await readInquiryBody(req);
+  if ("status" in parsed) return NextResponse.json({ error: parsed.error }, { status: parsed.status });
+  const { body } = parsed;
 
   // Validate types before normalization: String(array/object) can otherwise turn
   // malformed input into a seemingly valid vendor name, email or booth ID.
@@ -62,6 +81,9 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ slu
   if (errors.length > 0 || !booth) {
     return NextResponse.json({ error: errors.join(" ") }, { status: 400 });
   }
+
+  const emailLimited = await enforceLimit("email", JSON.stringify([account.id, email]));
+  if (emailLimited) return emailLimited;
 
   // A booth can only hold one vendor per day: block dates already approved.
   const [availability] = (await store.boothsWithAvailability(account.id, dates, false)).filter(
