@@ -71,8 +71,11 @@ function init(sql: Sql): Promise<void> {
           PRIMARY KEY (booking_id, date)
         )`;
       // Upgrade path for databases created before multi-tenancy.
-      await sql`ALTER TABLE booths ADD COLUMN IF NOT EXISTS market_id TEXT NOT NULL DEFAULT ${DEMO_MARKET_ID}`;
-      await sql`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS market_id TEXT NOT NULL DEFAULT ${DEMO_MARKET_ID}`;
+      // DDL defaults cannot use protocol bind parameters. This literal comes
+      // only from the internal seed constant, never request input.
+      const legacyMarketDefault = "'" + DEMO_MARKET_ID.replace(/'/g, "''") + "'";
+      await sql.unsafe(`ALTER TABLE booths ADD COLUMN IF NOT EXISTS market_id TEXT NOT NULL DEFAULT ${legacyMarketDefault}`);
+      await sql.unsafe(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS market_id TEXT NOT NULL DEFAULT ${legacyMarketDefault}`);
 
       const [{ count }] = await sql`SELECT count(*)::int AS count FROM accounts`;
       if (count === 0) {
@@ -97,8 +100,8 @@ function init(sql: Sql): Promise<void> {
       initialized.delete(sql); // allow retry on next request
       throw err;
     });
-  }
     initialized.set(sql, ready);
+  }
   return ready;
 }
 
@@ -254,6 +257,11 @@ export class PgStore implements Store {
     const sql = await db(this.connection);
     const id = randomUUID();
     await sql.begin(async (tx) => {
+      // Keep tenant ownership and active state valid until the inquiry commits,
+      // including when the booth changes after the route's availability check.
+      const owned = await tx`SELECT id FROM booths
+        WHERE id = ${input.boothId} AND market_id = ${marketId} AND active FOR SHARE`;
+      if (!owned.length) throw new Error("Booth is unavailable for this market.");
       await tx`INSERT INTO bookings (id, booth_id, market_id, status, total_price, message,
           vendor_name, business_name, email, phone, category)
         VALUES (${id}, ${input.boothId}, ${marketId}, 'pending', ${totalPrice}, ${input.message ?? ""},
