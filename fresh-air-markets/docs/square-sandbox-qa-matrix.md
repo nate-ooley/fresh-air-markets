@@ -39,7 +39,7 @@ end-to-end result below.
 | Sandbox identity | Preview-only `SQUARE_ACCESS_TOKEN` and `SQUARE_LOCATION_ID`; `SQUARE_ENVIRONMENT=sandbox`; `SQUARE_ALLOW_LIVE_PAYMENTS=false`. | L17–L19 |
 | Vercel system variables | **Automatically expose System Environment Variables** is enabled for the project, and the Preview runtime receives `VERCEL=1` and `VERCEL_ENV=preview`. | Preview-only negative-path harness |
 | Portal access | The same Preview has a QA-only `DATABASE_URL`, private `AUTH_SECRET`, and a signed-in QA manager account for the same market. | L18–L19 |
-| Database | The portal migration chain through `010`, then `011-square-payment-checkout-ledger.sql`, `012-square-webhook-events.sql`, and `013-final-reservation-writer.sql`, applied to the QA database. | L18–L19 |
+| Database | The portal migration chain through `010`, then `011-square-payment-checkout-ledger.sql`, `012-square-webhook-events.sql`, `013-final-reservation-writer.sql`, and `014-square-payment-expiry.sql`, applied to the QA database in that order. | L18–L19 |
 | Reservation source | The final CHECK/RESERVE writer creates an immutable QA `fame_reservations` row. Do not seed a row directly and call that an end-to-end pass. | L18–L19 |
 | Webhook subscription | After L18 has a stable Preview URL, set the exact `SQUARE_WEBHOOK_URL` ending in `/api/payments/square/webhook`, create a **Sandbox-only** subscription for `payment.created` and `payment.updated`, then store its Preview-only `SQUARE_WEBHOOK_SIGNATURE_KEY`. | L19 |
 | Negative-path harness | Preview-only `SQUARE_QA_*` controls with `VERCEL=1`, `VERCEL_ENV=preview`, Sandbox, and live payments disabled; a locally held signer secret; and one exact QA reservation/event target. The controls must be absent from Production. | L18-04, L18-05, L19-02–L19-05 |
@@ -52,7 +52,7 @@ it must exactly match that verified ID.
 
 Run the verifier through the Preview environment, as described in
 [square-sandbox-setup.md](./square-sandbox-setup.md). It makes only
-`GET /v2/merchants/me` and `GET /v2/locations/{locationId}`; it must create no
+`GET /v2/merchants` and `GET /v2/locations/{locationId}`; it must create no
 Square order, payment link, webhook, database record, or message.
 
 | Case | Action | Expected green evidence | Pressure / edge condition |
@@ -76,7 +76,7 @@ reservation. It must never accept those values from the request body.
 | L18-02 | Send five concurrent checkout requests for the same reservation. | After they settle: one payment-order row, one Square link/order, one stable idempotency key, and one immutable due time. Responses may be one `201`, `202` while leased, or `200` once the existing link is available; no distinct second link/order. | Replay/concurrency fence. |
 | L18-03 | Send a checkout request with attacker-controlled price, vendor email, dates, booth quantity, reservation ID, and redirect URL in the body; repeat from a QA manager in another market. | The first result uses only the path reservation and its committed database values. The other-market request returns `404` and creates no order. | Tests body substitution and market isolation. |
 | L18-04 | On one exact QA reservation, use `checkout_429`, `checkout_500`, and `checkout_timeout` before a usable link is persisted; then remove the fault, redeploy Preview, and retry that reservation. | Failure is safe (`503`/retry state); the lease is released, the idempotency key stays unchanged, and no due time is stored before a link exists. The later success creates one link and anchors the due time once, from Square's creation time. | The in-process fault never POSTs to Square; the normal read-only identity preflight may still run. |
-| L18-05 | On separate final QA reservations, use `checkout_permanent_400` and `checkout_expired_link`; then use nonprofit, expired, cancelled, declined, manual-review, and already-processing states. | Permanent or already-expired-link failure produces `failed` plus reservation `manual_review`, with no invented/replaced link. Each nonpayable/terminal fixture produces `409` or `202` as applicable and makes no Square provider call or link. | Verifies capacity is held/reviewed rather than silently freed, and that a normal checkout route never reports `paid`. |
+| L18-05 | On separate final QA reservations, use `checkout_permanent_400` and `checkout_expired_link`; then use nonprofit, expired, cancelled, declined, manual-review, and already-processing states. On one labeled due hold, call the authenticated, market-scoped expiry scheduler with the valid Sandbox identity. | Permanent or already-expired-link failure produces `failed` plus reservation `manual_review`, with no invented/replaced link. Each nonpayable/terminal fixture produces `409` or `202` as applicable and makes no Square provider call or link. For the due hold, record `expiry_pending` + `payment_pending` + a retirement item before deletion; release happens only when Square returns the saved link ID and matching `cancelled_order_id`, or a retry finds the exact saved order at the saved location in `CANCELED` state. Missing/mismatched/`OPEN`/`COMPLETED` evidence is manual review with capacity held. | Verifies capacity is held/reviewed rather than silently freed, a normal checkout route never reports `paid`, and a hosted link/order is proved retired before its allocation can be reassigned. |
 
 ## L19 — Signed webhook receipt and reconciliation (five cases)
 
@@ -108,7 +108,8 @@ environment:
 2. A QA database with the baseline schema and migrations
    through `010`, then `011-square-payment-checkout-ledger.sql`,
    `012-square-webhook-events.sql`, and
-   `013-final-reservation-writer.sql` in that order.
+   `013-final-reservation-writer.sql`, and
+   `014-square-payment-expiry.sql` in that order.
 3. The final CHECK/RESERVE writer that produces the immutable reservation used
    by the checkout route.
 4. A stable HTTPS Preview URL and the Sandbox-only Square subscription with

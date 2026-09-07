@@ -2,7 +2,7 @@
 
 Run `npm test` with Node 22. Tests compile the existing store and session modules into `.test-build`, then run directly against the code. They do not start a server, connect to HighLevel or Square, send messages, or change production data. The in-memory test vendors use the two addresses authorized for QA.
 
-The current 78 isolated tests cover:
+The current isolated suite covers:
 
 - All 2,160 combinations of application, agreement, insurance, food-license requirement and food-license status in the test matrix. Only two complete states qualify for date selection.
 - $30 full-season, $35 four-or-more consecutive market dates and $40 standard pricing, multiplied by final booth quantity.
@@ -24,7 +24,7 @@ Additional September 7 coverage:
 - Exactly 48 elapsed hours across both daylight-saving changes.
 - The corrected Fresh Air season has 35 unique Saturdays from October 3, 2026 through May 29, 2027; a two-booth Full Season quote is $2,100.
 
-These are component/contract passes. Square transport is replaced with a test double; no external payment is created. The authenticated final-reservation route, checkout route, and durable webhook processing are present, but account credentials, deployed database migrations, and the expiry worker still need QA evidence.
+These are component/contract passes. Square transport is replaced with a test double; no external payment is created. The authenticated final-reservation route, checkout route, durable webhook processing, and expiry worker are present, but account credentials, deployed database migrations, trusted scheduler, and real Sandbox deletion still need QA evidence.
 
 ## Limits of this evidence
 
@@ -43,7 +43,7 @@ Five additional public inquiry route scenarios reject malformed text fields, inv
 
 Nine new isolated cases cover IP/email limit responses, limiter failure without downstream writes/sends, bounded request bodies, concurrent in-memory boundaries, retention bounds, trusted-header handling and hashed identity scopes. See docs/inquiry-abuse-protection.md for policy and deployment requirements.
 
-After npm test compiles the sources, npm run test:pg runs the PostgreSQL suites against a disposable local database. GitHub Actions supplies this service with DATABASE_TEST_URL; the suite rejects remote or non-test database URLs. The final-reservation suite applies migrations through `013`, races 100 exact retries and competing capacity requests, checks immutable provenance/quote guards, and forces a ledger failure to prove complete rollback. The separate booking-store suite below covers existing booth approval transactions. They do not prove production deployment.
+After npm test compiles the sources, npm run test:pg runs the PostgreSQL suites against a disposable local database. GitHub Actions supplies this service with DATABASE_TEST_URL; the suite rejects remote or non-test database URLs. The final-reservation suite applies migrations through `013`, races 100 exact retries and competing capacity requests, checks immutable provenance/quote guards, and forces a ledger failure to prove complete rollback. The expiry suite applies `014`, races market-scoped deadline claims, holds capacity until mocked provider cancellation proof confirms, checks retry/404 exact-order recovery, parent-mapping/identity fences, and a signed payment event during `expiry_pending` to manual review. The separate booking-store suite below covers existing booth approval transactions. They do not prove production deployment.
 
 Five application-handoff database checks cover 100 concurrent duplicate deliveries across pools, conflicting event reuse, original application/snapshot preservation with later events, identity separation across contact/season/location/market, and full transaction rollback with successful exact retry over a new connection. The disposable database supplies only the accounts(id) prerequisite plus the actual additive handoff migration; full production schema compatibility and deployed CRM wiring remain unverified. No CRM contact, email or payment API is called.
 

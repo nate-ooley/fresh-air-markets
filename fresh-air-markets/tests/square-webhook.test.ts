@@ -18,7 +18,7 @@ function body(patch: Record<string, unknown> = {}) {
     type: "payment.updated",
     merchant_id: "qa-merchant",
     created_at: "2026-09-07T18:00:00.000Z",
-    data: { object: { payment: {
+    data: { type: "payment", id: "qa-payment-data-1", object: { payment: {
       id: "qa-payment-1",
       status: "COMPLETED",
       location_id: "qa-location",
@@ -131,5 +131,23 @@ test("malformed, oversized, and non-payment events never reach persistence", asy
   const hugeRaw = "x".repeat(128 * 1024 + 1);
   const huge = await handleSquarePaymentWebhook(request(hugeRaw), config, persist);
   assert.equal(huge.status, 413);
+  assert.equal(writes, 0);
+});
+
+test("only Square's payment envelope and valid RFC 3339 timestamps can reach persistence", async () => {
+  let writes = 0;
+  const persist = async () => { writes++; return { kind: "paid" } as const; };
+  const wrongEnvelope = JSON.parse(body()) as Record<string, any>;
+  wrongEnvelope.data.type = "refund";
+  const normalizedImpossibleDate = JSON.parse(body()) as Record<string, any>;
+  normalizedImpossibleDate.data.object.payment.updated_at = "2026-02-30T12:00:00Z";
+  const timezoneLessDate = JSON.parse(body()) as Record<string, any>;
+  timezoneLessDate.created_at = "2026-10-01T12:00:00";
+  const invalidOffset = JSON.parse(body()) as Record<string, any>;
+  invalidOffset.data.object.payment.updated_at = "2026-10-01T12:00:00+24:00";
+  for (const malformed of [wrongEnvelope, normalizedImpossibleDate, timezoneLessDate, invalidOffset]) {
+    const response = await handleSquarePaymentWebhook(request(JSON.stringify(malformed)), config, persist);
+    assert.equal(response.status, 400);
+  }
   assert.equal(writes, 0);
 });

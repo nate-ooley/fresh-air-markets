@@ -168,7 +168,15 @@ async function writeReceiptOutcome(
     WHERE square_environment = ${environment} AND event_id = ${event.eventId}`;
 }
 
-/** Freeze a still-held reservation for an operator; do not release capacity. */
+/**
+ * Freeze a still-held reservation for an operator; do not release capacity.
+ *
+ * `getSquarePaymentOrderForWebhook()` holds the payment order and reservation
+ * before calling this helper. Keep that lock order when an expiry-pending
+ * hold is involved, then cancel its retirement work item. A signed delivery
+ * that arrives after the deadline claim is payment evidence, so automatic
+ * link retirement/capacity release must stop for an operator decision.
+ */
 async function placeInManualReview(
   tx: QuerySql,
   target: SquarePaymentWebhookTarget,
@@ -177,6 +185,9 @@ async function placeInManualReview(
 ): Promise<void> {
   // Paid/expired/cancelled rows keep their terminal truth. The event receipt
   // still becomes manual-review evidence, instead of reviving or overwriting it.
+  // An expiry-pending order is deliberately not terminal: fence it and its
+  // pending/leased link deletion so no capacity can be released automatically.
+  const cancelRetirement = target.orderStatus === "expiry_pending";
   const [order] = await tx<{ reservation_id: string; market_id: string }[]>`
     UPDATE fame_payment_orders
     SET status = 'manual_review',
@@ -185,15 +196,31 @@ async function placeInManualReview(
         lease_token = NULL,
         updated_at = ${now}
     WHERE id = ${target.id}
-      AND status IN ('pending_checkout', 'processing_checkout', 'checkout_created')
+      AND status IN ('pending_checkout', 'processing_checkout', 'checkout_created', 'expiry_pending')
     RETURNING reservation_id, market_id`;
   if (!order) return;
-  await tx`
+  const [reservation] = await tx`
     UPDATE fame_reservations
     SET state = 'manual_review', updated_at = ${now}
     WHERE id = ${order.reservation_id}
       AND market_id = ${order.market_id}
-      AND state IN ('held', 'payment_pending')`;
+      AND state IN ('held', 'payment_pending')
+    RETURNING id`;
+  if (!reservation) throw new Error("Reservation changed before webhook manual review.");
+  if (!cancelRetirement) return;
+  // This is intentionally after the order/reservation locks above, matching
+  // the retirement worker. It cancels an in-flight lease as well as a pending
+  // item; a DELETE that already returned can only finalize if it obtains the
+  // same locks before this transaction, otherwise it becomes operator review.
+  await tx`
+    UPDATE fame_square_payment_link_retirements
+    SET status = 'manual_review',
+        locked_until = NULL,
+        lease_token = NULL,
+        last_error_code = ${reason},
+        updated_at = ${now}
+    WHERE payment_order_id = ${target.id}
+      AND status IN ('pending', 'processing')`;
 }
 
 async function recordNonCompletedProviderState(

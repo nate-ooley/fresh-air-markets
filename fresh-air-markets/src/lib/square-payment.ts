@@ -1,6 +1,8 @@
 import {
   createSquareCheckout,
+  deleteSquarePaymentLink,
   PAYMENT_WINDOW_MS,
+  retrieveSquareOrderForRetirement,
   type ApprovedCheckout,
 } from "./square";
 
@@ -20,6 +22,7 @@ export type SquarePaymentOrderStatus =
   | "pending_checkout"
   | "processing_checkout"
   | "checkout_created"
+  | "expiry_pending"
   | "paid"
   | "expired"
   | "cancelled"
@@ -102,6 +105,57 @@ export interface SquarePaymentCheckoutStore {
   }): Promise<void>;
 }
 
+/**
+ * At the deadline the order is fenced as `expiry_pending` before Square is
+ * called. This independent lease keeps the external DELETE retryable without
+ * reopening the hold or re-allocating its booths before retirement confirms.
+ */
+export interface SquarePaymentLinkRetirement {
+  paymentOrderId: string;
+  marketId: string;
+  environment: "sandbox";
+  merchantId: string;
+  locationId: string;
+  paymentLinkId: string;
+  /** Exact Square order that must be cancelled before capacity can release. */
+  squareOrderId: string;
+  attempt: number;
+}
+
+export type SquarePaymentLinkRetirementClaim =
+  | { kind: "retirement_required"; retirement: SquarePaymentLinkRetirement; leaseToken: string }
+  | { kind: "no_work" }
+  | { kind: "in_progress"; paymentOrderId: string }
+  | { kind: "manual_review"; paymentOrderId: string };
+
+export type SquarePaymentLinkRetirementFinalizeResult =
+  | { kind: "retired" }
+  | { kind: "manual_review" }
+  | { kind: "stale" };
+
+export interface SquarePaymentLinkRetirementStore {
+  claimPaymentLinkRetirement(input: {
+    marketId: string;
+    square: Pick<VerifiedSquareSandbox, "environment" | "merchantId" | "locationId">;
+    now: Date;
+    leaseSeconds: number;
+  }): Promise<SquarePaymentLinkRetirementClaim>;
+  completePaymentLinkRetirement(input: {
+    paymentOrderId: string;
+    leaseToken: string;
+    /** Provider-confirmed cancelled order ID, fenced to the durable order. */
+    cancelledOrderId: string;
+    retiredAt: Date;
+  }): Promise<SquarePaymentLinkRetirementFinalizeResult>;
+  failPaymentLinkRetirement(input: {
+    paymentOrderId: string;
+    leaseToken: string;
+    code: string;
+    retryable: boolean;
+    attemptedAt: Date;
+  }): Promise<void>;
+}
+
 export type SquareCheckoutDispatchResult =
   | { kind: "created"; order: SquarePaymentOrder }
   | { kind: "existing"; order: SquarePaymentOrder }
@@ -110,6 +164,14 @@ export type SquareCheckoutDispatchResult =
   | { kind: "failed"; paymentOrderId: string }
   | { kind: "not_found" }
   | { kind: "not_payable"; reason: SquareCheckoutNotPayableReason };
+
+export type SquarePaymentLinkRetirementDispatchResult =
+  | { kind: "retired"; paymentOrderId: string }
+  | { kind: "already_retired"; paymentOrderId: string }
+  | { kind: "in_progress"; paymentOrderId: string }
+  | { kind: "retry_scheduled"; paymentOrderId: string }
+  | { kind: "manual_review"; paymentOrderId: string }
+  | { kind: "no_work" };
 
 const RESERVATION_ID = /^[A-Za-z0-9:_-]{1,192}$/;
 
@@ -220,5 +282,118 @@ export async function dispatchSquareSandboxCheckout(input: {
     return failure.retryable
       ? { kind: "retry_scheduled", paymentOrderId: claim.order.id }
       : { kind: "failed", paymentOrderId: claim.order.id };
+  }
+}
+
+/**
+ * Retire one already-expired Square Sandbox hosted link. The database lease
+ * and the provider's DELETE endpoint are deliberately separate: an outage
+ * leaves a durable pending retirement that a later scheduler run can retry.
+ * The reservation stays payment-pending and keeps its capacity until the
+ * provider confirms the link is gone; completion then expires both records
+ * atomically.
+ */
+export async function dispatchSquarePaymentLinkRetirement(input: {
+  /** The one configured portal market this scheduler is permitted to touch. */
+  marketId: string;
+  square: VerifiedSquareSandbox;
+  store: SquarePaymentLinkRetirementStore;
+  transport?: typeof fetch;
+  now?: Date;
+  leaseSeconds?: number;
+}): Promise<SquarePaymentLinkRetirementDispatchResult> {
+  if (input.square.environment !== "sandbox") throw new Error("Only Square Sandbox payment-link retirement is enabled.");
+  if (!validSquareReservationId(input.marketId)) throw new Error("Invalid market ID.");
+  const now = input.now ?? new Date();
+  if (!Number.isFinite(now.valueOf())) throw new Error("A valid server time is required.");
+  const leaseSeconds = input.leaseSeconds ?? 60;
+  if (!Number.isSafeInteger(leaseSeconds) || leaseSeconds < 10 || leaseSeconds > 300) {
+    throw new Error("Payment-link retirement lease is invalid.");
+  }
+  const claim = await input.store.claimPaymentLinkRetirement({
+    marketId: input.marketId,
+    square: input.square,
+    now,
+    leaseSeconds,
+  });
+  if (claim.kind === "no_work") return claim;
+  if (claim.kind === "in_progress") return claim;
+  if (claim.kind === "manual_review") return claim;
+  // The durable row is identity-fenced at creation and is rechecked when it
+  // is claimed. Do not let an unrelated configured Square location delete it.
+  if (claim.retirement.environment !== input.square.environment
+    || claim.retirement.merchantId !== input.square.merchantId
+    || claim.retirement.locationId !== input.square.locationId) {
+    await input.store.failPaymentLinkRetirement({
+      paymentOrderId: claim.retirement.paymentOrderId,
+      leaseToken: claim.leaseToken,
+      code: "square_retirement_identity_mismatch",
+      retryable: false,
+      attemptedAt: now,
+    });
+    return { kind: "manual_review", paymentOrderId: claim.retirement.paymentOrderId };
+  }
+  try {
+    const deletion = await deleteSquarePaymentLink(input.square, claim.retirement.paymentLinkId, input.transport);
+    let cancelledOrderId: string | null = null;
+    let proofFailure: string | null = null;
+    if (deletion.kind === "deleted") {
+      if (deletion.paymentLinkId !== claim.retirement.paymentLinkId) {
+        proofFailure = "square_retirement_link_id_mismatch";
+      } else if (deletion.cancelledOrderId !== claim.retirement.squareOrderId) {
+        proofFailure = deletion.cancelledOrderId
+          ? "square_retirement_cancelled_order_mismatch"
+          : "square_retirement_cancelled_order_missing";
+      } else {
+        cancelledOrderId = deletion.cancelledOrderId;
+      }
+    } else {
+      // Retry after a process crash can see a missing link. Recover only when
+      // Square's exact stored order is demonstrably CANCELED at this location;
+      // OPEN, COMPLETED, absent, or malformed state remains operator review.
+      const recovered = await retrieveSquareOrderForRetirement(input.square, claim.retirement.squareOrderId, input.transport);
+      if (recovered.orderId === claim.retirement.squareOrderId
+        && recovered.locationId === input.square.locationId
+        && recovered.state === "CANCELED") {
+        cancelledOrderId = recovered.orderId;
+      } else {
+        proofFailure = "square_retirement_missing_link_unproven";
+      }
+    }
+    if (!cancelledOrderId) {
+      await input.store.failPaymentLinkRetirement({
+        paymentOrderId: claim.retirement.paymentOrderId,
+        leaseToken: claim.leaseToken,
+        code: proofFailure ?? "square_retirement_cancellation_unproven",
+        retryable: false,
+        attemptedAt: now,
+      });
+      return { kind: "manual_review", paymentOrderId: claim.retirement.paymentOrderId };
+    }
+    const completed = await input.store.completePaymentLinkRetirement({
+      paymentOrderId: claim.retirement.paymentOrderId,
+      leaseToken: claim.leaseToken,
+      cancelledOrderId,
+      retiredAt: now,
+    });
+    if (completed.kind === "retired") return { kind: "retired", paymentOrderId: claim.retirement.paymentOrderId };
+    if (completed.kind === "manual_review") return { kind: "manual_review", paymentOrderId: claim.retirement.paymentOrderId };
+    return { kind: "in_progress", paymentOrderId: claim.retirement.paymentOrderId };
+  } catch (error) {
+    const failure = classifySquareCheckoutFailure(error);
+    try {
+      await input.store.failPaymentLinkRetirement({
+        paymentOrderId: claim.retirement.paymentOrderId,
+        leaseToken: claim.leaseToken,
+        code: failure.code,
+        retryable: failure.retryable,
+        attemptedAt: now,
+      });
+    } catch {
+      return { kind: "retry_scheduled", paymentOrderId: claim.retirement.paymentOrderId };
+    }
+    return failure.retryable
+      ? { kind: "retry_scheduled", paymentOrderId: claim.retirement.paymentOrderId }
+      : { kind: "manual_review", paymentOrderId: claim.retirement.paymentOrderId };
   }
 }

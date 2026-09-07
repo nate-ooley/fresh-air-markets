@@ -24,6 +24,9 @@ test("Square splits checkout, webhook, and setup configuration while blocking ac
   assert.equal(squareConfig({ ...settings, SQUARE_MERCHANT_ID: "" }).merchantId, undefined);
   assert.deepEqual(squareCheckoutConfig(sandboxSettings), { environment: "sandbox", accessToken: "sandbox-token", locationId: "sandbox-location", merchantId: undefined });
   assert.deepEqual(squareSandboxSetupConfig(sandboxSettings), { environment: "sandbox", accessToken: "sandbox-token", locationId: "sandbox-location", merchantId: undefined });
+  for (const key of ["SQUARE_ACCESS_TOKEN", "SQUARE_LOCATION_ID"]) {
+    assert.throws(() => squareSandboxSetupConfig({ ...sandboxSettings, [key]: "" }));
+  }
   assert.throws(() => squareConfig({ ...settings, SQUARE_ENVIRONMENT: "production" }));
   assert.throws(() => squareConfig({ ...settings, SQUARE_ENVIRONMENT: "invalid" }));
   assert.throws(() => squareConfig({ ...settings, SQUARE_WEBHOOK_URL: "http://unit-test.invalid" }));
@@ -36,22 +39,41 @@ test("Sandbox setup retrieves the selected merchant and fences the configured ac
   const calls: { url: string; init: RequestInit | undefined }[] = [];
   const transport = (async (url, init) => {
     calls.push({ url: String(url), init });
-    if (String(url).endsWith("/v2/merchants/me")) return Response.json({ merchant: { id: "merchant-1", status: "ACTIVE" } });
+    if (String(url).endsWith("/v2/merchants")) return Response.json({ merchant: [{ id: "merchant-1", status: "ACTIVE" }] });
     if (String(url).endsWith("/v2/locations/sandbox-location")) return Response.json({ location: { id: "sandbox-location", merchant_id: "merchant-1", status: "ACTIVE" } });
     throw new Error("Unexpected URL");
   }) as typeof fetch;
   const identity = await verifySquareSandboxSetup(squareSandboxSetupConfig(sandboxSettings), transport);
   assert.deepEqual(identity, { merchantId: "merchant-1", locationId: "sandbox-location" });
   assert.deepEqual(calls.map(call => call.url), [
-    "https://connect.squareupsandbox.com/v2/merchants/me",
+    "https://connect.squareupsandbox.com/v2/merchants",
     "https://connect.squareupsandbox.com/v2/locations/sandbox-location",
   ]);
   assert.equal((calls[0].init?.headers as Record<string, string>).Authorization, "Bearer sandbox-token");
   assert.equal((calls[0].init?.headers as Record<string, string>)["Square-Version"], "2026-08-19");
 });
 
-test("Sandbox setup rejects a mismatched merchant, inactive or foreign location, malformed payload, and provider-detail leakage", async () => {
-  const validMerchant = (async () => Response.json({ merchant: { id: "merchant-1", status: "ACTIVE" } })) as typeof fetch;
+test("Sandbox identity verification stays read-only and consistent across five concurrent checks", async () => {
+  const calls: { url: string; method: string | undefined }[] = [];
+  const transport = (async (url, init) => {
+    calls.push({ url: String(url), method: init?.method });
+    if (String(url).endsWith("/v2/merchants")) return Response.json({ merchant: [{ id: "merchant-1", status: "ACTIVE" }] });
+    if (String(url).endsWith("/v2/locations/sandbox-location")) return Response.json({ location: { id: "sandbox-location", merchant_id: "merchant-1", status: "ACTIVE" } });
+    throw new Error("Unexpected URL");
+  }) as typeof fetch;
+
+  const identities = await Promise.all(Array.from({ length: 5 }, () => verifySquareSandboxSetup(squareSandboxSetupConfig(sandboxSettings), transport)));
+  assert.deepEqual(identities, Array.from({ length: 5 }, () => ({ merchantId: "merchant-1", locationId: "sandbox-location" })));
+  assert.equal(calls.length, 10);
+  assert.deepEqual(new Set(calls.map(call => call.method)), new Set(["GET"]));
+  assert.deepEqual(new Set(calls.map(call => call.url)), new Set([
+    "https://connect.squareupsandbox.com/v2/merchants",
+    "https://connect.squareupsandbox.com/v2/locations/sandbox-location",
+  ]));
+});
+
+test("Sandbox setup rejects a mismatched merchant, invalid merchant list, inactive or foreign location, malformed payload, and provider-detail leakage", async () => {
+  const validMerchant = (async () => Response.json({ merchant: [{ id: "merchant-1", status: "ACTIVE" }] })) as typeof fetch;
   await assert.rejects(verifySquareSandboxSetup(squareSandboxSetupConfig({ ...sandboxSettings, SQUARE_MERCHANT_ID: "other-merchant" }), validMerchant));
 
   for (const location of [
@@ -63,14 +85,21 @@ test("Sandbox setup rejects a mismatched merchant, inactive or foreign location,
     const transport = (async () => {
       calls++;
       return calls === 1
-        ? Response.json({ merchant: { id: "merchant-1", status: "ACTIVE" } })
+        ? Response.json({ merchant: [{ id: "merchant-1", status: "ACTIVE" }] })
         : Response.json({ location });
     }) as typeof fetch;
     await assert.rejects(verifySquareSandboxSetup(squareSandboxSetupConfig(sandboxSettings), transport));
   }
 
-  const malformed = (async () => Response.json({ merchant: { id: "merchant-1", status: "ACTIVE" } })) as typeof fetch;
-  await assert.rejects(verifySquareSandboxSetup(squareSandboxSetupConfig(sandboxSettings), malformed));
+  for (const merchantPayload of [
+    { merchant: [] },
+    { merchant: [{ id: "merchant-1", status: "ACTIVE" }, { id: "merchant-2", status: "ACTIVE" }] },
+    { merchant: [{ id: "merchant-1", status: "INACTIVE" }] },
+    { merchant: { id: "merchant-1", status: "ACTIVE" } },
+  ]) {
+    const malformed = (async () => Response.json(merchantPayload)) as typeof fetch;
+    await assert.rejects(verifySquareSandboxSetup(squareSandboxSetupConfig(sandboxSettings), malformed));
+  }
 
   const privateDetail = (async () => new Response("private-provider-detail", { status: 401 })) as typeof fetch;
   await assert.rejects(
@@ -132,12 +161,12 @@ test("Square official signature sample matches independently supplied expected v
 test("only a completed payment for the exact merchant, location, order and amount qualifies", () => {
   const expected = { merchantId: "m", locationId: "l", orderId: "o", totalCents: 28000 };
   const payment = { id: "p", status: "COMPLETED", location_id: "l", order_id: "o", amount_money: { amount: 28000, currency: "USD" } };
-  const event = { event_id: "e", type: "payment.updated", merchant_id: "m", data: { object: { payment } } };
+  const event = { event_id: "e", type: "payment.updated", merchant_id: "m", data: { type: "payment", id: "event-payment", object: { payment } } };
   assert.deepEqual(matchCompletedSquarePayment(event, expected), { eventId: "e", paymentId: "p" });
   for (const patch of [{ status: "FAILED" }, { status: "CANCELED" }, { status: "APPROVED" }, { location_id: "other" }, { order_id: "other" }, { amount_money: { amount: 27999, currency: "USD" } }, { amount_money: { amount: 28000, currency: "CAD" } }]) {
-    assert.equal(matchCompletedSquarePayment({ ...event, data: { object: { payment: { ...payment, ...patch } } } }, expected), null);
+    assert.equal(matchCompletedSquarePayment({ ...event, data: { ...event.data, object: { payment: { ...payment, ...patch } } } }, expected), null);
   }
-  for (const invalid of [null, [], {}, { ...event, merchant_id: "other" }, { ...event, event_id: "" }, { ...event, type: "refund.updated" }]) assert.equal(matchCompletedSquarePayment(invalid, expected), null);
+  for (const invalid of [null, [], {}, { ...event, merchant_id: "other" }, { ...event, event_id: "" }, { ...event, type: "refund.updated" }, { ...event, data: { ...event.data, type: "refund" } }]) assert.equal(matchCompletedSquarePayment(invalid, expected), null);
 });
 
 test("48-hour deadline uses elapsed hours across daylight-saving changes", () => {

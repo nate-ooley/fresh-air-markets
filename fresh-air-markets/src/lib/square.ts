@@ -88,6 +88,10 @@ function asObject(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
 }
 
+function asArray(value: unknown): unknown[] | null {
+  return Array.isArray(value) ? value : null;
+}
+
 async function getSquareSandboxJson(config: SquareSandboxSetupConfig, path: string, transport: typeof fetch): Promise<unknown> {
   let response: Response;
   try {
@@ -118,8 +122,12 @@ async function getSquareSandboxJson(config: SquareSandboxSetupConfig, path: stri
  * nonblank SQUARE_MERCHANT_ID is an optional mismatch guard, never a requirement.
  */
 export async function verifySquareSandboxSetup(config: SquareSandboxSetupConfig, transport: typeof fetch = fetch): Promise<SquareSandboxIdentity> {
-  const merchantPayload = asObject(await getSquareSandboxJson(config, "/v2/merchants/me", transport));
-  const merchant = asObject(merchantPayload?.merchant);
+  // Square's ListMerchants endpoint returns the merchant selected by the
+  // access token as a one-element `merchant` array. Do not use an undocumented
+  // `/me` path or accept an ambiguous multi-merchant response.
+  const merchantPayload = asObject(await getSquareSandboxJson(config, "/v2/merchants", transport));
+  const merchants = asArray(merchantPayload?.merchant);
+  const merchant = merchants?.length === 1 ? asObject(merchants[0]) : null;
   const merchantId = asNonBlankString(merchant?.id);
   if (!merchantId || merchant?.status !== "ACTIVE") throw new Error("Square sandbox merchant identity is invalid or inactive.");
   if (config.merchantId && config.merchantId !== merchantId) throw new Error("Configured Square merchant does not match the Sandbox access token.");
@@ -178,6 +186,109 @@ export async function createSquareCheckout(config: Pick<SquareCheckoutConfig, "e
   return { paymentLinkId: String(link.id), orderId: String(link.order_id), checkoutUrl: link.url, createdAt, idempotencyKey };
 }
 
+export type SquarePaymentLinkRetirementResult =
+  | { kind: "deleted"; paymentLinkId: string | null; cancelledOrderId: string | null }
+  | { kind: "not_found" };
+
+/** Minimal, non-sensitive evidence used only to recover a post-DELETE crash. */
+export interface SquareOrderRetirementRecovery {
+  orderId: string | null;
+  locationId: string | null;
+  state: string | null;
+}
+
+/**
+ * Deletes a hosted payment link after its locally recorded hold has expired.
+ *
+ * The caller must first durably fence the reservation/order as expiry-pending
+ * and own a retirement lease. The caller must require the response's exact
+ * link and cancelled-order IDs before it finalizes capacity. A 404 is not by
+ * itself proof of cancellation; it is returned for recovery reconciliation.
+ * This adapter deliberately returns no provider response body.
+ */
+export async function deleteSquarePaymentLink(
+  config: Pick<SquareCheckoutConfig, "environment" | "accessToken">,
+  paymentLinkId: string,
+  transport: typeof fetch = fetch,
+): Promise<SquarePaymentLinkRetirementResult> {
+  if (config.environment !== "sandbox") throw new Error("Only Square Sandbox payment-link retirement is enabled.");
+  if (typeof paymentLinkId !== "string" || !/^[A-Za-z0-9._:-]{1,255}$/.test(paymentLinkId)) {
+    throw new Error("Square payment-link ID is invalid.");
+  }
+  let response: Response;
+  try {
+    response = await transport(`${SQUARE_SANDBOX_API_BASE}/v2/online-checkout/payment-links/${encodeURIComponent(paymentLinkId)}`, {
+      method: "DELETE",
+      headers: {
+        Authorization: `Bearer ${config.accessToken}`,
+        "Square-Version": SQUARE_API_VERSION,
+        "Content-Type": "application/json",
+      },
+      signal: AbortSignal.timeout(15000),
+    });
+  } catch {
+    throw new Error("Square payment-link retirement request failed.");
+  }
+  // A crash after a successful provider delete can make a retry see 404. It
+  // is not sufficient proof that the exact stored order was cancelled: the
+  // caller must reconcile that case through RetrieveOrder before releasing
+  // capacity.
+  if (response.status === 404) return { kind: "not_found" };
+  if (!response.ok) throw new Error(`Square payment-link retirement failed (${response.status}).`);
+  try {
+    const payload = asObject(await response.json());
+    return {
+      kind: "deleted",
+      paymentLinkId: asNonBlankString(payload?.id),
+      cancelledOrderId: asNonBlankString(payload?.cancelled_order_id),
+    };
+  } catch {
+    // A 2xx response without parseable IDs is not cancellation proof.
+    return { kind: "deleted", paymentLinkId: null, cancelledOrderId: null };
+  }
+}
+
+/**
+ * Reconciles the exact durable order after a retry sees a missing link. Only a
+ * matching `CANCELED` order can prove that a prior delete retired the hold.
+ */
+export async function retrieveSquareOrderForRetirement(
+  config: Pick<SquareCheckoutConfig, "environment" | "accessToken">,
+  squareOrderId: string,
+  transport: typeof fetch = fetch,
+): Promise<SquareOrderRetirementRecovery> {
+  if (config.environment !== "sandbox") throw new Error("Only Square Sandbox retirement recovery is enabled.");
+  if (typeof squareOrderId !== "string" || !/^[A-Za-z0-9._:-]{1,255}$/.test(squareOrderId)) {
+    throw new Error("Square order ID is invalid.");
+  }
+  let response: Response;
+  try {
+    response = await transport(`${SQUARE_SANDBOX_API_BASE}/v2/orders/${encodeURIComponent(squareOrderId)}`, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${config.accessToken}`,
+        "Square-Version": SQUARE_API_VERSION,
+        Accept: "application/json",
+      },
+      signal: AbortSignal.timeout(15000),
+    });
+  } catch {
+    throw new Error("Square retirement recovery request failed.");
+  }
+  if (!response.ok) throw new Error(`Square retirement recovery failed (${response.status}).`);
+  try {
+    const payload = asObject(await response.json());
+    const order = asObject(payload?.order);
+    return {
+      orderId: asNonBlankString(order?.id),
+      locationId: asNonBlankString(order?.location_id),
+      state: asNonBlankString(order?.state),
+    };
+  } catch {
+    throw new Error("Square retirement recovery returned malformed JSON.");
+  }
+}
+
 /** Verify exact raw bytes and the configured URL, not a caller-supplied host. */
 export function verifySquareWebhook(rawBody: string | Uint8Array, signature: string | null, config: SquareWebhookConfig): boolean {
   if (!config.webhookSignatureKey || !config.webhookUrl || !signature || !/^[A-Za-z0-9+/]{43}=$/.test(signature)) return false;
@@ -194,9 +305,9 @@ export interface ExpectedSquarePayment { merchantId: string; locationId: string;
  */
 export function matchCompletedSquarePayment(event: unknown, expected: ExpectedSquarePayment): { eventId: string; paymentId: string } | null {
   if (!event || typeof event !== "object" || !expected.merchantId || !expected.locationId || !expected.orderId || !Number.isSafeInteger(expected.totalCents) || expected.totalCents <= 0) return null;
-  const e = event as { event_id?: unknown; merchant_id?: unknown; type?: unknown; data?: { object?: { payment?: { id?: unknown; status?: unknown; location_id?: unknown; order_id?: unknown; amount_money?: { amount?: unknown; currency?: unknown } } } } };
+  const e = event as { event_id?: unknown; merchant_id?: unknown; type?: unknown; data?: { type?: unknown; object?: { payment?: { id?: unknown; status?: unknown; location_id?: unknown; order_id?: unknown; amount_money?: { amount?: unknown; currency?: unknown } } } } };
   const p = e.data?.object?.payment;
-  if (typeof e.event_id !== "string" || !e.event_id || e.merchant_id !== expected.merchantId || !["payment.created", "payment.updated"].includes(String(e.type))) return null;
+  if (typeof e.event_id !== "string" || !e.event_id || e.merchant_id !== expected.merchantId || !["payment.created", "payment.updated"].includes(String(e.type)) || e.data?.type !== "payment") return null;
   if (!p || typeof p.id !== "string" || !p.id || p.status !== "COMPLETED" || p.location_id !== expected.locationId || p.order_id !== expected.orderId || p.amount_money?.currency !== "USD" || p.amount_money.amount !== expected.totalCents) return null;
   return { eventId: e.event_id, paymentId: p.id };
 }

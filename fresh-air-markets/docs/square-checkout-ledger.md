@@ -14,10 +14,13 @@ payment successful from a browser return.
 3. Apply `012-square-webhook-events.sql` before enabling a Sandbox checkout.
 4. Apply `013-final-reservation-writer.sql`; it is the only writer that creates
    a checkout-eligible reservation and requires `FAME_BOOTH_CAPACITY`.
-5. Deploy the matching Preview revision with its private Square variables.
-6. Run the read-only Sandbox identity verification in
+5. Apply `014-square-payment-expiry.sql`, which atomically expires unpaid
+   holds and queues idempotent hosted-link retirement.
+6. Deploy the matching Preview revision with its private Square variables and
+   `CRON_SECRET` for the trusted expiry endpoint.
+7. Run the read-only Sandbox identity verification in
    [square-sandbox-setup.md](./square-sandbox-setup.md).
-7. Create the exact Sandbox webhook subscription only after the deployed
+8. Create the exact Sandbox webhook subscription only after the deployed
    `/api/payments/square/webhook` URL is known.
 
 `011` adds two durable records, while `013` adds the immutable finalization
@@ -53,6 +56,20 @@ the same provider idempotency key. A permanent provider failure moves the
 reservation to manual review rather than freeing or silently recreating
 inventory.
 
+At the exact persisted deadline, the trusted internal scheduler changes the
+order to `expiry_pending`, keeps the reservation `payment_pending`, and queues
+the Square-hosted link for deletion while its allocation remains held. Only a
+Square DELETE response that identifies the saved link and its exact cancelled
+Square order can atomically change both records to `expired` and release
+capacity. A `404` triggers exact-order recovery and is safe only when that
+stored order is explicitly `CANCELED`. Link deletion has its own durable lease,
+so a temporary Square outage cannot release capacity under a live link or cause
+a second hosted link. A signed
+payment event while the claim is pending fences the order, reservation, and
+retirement item to manual review. See
+[square-payment-expiry.md](./square-payment-expiry.md) for the authenticated
+scheduler and recovery behavior.
+
 Only `payment_pending` reservations and `checkout_created` payment orders may
 be marked paid. The webhook ledger validates the exact Sandbox merchant,
 location, Square order ID, USD amount, payment state and provider timestamp;
@@ -67,5 +84,6 @@ manager authentication, and request-body substitution attempts. These are
 isolated tests; they do not create a Square payment or contact a vendor.
 
 The remaining release evidence is a deployed QA database with the final
-reservation writer, Preview webhook subscription, and real Sandbox tests for successful,
-declined, abandoned and retried payment attempts.
+reservation writer and migration `014`, an authenticated expiry scheduler,
+Preview webhook subscription, and real Sandbox tests for successful, declined,
+abandoned, expired and retried payment attempts.

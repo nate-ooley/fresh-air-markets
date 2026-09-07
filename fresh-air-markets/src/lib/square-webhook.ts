@@ -10,6 +10,11 @@ export const MAX_SQUARE_WEBHOOK_BYTES = 128 * 1024;
 const SQUARE_ID = /^[A-Za-z0-9._:-]{1,255}$/;
 const CURRENCY = /^[A-Z]{3}$/;
 const PAYMENT_STATUS = /^[A-Z_]{1,64}$/;
+// Square documents these timestamps as RFC 3339. Date.parse() alone is too
+// permissive here: it accepts timezone-less strings and normalizes impossible
+// calendar values such as February 31. Provider time is reconciliation
+// evidence, so reject anything that is not an unambiguous valid instant.
+const RFC3339_TIMESTAMP = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,9})?(Z|[+-]\d{2}:\d{2})$/;
 
 export interface SquarePaymentWebhookEvent {
   eventId: string;
@@ -44,9 +49,25 @@ function validId(value: unknown): value is string {
 }
 
 function validTimestamp(value: unknown): value is string {
-  return typeof value === "string"
-    && value.length <= 64
-    && Number.isFinite(Date.parse(value));
+  if (typeof value !== "string" || value.length > 64) return false;
+  const match = RFC3339_TIMESTAMP.exec(value);
+  if (!match) return false;
+  const [, yearText, monthText, dayText, hourText, minuteText, secondText, timezone] = match;
+  const year = Number(yearText);
+  const month = Number(monthText);
+  const day = Number(dayText);
+  const hour = Number(hourText);
+  const minute = Number(minuteText);
+  const second = Number(secondText);
+  if (year < 1 || month < 1 || month > 12 || hour > 23 || minute > 59 || second > 59) return false;
+  if (timezone !== "Z") {
+    const [, , offsetHourText, offsetMinuteText] = /^([+-])(\d{2}):(\d{2})$/.exec(timezone) ?? [];
+    if (Number(offsetHourText) > 23 || Number(offsetMinuteText) > 59) return false;
+  }
+  const daysInMonth = month === 2
+    ? (year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0) ? 29 : 28)
+    : [4, 6, 9, 11].includes(month) ? 30 : 31;
+  return day >= 1 && day <= daysInMonth && Number.isFinite(Date.parse(value));
 }
 
 function asObject(value: unknown): Record<string, unknown> | null {
@@ -64,7 +85,11 @@ function parsePaymentEvent(value: unknown, rawBodySha256: string): SquarePayment
   const object = data && asObject(data.object);
   const payment = object && asObject(object.payment);
   const amount = payment && asObject(payment.amount_money);
-  if (!payment || !amount
+  // `data.type` is part of Square's PaymentCreated/PaymentUpdated envelope.
+  // It must name the embedded object before we use it as payment evidence.
+  // Do not compare `data.id` to payment.id: Square's documented
+  // payment.created sample can use a distinct data ID.
+  if (!data || data.type !== "payment" || !payment || !amount
     || !validId(payment.id)
     || !validId(payment.location_id)
     || !validId(payment.order_id)

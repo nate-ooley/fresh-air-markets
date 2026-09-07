@@ -3,9 +3,14 @@ import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 
 const require = createRequire(import.meta.url);
-const { classifySquareCheckoutFailure, dispatchSquareSandboxCheckout } = require("../.test-build/square-payment.js") as typeof import("../src/lib/square-payment");
+const {
+  classifySquareCheckoutFailure,
+  dispatchSquarePaymentLinkRetirement,
+  dispatchSquareSandboxCheckout,
+} = require("../.test-build/square-payment.js") as typeof import("../src/lib/square-payment");
 const { squarePaymentOrderIdempotencyKey, squarePaymentDeadlineFromProviderLink } = require("../.test-build/square-payment-pg.js") as typeof import("../src/lib/square-payment-pg");
 type SquarePaymentCheckoutStore = import("../src/lib/square-payment").SquarePaymentCheckoutStore;
+type SquarePaymentLinkRetirementStore = import("../src/lib/square-payment").SquarePaymentLinkRetirementStore;
 type SquarePaymentOrder = import("../src/lib/square-payment").SquarePaymentOrder;
 type VerifiedSquareSandbox = import("../src/lib/square-payment").VerifiedSquareSandbox;
 
@@ -70,6 +75,28 @@ function store(overrides: Partial<SquarePaymentCheckoutStore> = {}): SquarePayme
       paymentRequestSentAt: now.toISOString(),
     }) }),
     failCheckout: async () => {},
+    ...overrides,
+  };
+}
+
+function retirementStore(overrides: Partial<SquarePaymentLinkRetirementStore> = {}): SquarePaymentLinkRetirementStore {
+  return {
+    claimPaymentLinkRetirement: async () => ({
+      kind: "retirement_required",
+      leaseToken: "retirement-lease-1",
+      retirement: {
+        paymentOrderId: "payment-order",
+        marketId: "market-1",
+        environment: "sandbox",
+        merchantId: "sandbox-merchant",
+        locationId: "sandbox-location",
+        paymentLinkId: "link-1",
+        squareOrderId: "square-order-1",
+        attempt: 1,
+      },
+    }),
+    completePaymentLinkRetirement: async () => ({ kind: "retired" }),
+    failPaymentLinkRetirement: async () => {},
     ...overrides,
   };
 }
@@ -215,5 +242,159 @@ test("an idempotent recovery never reopens an already-expired provider link afte
   assert.deepEqual(failed, {
     paymentOrderId: "payment-order", leaseToken: "lease-1",
     code: "square_link_expired_before_persistence", retryable: false, attemptedAt: recoveredNow,
+  });
+});
+
+test("an expired Sandbox hold retires its one hosted link with a durable lease", async () => {
+  let completed: unknown;
+  const calls: { url: string; init: RequestInit | undefined }[] = [];
+  const result = await dispatchSquarePaymentLinkRetirement({
+    marketId: "market-1",
+    square,
+    now,
+    store: retirementStore({
+      completePaymentLinkRetirement: async value => {
+        completed = value;
+        return { kind: "retired" };
+      },
+    }),
+    transport: (async (url, init) => {
+      calls.push({ url: String(url), init });
+      return Response.json({ id: "link-1", cancelled_order_id: "square-order-1" });
+    }) as typeof fetch,
+  });
+  assert.deepEqual(result, { kind: "retired", paymentOrderId: "payment-order" });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, "https://connect.squareupsandbox.com/v2/online-checkout/payment-links/link-1");
+  assert.equal(calls[0].init?.method, "DELETE");
+  assert.deepEqual(completed, {
+    paymentOrderId: "payment-order",
+    leaseToken: "retirement-lease-1",
+    cancelledOrderId: "square-order-1",
+    retiredAt: now,
+  });
+});
+
+test("a missing link releases capacity only after exact canceled-order recovery; provider failures remain retryable", async () => {
+  let completed = 0;
+  let failure: unknown;
+  const missing = await dispatchSquarePaymentLinkRetirement({
+    marketId: "market-1",
+    square,
+    now,
+    store: retirementStore({
+      completePaymentLinkRetirement: async () => { completed++; return { kind: "retired" }; },
+    }),
+    transport: (async url => String(url).includes("/payment-links/")
+      ? new Response(null, { status: 404 })
+      : Response.json({ order: { id: "square-order-1", location_id: "sandbox-location", state: "CANCELED" } })) as typeof fetch,
+  });
+  assert.deepEqual(missing, { kind: "retired", paymentOrderId: "payment-order" });
+  assert.equal(completed, 1);
+
+  const retry = await dispatchSquarePaymentLinkRetirement({
+    marketId: "market-1",
+    square,
+    now,
+    store: retirementStore({ failPaymentLinkRetirement: async value => { failure = value; } }),
+    transport: (async () => new Response("private-detail", { status: 503 })) as typeof fetch,
+  });
+  assert.deepEqual(retry, { kind: "retry_scheduled", paymentOrderId: "payment-order" });
+  assert.deepEqual(failure, {
+    paymentOrderId: "payment-order",
+    leaseToken: "retirement-lease-1",
+    code: "square_http_503",
+    retryable: true,
+    attemptedAt: now,
+  });
+});
+
+test("missing or mismatched Square cancellation proof enters review and never finalizes retirement", async () => {
+  const failures: unknown[] = [];
+  const missingProof = await dispatchSquarePaymentLinkRetirement({
+    marketId: "market-1",
+    square,
+    now,
+    store: retirementStore({
+      failPaymentLinkRetirement: async value => { failures.push(value); },
+      completePaymentLinkRetirement: async () => { throw new Error("must not finalize"); },
+    }),
+    transport: (async () => Response.json({ id: "link-1" })) as typeof fetch,
+  });
+  assert.deepEqual(missingProof, { kind: "manual_review", paymentOrderId: "payment-order" });
+  const mismatchedProof = await dispatchSquarePaymentLinkRetirement({
+    marketId: "market-1",
+    square,
+    now,
+    store: retirementStore({
+      failPaymentLinkRetirement: async value => { failures.push(value); },
+      completePaymentLinkRetirement: async () => { throw new Error("must not finalize"); },
+    }),
+    transport: (async () => Response.json({ id: "other-link", cancelled_order_id: "square-order-1" })) as typeof fetch,
+  });
+  assert.deepEqual(mismatchedProof, { kind: "manual_review", paymentOrderId: "payment-order" });
+  const unproven404 = await dispatchSquarePaymentLinkRetirement({
+    marketId: "market-1",
+    square,
+    now,
+    store: retirementStore({
+      failPaymentLinkRetirement: async value => { failures.push(value); },
+      completePaymentLinkRetirement: async () => { throw new Error("must not finalize"); },
+    }),
+    transport: (async url => String(url).includes("/payment-links/")
+      ? new Response(null, { status: 404 })
+      : Response.json({ order: { id: "square-order-1", location_id: "sandbox-location", state: "OPEN" } })) as typeof fetch,
+  });
+  assert.deepEqual(unproven404, { kind: "manual_review", paymentOrderId: "payment-order" });
+  assert.deepEqual(failures, [
+    {
+      paymentOrderId: "payment-order", leaseToken: "retirement-lease-1",
+      code: "square_retirement_cancelled_order_missing", retryable: false, attemptedAt: now,
+    },
+    {
+      paymentOrderId: "payment-order", leaseToken: "retirement-lease-1",
+      code: "square_retirement_link_id_mismatch", retryable: false, attemptedAt: now,
+    },
+    {
+      paymentOrderId: "payment-order", leaseToken: "retirement-lease-1",
+      code: "square_retirement_missing_link_unproven", retryable: false, attemptedAt: now,
+    },
+  ]);
+});
+
+test("a foreign durable retirement is held for review without a provider request", async () => {
+  let calls = 0;
+  let failure: unknown;
+  const result = await dispatchSquarePaymentLinkRetirement({
+    marketId: "market-1",
+    square,
+    now,
+    store: retirementStore({
+      claimPaymentLinkRetirement: async () => ({
+        kind: "retirement_required",
+        leaseToken: "retirement-lease-1",
+        retirement: {
+          paymentOrderId: "payment-order",
+          marketId: "market-1",
+          environment: "sandbox",
+          merchantId: "other-merchant",
+          locationId: "sandbox-location",
+          paymentLinkId: "link-1",
+          squareOrderId: "square-order-1",
+          attempt: 1,
+        },
+      }),
+      failPaymentLinkRetirement: async value => { failure = value; },
+    }),
+    transport: (async () => { calls++; throw new Error("must not call Square"); }) as typeof fetch,
+  });
+  assert.deepEqual(result, { kind: "manual_review", paymentOrderId: "payment-order" });
+  assert.equal(calls, 0);
+  assert.deepEqual(failure, {
+    paymentOrderId: "payment-order",
+    leaseToken: "retirement-lease-1",
+    code: "square_retirement_identity_mismatch",
+    retryable: false,
+    attemptedAt: now,
   });
 });

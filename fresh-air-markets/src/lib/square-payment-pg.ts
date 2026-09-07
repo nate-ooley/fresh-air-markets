@@ -5,6 +5,10 @@ import {
   type SquareCheckoutClaim,
   type SquareCheckoutFinalizeResult,
   type SquarePaymentCheckoutStore,
+  type SquarePaymentLinkRetirement,
+  type SquarePaymentLinkRetirementClaim,
+  type SquarePaymentLinkRetirementFinalizeResult,
+  type SquarePaymentLinkRetirementStore,
   type SquarePaymentOrder,
   type SquarePaymentOrderStatus,
   type VerifiedSquareSandbox,
@@ -56,6 +60,49 @@ interface PaymentOrderRow {
   payment_due_at: Date | null;
   checkout_attempts: number;
   lease_token: string | null;
+}
+
+interface PaymentLinkRetirementRow {
+  payment_order_id: string;
+  market_id: string;
+  square_environment: "sandbox";
+  square_merchant_id: string;
+  square_location_id: string;
+  square_payment_link_id: string;
+  square_order_id: string;
+  status: "pending" | "processing" | "retired" | "manual_review";
+  attempt_count: number | string;
+  locked_until: Date | null;
+  lease_token: string | null;
+}
+
+interface PaymentLinkRetirementCandidateRow extends PaymentLinkRetirementRow {
+  parent_market_id: string;
+  parent_square_environment: "sandbox";
+  parent_square_merchant_id: string;
+  parent_square_location_id: string;
+  parent_square_payment_link_id: string | null;
+  parent_square_order_id: string | null;
+}
+
+interface ExpiringPaymentRow {
+  payment_order_id: string;
+  reservation_id: string;
+  market_id: string;
+  payment_due_at: Date | null;
+  reservation_due_at: Date | null;
+  square_environment: "sandbox";
+  square_merchant_id: string;
+  square_location_id: string;
+  square_payment_link_id: string | null;
+  square_order_id: string | null;
+}
+
+/** Aggregate-only result for the internal scheduler; it never exposes vendors. */
+export interface SquarePaymentExpiryResult {
+  /** Holds fenced at the deadline and queued for provider link deletion. */
+  expiryPending: number;
+  manualReview: number;
 }
 
 export interface SquarePaymentWebhookTarget extends SquarePaymentOrder {
@@ -146,7 +193,7 @@ function terminalReservation(state: string): boolean {
 }
 
 function terminalOrder(status: SquarePaymentOrderStatus): boolean {
-  return ["paid", "expired", "cancelled", "manual_review", "failed"].includes(status);
+  return ["paid", "expiry_pending", "expired", "cancelled", "manual_review", "failed"].includes(status);
 }
 
 function claimResultForExisting(
@@ -407,6 +454,393 @@ export async function failSquarePaymentCheckout(input: {
   });
 }
 
+function validSchedulerLimit(value: number): boolean {
+  return Number.isSafeInteger(value) && value >= 1 && value <= 100;
+}
+
+/**
+ * Atomically claims usable hosted-checkout holds at their persisted deadline.
+ *
+ * Allocation rows are immutable audit data under migration 013, so this does
+ * not delete them. The payment order moves to `expiry_pending`, while the
+ * reservation remains `payment_pending` and continues consuming capacity until
+ * Square has confirmed that the hosted link is deleted. Each claim writes one
+ * durable retirement work item. A provider outage therefore cannot leave a
+ * live payment link racing a capacity release.
+ */
+export async function expireDueSquarePaymentHolds(input: {
+  marketId: string;
+  now: Date;
+  limit: number;
+}, sql: Sql = configuredClient()): Promise<SquarePaymentExpiryResult> {
+  if (!input.marketId || !Number.isFinite(input.now.valueOf()) || !validSchedulerLimit(input.limit)) {
+    throw new Error("Square payment expiry input is invalid.");
+  }
+  return sql.begin(async tx => {
+    // Lock in the same payment-order/reservation relationship that webhook
+    // reconciliation uses. Whichever transaction wins the row lock decides:
+    // a valid payment can become paid first, otherwise expiration wins and a
+    // delayed event is retained by L19 for manual review without reclaiming
+    // inventory.
+    const candidates = await tx<ExpiringPaymentRow[]>`
+      SELECT p.id AS payment_order_id, p.reservation_id, p.market_id,
+             p.payment_due_at, r.payment_due_at AS reservation_due_at,
+             p.square_environment, p.square_merchant_id, p.square_location_id,
+             p.square_payment_link_id, p.square_order_id
+      FROM fame_payment_orders p
+      JOIN fame_reservations r
+        ON r.id = p.reservation_id AND r.market_id = p.market_id
+      WHERE p.status = 'checkout_created'
+        AND p.market_id = ${input.marketId}
+        AND r.state = 'payment_pending'
+        AND p.payment_due_at IS NOT NULL
+        AND p.payment_due_at <= ${input.now}
+      ORDER BY p.payment_due_at ASC, p.id ASC
+      LIMIT ${input.limit}
+      FOR UPDATE OF p, r SKIP LOCKED`;
+    let expiryPending = 0;
+    let manualReview = 0;
+    for (const candidate of candidates) {
+      const matchingDeadlines = candidate.payment_due_at
+        && candidate.reservation_due_at
+        && candidate.payment_due_at.valueOf() === candidate.reservation_due_at.valueOf();
+      if (!matchingDeadlines || !candidate.square_payment_link_id || !candidate.square_order_id) {
+        // Never release an ambiguously timed/corrupt hold. Preserve its
+        // allocation for a manager and make the mismatch durable, rather than
+        // accidentally allowing double allocation after an unknown payment.
+        const [order] = await tx`
+          UPDATE fame_payment_orders
+          SET status = 'manual_review',
+              locked_until = NULL,
+              lease_token = NULL,
+              last_error_code = ${!matchingDeadlines
+                ? "payment_deadline_missing_or_mismatched"
+                : "payment_link_or_order_missing_at_expiry"},
+              updated_at = ${input.now}
+          WHERE id = ${candidate.payment_order_id} AND status = 'checkout_created'
+          RETURNING reservation_id, market_id`;
+        if (!order) throw new Error("Square payment order changed before expiry review.");
+        const [reservation] = await tx`
+          UPDATE fame_reservations
+          SET state = 'manual_review', updated_at = ${input.now}
+          WHERE id = ${order.reservation_id}
+            AND market_id = ${order.market_id}
+            AND state = 'payment_pending'
+          RETURNING id`;
+        if (!reservation) throw new Error("Reservation changed before expiry review.");
+        manualReview++;
+        continue;
+      }
+
+      const [order] = await tx`
+        UPDATE fame_payment_orders
+        SET status = 'expiry_pending',
+            locked_until = NULL,
+            lease_token = NULL,
+            last_error_code = 'payment_expiry_pending',
+            updated_at = ${input.now}
+        WHERE id = ${candidate.payment_order_id}
+          AND status = 'checkout_created'
+          AND payment_due_at = ${candidate.payment_due_at}
+        RETURNING id`;
+      if (!order) throw new Error("Square payment order changed before expiry claim.");
+      await tx`
+        INSERT INTO fame_square_payment_link_retirements
+          (payment_order_id, market_id, square_environment, square_merchant_id,
+           square_location_id, square_payment_link_id, square_order_id,
+           status, created_at, updated_at)
+        VALUES
+          (${candidate.payment_order_id}, ${candidate.market_id}, ${candidate.square_environment},
+           ${candidate.square_merchant_id}, ${candidate.square_location_id},
+           ${candidate.square_payment_link_id}, ${candidate.square_order_id},
+           'pending', ${input.now}, ${input.now})
+        ON CONFLICT (payment_order_id) DO NOTHING`;
+      expiryPending++;
+    }
+    return { expiryPending, manualReview };
+  });
+}
+
+function retirementFromRow(row: PaymentLinkRetirementRow): SquarePaymentLinkRetirement {
+  const attempt = Number(row.attempt_count);
+  if (!Number.isSafeInteger(attempt) || attempt < 0) throw new Error("Stored payment-link retirement is invalid.");
+  return {
+    paymentOrderId: row.payment_order_id,
+    marketId: row.market_id,
+    environment: row.square_environment,
+    merchantId: row.square_merchant_id,
+    locationId: row.square_location_id,
+    paymentLinkId: row.square_payment_link_id,
+    squareOrderId: row.square_order_id,
+    attempt,
+  };
+}
+
+/** Claim one due Sandbox link retirement while its allocation remains held. */
+export async function claimSquarePaymentLinkRetirement(input: {
+  marketId: string;
+  square: Pick<VerifiedSquareSandbox, "environment" | "merchantId" | "locationId">;
+  now: Date;
+  leaseSeconds: number;
+}, sql: Sql = configuredClient()): Promise<SquarePaymentLinkRetirementClaim> {
+  if (!input.marketId || !Number.isFinite(input.now.valueOf())
+    || !Number.isSafeInteger(input.leaseSeconds)
+    || input.leaseSeconds < 10
+    || input.leaseSeconds > 300) throw new Error("Square payment-link retirement claim is invalid.");
+  return sql.begin(async tx => {
+    const [row] = await tx<PaymentLinkRetirementCandidateRow[]>`
+      SELECT q.payment_order_id, q.market_id, q.square_environment,
+             q.square_merchant_id, q.square_location_id, q.square_payment_link_id, q.square_order_id,
+             q.status, q.attempt_count, q.locked_until, q.lease_token,
+             p.market_id AS parent_market_id,
+             p.square_environment AS parent_square_environment,
+             p.square_merchant_id AS parent_square_merchant_id,
+             p.square_location_id AS parent_square_location_id,
+             p.square_payment_link_id AS parent_square_payment_link_id,
+             p.square_order_id AS parent_square_order_id
+      FROM fame_square_payment_link_retirements q
+      JOIN fame_payment_orders p ON p.id = q.payment_order_id
+      JOIN fame_reservations r ON r.id = p.reservation_id AND r.market_id = p.market_id
+      WHERE q.status IN ('pending', 'processing')
+        AND p.market_id = ${input.marketId}
+        AND (q.status = 'pending' OR q.locked_until <= ${input.now})
+        AND p.status = 'expiry_pending'
+        AND r.state = 'payment_pending'
+      ORDER BY q.created_at ASC, q.payment_order_id ASC
+      LIMIT 1
+      -- Take the payment/reservation locks first. Webhook reconciliation uses
+      -- that same pair before it fences a retirement row, so a signed event
+      -- cannot deadlock with this worker while it preserves capacity.
+      FOR UPDATE OF p, r SKIP LOCKED`;
+    if (!row) return { kind: "no_work" };
+    const parentMatches = row.market_id === row.parent_market_id
+      && row.square_environment === row.parent_square_environment
+      && row.square_merchant_id === row.parent_square_merchant_id
+      && row.square_location_id === row.parent_square_location_id
+      && row.square_payment_link_id === row.parent_square_payment_link_id
+      && row.square_order_id === row.parent_square_order_id;
+    const configuredIdentityMatches = row.square_environment === input.square.environment
+      && row.square_merchant_id === input.square.merchantId
+      && row.square_location_id === input.square.locationId;
+    if (!parentMatches || !configuredIdentityMatches) {
+      const reason = parentMatches
+        ? "square_retirement_identity_mismatch"
+        : "square_retirement_parent_mapping_mismatch";
+      const [retirement] = await tx`
+        UPDATE fame_square_payment_link_retirements
+        SET status = 'manual_review', locked_until = NULL, lease_token = NULL,
+            last_error_code = ${reason}, updated_at = ${input.now}
+        WHERE payment_order_id = ${row.payment_order_id}
+          AND status IN ('pending', 'processing')
+          AND (status = 'pending' OR locked_until <= ${input.now})
+        RETURNING payment_order_id`;
+      if (!retirement) return { kind: "in_progress", paymentOrderId: row.payment_order_id };
+      const [order] = await tx`
+        UPDATE fame_payment_orders
+        SET status = 'manual_review', locked_until = NULL, lease_token = NULL,
+            last_error_code = ${reason}, updated_at = ${input.now}
+        WHERE id = ${row.payment_order_id} AND status = 'expiry_pending'
+        RETURNING reservation_id, market_id`;
+      if (!order) throw new Error("Square payment order changed before retirement review.");
+      const [reservation] = await tx`
+        UPDATE fame_reservations
+        SET state = 'manual_review', updated_at = ${input.now}
+        WHERE id = ${order.reservation_id} AND market_id = ${order.market_id}
+          AND state = 'payment_pending'
+        RETURNING id`;
+      if (!reservation) throw new Error("Reservation changed before retirement review.");
+      return { kind: "manual_review", paymentOrderId: row.payment_order_id };
+    }
+    const leaseToken = randomUUID();
+    const [claimed] = await tx<PaymentLinkRetirementRow[]>`
+      UPDATE fame_square_payment_link_retirements
+      SET status = 'processing',
+          attempt_count = attempt_count + 1,
+          locked_until = ${new Date(input.now.valueOf() + input.leaseSeconds * 1000)},
+          lease_token = ${leaseToken},
+          last_error_code = NULL,
+          updated_at = ${input.now}
+      WHERE payment_order_id = ${row.payment_order_id}
+        AND status IN ('pending', 'processing')
+        AND (status = 'pending' OR locked_until <= ${input.now})
+      RETURNING payment_order_id, market_id, square_environment,
+                square_merchant_id, square_location_id, square_payment_link_id, square_order_id,
+                status, attempt_count, locked_until, lease_token`;
+    if (!claimed) return { kind: "in_progress", paymentOrderId: row.payment_order_id };
+    return { kind: "retirement_required", retirement: retirementFromRow(claimed), leaseToken };
+  });
+}
+
+/**
+ * Finalize expiration only after the provider proves the exact stored Square
+ * order was canceled. This is the sole point at which capacity is released.
+ */
+export async function completeSquarePaymentLinkRetirement(input: {
+  paymentOrderId: string;
+  leaseToken: string;
+  cancelledOrderId: string;
+  retiredAt: Date;
+}, sql: Sql = configuredClient()): Promise<SquarePaymentLinkRetirementFinalizeResult> {
+  if (!input.paymentOrderId || !input.leaseToken || !input.cancelledOrderId || !Number.isFinite(input.retiredAt.valueOf())) {
+    throw new Error("Square payment-link retirement completion is invalid.");
+  }
+  return sql.begin(async tx => {
+    // Match the webhook's lock order: payment order + reservation first, then
+    // the retirement row. A signed event that sees an expiry-pending order can
+    // therefore fence it for an operator without racing a capacity release.
+    const [payment] = await tx<{
+      reservation_id: string;
+      market_id: string;
+      order_status: string;
+      reservation_state: string;
+      square_environment: string;
+      square_merchant_id: string;
+      square_location_id: string;
+      square_payment_link_id: string | null;
+      square_order_id: string | null;
+    }[]>`
+      SELECT p.reservation_id, p.market_id, p.status AS order_status,
+             r.state AS reservation_state, p.square_environment,
+             p.square_merchant_id, p.square_location_id,
+             p.square_payment_link_id, p.square_order_id
+      FROM fame_payment_orders p
+      JOIN fame_reservations r
+        ON r.id = p.reservation_id AND r.market_id = p.market_id
+      WHERE p.id = ${input.paymentOrderId}
+      FOR UPDATE OF p, r`;
+    if (!payment) return { kind: "stale" };
+    const [retirement] = await tx<PaymentLinkRetirementRow[]>`
+      SELECT payment_order_id, market_id, square_environment,
+             square_merchant_id, square_location_id, square_payment_link_id, square_order_id,
+             status, attempt_count, locked_until, lease_token
+      FROM fame_square_payment_link_retirements
+      WHERE payment_order_id = ${input.paymentOrderId}
+        AND status = 'processing'
+        AND lease_token = ${input.leaseToken}
+      FOR UPDATE`;
+    if (!retirement) return { kind: "stale" };
+    const parentMatches = retirement.market_id === payment.market_id
+      && retirement.square_environment === payment.square_environment
+      && retirement.square_merchant_id === payment.square_merchant_id
+      && retirement.square_location_id === payment.square_location_id
+      && retirement.square_payment_link_id === payment.square_payment_link_id
+      && retirement.square_order_id === payment.square_order_id;
+    if (!parentMatches) {
+      await tx`
+        UPDATE fame_square_payment_link_retirements
+        SET status = 'manual_review', locked_until = NULL, lease_token = NULL,
+            last_error_code = 'square_retirement_parent_mapping_mismatch',
+            updated_at = ${input.retiredAt}
+        WHERE payment_order_id = ${input.paymentOrderId}
+          AND status = 'processing' AND lease_token = ${input.leaseToken}`;
+      await tx`
+        UPDATE fame_payment_orders
+        SET status = 'manual_review', locked_until = NULL, lease_token = NULL,
+            last_error_code = 'square_retirement_parent_mapping_mismatch',
+            updated_at = ${input.retiredAt}
+        WHERE id = ${input.paymentOrderId} AND status = 'expiry_pending'`;
+      await tx`
+        UPDATE fame_reservations
+        SET state = 'manual_review', updated_at = ${input.retiredAt}
+        WHERE id = ${payment.reservation_id} AND market_id = ${payment.market_id}
+          AND state = 'payment_pending'`;
+      return { kind: "manual_review" };
+    }
+    if (retirement.square_order_id !== input.cancelledOrderId) {
+      await tx`
+        UPDATE fame_square_payment_link_retirements
+        SET status = 'manual_review', locked_until = NULL, lease_token = NULL,
+            last_error_code = 'square_retirement_cancelled_order_mismatch',
+            updated_at = ${input.retiredAt}
+        WHERE payment_order_id = ${input.paymentOrderId}
+          AND status = 'processing' AND lease_token = ${input.leaseToken}`;
+      return { kind: "manual_review" };
+    }
+    if (payment.order_status !== "expiry_pending") {
+      await tx`
+        UPDATE fame_square_payment_link_retirements
+        SET status = 'manual_review', locked_until = NULL, lease_token = NULL,
+            last_error_code = 'payment_state_changed_before_retirement',
+            updated_at = ${input.retiredAt}
+        WHERE payment_order_id = ${input.paymentOrderId}
+          AND status = 'processing' AND lease_token = ${input.leaseToken}`;
+      return { kind: "manual_review" };
+    }
+    if (payment.reservation_state !== "payment_pending") {
+      await tx`
+        UPDATE fame_square_payment_link_retirements
+        SET status = 'manual_review', locked_until = NULL, lease_token = NULL,
+            last_error_code = 'reservation_state_changed_before_retirement',
+            updated_at = ${input.retiredAt}
+        WHERE payment_order_id = ${input.paymentOrderId}
+          AND status = 'processing' AND lease_token = ${input.leaseToken}`;
+      return { kind: "manual_review" };
+    }
+    const [reservation] = await tx`
+      UPDATE fame_reservations
+      SET state = 'expired', updated_at = ${input.retiredAt}
+      WHERE id = ${payment.reservation_id}
+        AND market_id = ${payment.market_id}
+        AND state = 'payment_pending'
+      RETURNING id`;
+    if (!reservation) throw new Error("Reservation changed before retirement completion.");
+    const [expired] = await tx`
+      UPDATE fame_payment_orders
+      SET status = 'expired',
+          locked_until = NULL,
+          lease_token = NULL,
+          last_error_code = 'payment_window_expired',
+          updated_at = ${input.retiredAt}
+      WHERE id = ${input.paymentOrderId}
+        AND status = 'expiry_pending'
+      RETURNING id`;
+    // Roll back the reservation expiration if a concurrent lifecycle actor
+    // intervened after its row lock. The hosted link is already gone, but the
+    // durable retirement becomes an operator case instead of silently
+    // releasing capacity under inconsistent payment state.
+    if (!expired) throw new Error("Payment order changed before retirement completion.");
+    const [retired] = await tx`
+      UPDATE fame_square_payment_link_retirements
+      SET status = 'retired',
+          locked_until = NULL,
+          lease_token = NULL,
+          last_error_code = NULL,
+          retired_square_order_id = ${input.cancelledOrderId},
+          retired_at = ${input.retiredAt},
+          updated_at = ${input.retiredAt}
+      WHERE payment_order_id = ${input.paymentOrderId}
+        AND status = 'processing'
+        AND lease_token = ${input.leaseToken}
+      RETURNING payment_order_id`;
+    if (!retired) throw new Error("Payment-link retirement changed before completion.");
+    return { kind: "retired" };
+  });
+}
+
+/** Release a failed provider-delete lease without releasing the held allocation. */
+export async function failSquarePaymentLinkRetirement(input: {
+  paymentOrderId: string;
+  leaseToken: string;
+  code: string;
+  retryable: boolean;
+  attemptedAt: Date;
+}, sql: Sql = configuredClient()): Promise<void> {
+  if (!input.paymentOrderId || !input.leaseToken || !Number.isFinite(input.attemptedAt.valueOf())) {
+    throw new Error("Square payment-link retirement failure input is invalid.");
+  }
+  const safeCode = input.code.replace(/[^A-Za-z0-9_.:-]/g, "_").slice(0, 96) || "square_link_retirement_error";
+  await sql`
+    UPDATE fame_square_payment_link_retirements
+    SET status = ${input.retryable ? "pending" : "manual_review"},
+        locked_until = NULL,
+        lease_token = NULL,
+        last_error_code = ${safeCode},
+        updated_at = ${input.attemptedAt}
+    WHERE payment_order_id = ${input.paymentOrderId}
+      AND status = 'processing'
+      AND lease_token = ${input.leaseToken}`;
+}
+
 /**
  * L19 passes its transaction here before writing a signed webhook receipt. It
  * can then atomically dedupe the event, inspect the exact provider identity,
@@ -449,4 +883,11 @@ export const postgresSquarePaymentCheckoutStore: SquarePaymentCheckoutStore = {
   claimCheckout: claimSquarePaymentCheckout,
   completeCheckout: completeSquarePaymentCheckout,
   failCheckout: failSquarePaymentCheckout,
+};
+
+/** Concrete adapter used only by the trusted expiry scheduler. */
+export const postgresSquarePaymentLinkRetirementStore: SquarePaymentLinkRetirementStore = {
+  claimPaymentLinkRetirement: claimSquarePaymentLinkRetirement,
+  completePaymentLinkRetirement: completeSquarePaymentLinkRetirement,
+  failPaymentLinkRetirement: failSquarePaymentLinkRetirement,
 };

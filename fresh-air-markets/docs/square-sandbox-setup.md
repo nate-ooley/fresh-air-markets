@@ -83,7 +83,7 @@ Preview variables. It does not need a Square username or password.
 
 It makes exactly two Sandbox reads:
 
-1. `GET /v2/merchants/me` retrieves the merchant selected by the stored token.
+1. `GET /v2/merchants` retrieves the sole merchant selected by the stored token.
 2. `GET /v2/locations/{SQUARE_LOCATION_ID}` confirms the configured active
    location is owned by that active merchant.
 

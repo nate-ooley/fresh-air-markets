@@ -80,11 +80,28 @@ The adapter and contract tests are prepared; checkout endpoints, durable webhook
 
 ## 48-hour payment deadline and recovery
 - Persist payment_request_sent_at and payment_due_at once; retries do not extend them.
-- At the deadline, transition unpaid holds once, release only their allocations, retire the checkout link and notify by email.
-- Serialize payment completion with expiration. Delayed or out-of-order events for a released reservation enter manual review; never reclaim inventory already given to another vendor.
+- At the deadline, the authenticated expiry worker transitions an unpaid
+  `checkout_created`/`payment_pending` hold once to `expiry_pending` and queues
+  durable Sandbox link retirement while the allocation remains held. Only a
+  verified DELETE response whose link and `cancelled_order_id` match the saved
+  identifiers atomically makes both records `expired` and releases capacity. A
+  `404` requires exact saved-order recovery in state `CANCELED`; every missing,
+  mismatched, open, completed, or malformed response enters manual review with
+  capacity held. Allocation rows remain immutable audit history. A separate
+  future notification outbox is required before any email; the current worker
+  sends no email, SMS, HighLevel update, or payment action.
+- Serialize payment completion with expiration. A signed event received while
+  `expiry_pending` fences the payment order, reservation, and retirement item
+  to manual review and keeps capacity held. An event after final expiration is
+  durable review evidence and never reclaims inventory already given to another
+  vendor.
 - A provider payment completed before the deadline but delivered late requires provider timestamp/order reconciliation and an inventory-safe resolution.
 - Paid and nonprofit-confirmed reservations are not expired by the unpaid-hold job.
-- Clock tests cover just before/exactly at/after deadline and daylight-saving transitions. The existing helper tests exactly 48 elapsed hours across both DST changes; the scheduled expiry worker is not implemented.
+- Clock tests cover just before/exactly at/after deadline and daylight-saving
+  transitions. The durable scheduler also has PostgreSQL concurrency tests for
+  expiry, capacity release, payment replay, and provider-delete retry. Deploy
+  migration `014-square-payment-expiry.sql` and follow
+  [square-payment-expiry.md](square-payment-expiry.md) before calling L18 green.
 
 ## Document and form requirements
 - Required food-license path: request → uploaded/submitted → Laura QA or Thomas production review → approve or correction → resubmit with version history. Blank/unknown is blocked.
