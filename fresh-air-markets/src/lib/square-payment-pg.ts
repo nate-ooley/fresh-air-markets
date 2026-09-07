@@ -180,12 +180,18 @@ export async function claimSquarePaymentCheckout(input: {
 }, sql: Sql = configuredClient()): Promise<SquareCheckoutClaim> {
   return sql.begin(async tx => {
     const [reservation] = await tx<ReservationRow[]>`
-      SELECT id, market_id, revision, state, payment_required, currency,
-             total_cents, checkout_description, payment_request_sent_at,
-             payment_due_at
-      FROM fame_reservations
-      WHERE id = ${input.reservationId} AND market_id = ${input.marketId}
-      FOR UPDATE`;
+      SELECT r.id, r.market_id, r.revision, r.state, r.payment_required, r.currency,
+             r.total_cents, r.checkout_description, r.payment_request_sent_at,
+             r.payment_due_at
+      FROM fame_reservations r
+      -- Only the atomic CHECK→RESERVE writer may make a row payable. This
+      -- prevents a manually seeded or legacy booking record from acquiring a
+      -- hosted checkout before its final dates, quantity, eligibility and
+      -- quote have been frozen in the companion audit row.
+      JOIN fame_reservation_finalizations f
+        ON f.reservation_id = r.id AND f.market_id = r.market_id
+      WHERE r.id = ${input.reservationId} AND r.market_id = ${input.marketId}
+      FOR UPDATE OF r`;
     if (!reservation) return { kind: "not_found" };
     if (!reservation.payment_required) return { kind: "not_payable", reason: "nonprofit" };
     if (terminalReservation(reservation.state)) {

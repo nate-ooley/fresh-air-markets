@@ -33,6 +33,12 @@ four variables with the **Preview** environment selected. Scope them to the
 `codex/vendor-booking-validation` branch when that branch selector is
 available. Do not add them to **Production** or prefix them `NEXT_PUBLIC_`.
 
+Before adding a Preview-only QA fault control, enable **Automatically expose
+System Environment Variables** for this Vercel project. The server and local
+signer require Vercel to provide `VERCEL=1` and `VERCEL_ENV=preview`; without
+that setting they intentionally refuse every QA mode rather than risk a
+Production-like deployment.
+
 Before testing checkout, confirm that this same Preview branch already has a
 QA-only `DATABASE_URL`, a private `AUTH_SECRET`, and a signed-in QA manager
 account for the same market. Those are existing portal prerequisites, not
@@ -105,11 +111,13 @@ webhook subscription in Production.
 
 ## 5. Create the Sandbox webhook subscription after the route is ready
 
-Complete this section only after the existing portal migrations through
-`006-application-document-ledger.sql`, then
-`011-square-payment-checkout-ledger.sql` and `012-square-webhook-events.sql`, are
-applied to the QA database. The Preview deployment must contain the durable
-webhook handler and the exact URL must be reachable over HTTPS.
+Complete this section only after the migration order in
+[square-checkout-ledger.md](./square-checkout-ledger.md) has been applied to
+the QA database: the portal chain through `010`, then
+`011-square-payment-checkout-ledger.sql`, `012-square-webhook-events.sql`,
+and `013-final-reservation-writer.sql`. The Preview deployment must contain
+the durable final-reservation and webhook handlers, and the exact URL must be
+reachable over HTTPS.
 
 1. Set `SQUARE_WEBHOOK_URL` in the same Preview branch to the exact stable
    QA hostname plus `/api/payments/square/webhook`. Establish a stable Preview
@@ -133,6 +141,53 @@ currency before payment state changes. It must respond quickly with a `2xx`
 only after its receipt path succeeds. Square's [webhook overview](https://developer.squareup.com/docs/webhooks/overview)
 and [subscription guide](https://developer.squareup.com/docs/webhooks/step2subscribe)
 cover the Developer Console steps.
+
+## 6. Run controlled Preview-only negative paths
+
+The checked-in QA support has no public route and never receives a mode from a
+browser request. It is enabled only when Vercel's system variables report
+`VERCEL=1` and `VERCEL_ENV=preview`, while
+`SQUARE_ENVIRONMENT=sandbox` and `SQUARE_ALLOW_LIVE_PAYMENTS=false`. If any
+`SQUARE_QA_*` value appears outside that exact environment, the affected route
+fails closed. Never add these values to Production.
+
+Create a new random, 32-character-or-longer `SQUARE_QA_SIGNER_SECRET` only in
+the QA Preview environment. It authorizes the local replay command's custom
+header; it is separate from Square's webhook signature key and must never be
+put in a browser, ticket, recording, or chat.
+
+For one isolated `QA-SQ-*` reservation at a time, set both
+`SQUARE_QA_FAULT_MODE` and `SQUARE_QA_FAULT_RESERVATION_ID`, redeploy Preview,
+run the case, then remove both values and redeploy again. The supported modes
+are `checkout_429`, `checkout_500`, `checkout_timeout`,
+`checkout_permanent_400`, and `checkout_expired_link`. They replace only the
+payment-link provider transport in-process; no Square checkout API request is
+made. The usual read-only Sandbox identity preflight still runs. While a
+checkout fault is armed, the route blocks checkout for every other reservation.
+
+For the transaction rollback case, set
+`SQUARE_QA_FAULT_MODE=webhook_rollback` and the one exact
+`SQUARE_QA_FAULT_EVENT_ID`, keep `SQUARE_QA_SIGNER_SECRET` set, and redeploy.
+Only a locally signed request carrying the matching QA signer header reaches
+the injected rollback. It throws after the paid mutations but before commit,
+so the route returns `503` and the receipt, order, and reservation all roll
+back. Remove the fault and redeploy before replaying the identical bytes.
+
+Run the local command through the linked Vercel CLI so it has the same private
+Preview variables and the exposed Vercel system variables above. If the
+variables are scoped to every Preview branch, omit `--git-branch`. It refuses
+every other environment and prints only an HTTP status:
+
+```bash
+vercel env run -e preview --git-branch codex/vendor-booking-validation -- \
+  npm run square:qa-webhook -- --ack-preview-sandbox --body-file /secure/qa-event.json
+```
+
+Reuse the same local file for an exact replay. Add `--invalid-hmac` for the
+unauthenticated case, or replace `--body-file` with `--oversized` for the
+128-KiB boundary. The command never prints its URL, payload, webhook key, or
+QA signer secret. Keep the fixture local; it is not a production payment
+record and must use only the isolated QA reservation.
 
 ## Current release conditions
 

@@ -12,23 +12,27 @@ payment successful from a browser return.
    composite `(id, market_id)` application key required by `011`.
 2. Apply `011-square-payment-checkout-ledger.sql` to the QA portal database.
 3. Apply `012-square-webhook-events.sql` before enabling a Sandbox checkout.
-4. Deploy the matching Preview revision with its private Square variables.
-5. Run the read-only Sandbox identity verification in
+4. Apply `013-final-reservation-writer.sql`; it is the only writer that creates
+   a checkout-eligible reservation and requires `FAME_BOOTH_CAPACITY`.
+5. Deploy the matching Preview revision with its private Square variables.
+6. Run the read-only Sandbox identity verification in
    [square-sandbox-setup.md](./square-sandbox-setup.md).
-6. Create the exact Sandbox webhook subscription only after the deployed
+7. Create the exact Sandbox webhook subscription only after the deployed
    `/api/payments/square/webhook` URL is known.
 
-`011` adds two durable records:
+`011` adds two durable records, while `013` adds the immutable finalization
+and date-allocation evidence required by checkout:
 
-- `fame_reservations`: a future CHECK/RESERVE transaction writes the exact
+- `fame_reservations`: the final CHECK/RESERVE transaction writes the exact
   final revision, quote, dates, quantity, amount and state.
 - `fame_payment_orders`: one order per `(reservation_id, reservation_revision)`
   stores the verified Sandbox merchant/location identity, expected USD cents,
   stable provider idempotency key, link/order IDs, deadline and payment state.
 
-The application must not call the checkout route until its final reservation
-writer is deployed. A direct form payload cannot substitute a price, vendor,
-date, quantity, currency, revision, provider location, or redirect URL.
+The application must not call the checkout route until migration `013` and its
+final reservation writer are deployed. A direct form payload, a manually seeded
+reservation, or a legacy booking cannot substitute a price, vendor, date,
+quantity, currency, revision, provider location, or redirect URL.
 
 ## Manager route
 
@@ -62,6 +66,6 @@ nonprofit/expired/cancelled/in-progress stop paths, configuration failures,
 manager authentication, and request-body substitution attempts. These are
 isolated tests; they do not create a Square payment or contact a vendor.
 
-The remaining release evidence is a deployed QA database, final reservation
-writer, Preview webhook subscription, and real Sandbox tests for successful,
+The remaining release evidence is a deployed QA database with the final
+reservation writer, Preview webhook subscription, and real Sandbox tests for successful,
 declined, abandoned and retried payment attempts.

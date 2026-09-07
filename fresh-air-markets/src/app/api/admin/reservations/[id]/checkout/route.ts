@@ -3,6 +3,7 @@ import { getSessionAccountId } from "@/lib/auth";
 import { squareSandboxSetupConfig, verifySquareSandboxSetup } from "@/lib/square";
 import { dispatchSquareSandboxCheckout, validSquareReservationId } from "@/lib/square-payment";
 import { postgresSquarePaymentCheckoutStore } from "@/lib/square-payment-pg";
+import { squareQaCheckoutTransport, squareQaSupportConfig } from "@/lib/square-qa-faults";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -39,6 +40,20 @@ export async function POST(_request: NextRequest, { params }: { params: Promise<
     return NextResponse.json({ error: "Invalid reservation ID." }, { status: 400 });
   }
 
+  let qaSupport;
+  try {
+    qaSupport = squareQaSupportConfig(process.env);
+    // While a checkout fault is armed, block every other checkout rather than
+    // accidentally creating a real Sandbox link for a different QA record.
+    if (qaSupport?.fault?.kind === "checkout" && qaSupport.fault.reservationId !== reservationId) {
+      return NextResponse.json({ error: "Square checkout is unavailable. Retry the same reservation." }, { status: 503 });
+    }
+  } catch {
+    // A copied QA control in a non-Preview/Sandbox environment is a hard
+    // configuration failure. Do not disclose the setting or continue.
+    return NextResponse.json({ error: "Square Sandbox checkout is not configured." }, { status: 503 });
+  }
+
   let setup;
   try {
     setup = squareSandboxSetupConfig(process.env);
@@ -56,17 +71,19 @@ export async function POST(_request: NextRequest, { params }: { params: Promise<
   }
 
   try {
-    const result = await dispatchSquareSandboxCheckout({
+    const transport = squareQaCheckoutTransport(qaSupport?.fault ?? null, reservationId);
+    const input = {
       marketId,
       reservationId,
       square: {
-        environment: "sandbox",
+        environment: "sandbox" as const,
         accessToken: setup.accessToken,
         locationId: identity.locationId,
         merchantId: identity.merchantId,
       },
       store: postgresSquarePaymentCheckoutStore,
-    });
+    };
+    const result = await dispatchSquareSandboxCheckout(transport ? { ...input, transport } : input);
     if (result.kind === "created") return responseForOrder(201, result.order);
     if (result.kind === "existing") return responseForOrder(200, result.order);
     if (result.kind === "not_found") return NextResponse.json({ error: "Reservation not found." }, { status: 404 });

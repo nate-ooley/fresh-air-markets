@@ -19,6 +19,8 @@ export interface SquareWebhookPersistenceConfig {
   /** Live processing is intentionally unsupported until a separate launch review. */
   environment: "sandbox";
   now?: Date;
+  /** A route can supply this only from the Preview-only QA support gate. */
+  qaRollbackEventId?: string | null;
 }
 
 type ReconciliationDecision =
@@ -319,6 +321,13 @@ export async function persistSquarePaymentWebhook(
     }
 
     await markExactPaymentPaid(tx, target, event, decision.providerTime, now);
+    // This deliberate throw is reachable only through the server-side
+    // Preview/Sandbox QA configuration and an authenticated local QA signer.
+    // It happens inside the transaction after both domain updates so the
+    // rollback test proves there is no partially paid reservation or receipt.
+    if (config.qaRollbackEventId === event.eventId) {
+      throw new Error("QA Square webhook transaction rollback.");
+    }
     await writeReceiptOutcome(tx, event, config.environment, {
       paymentOrderId: target.id, disposition: "paid", reason: null, now,
     });

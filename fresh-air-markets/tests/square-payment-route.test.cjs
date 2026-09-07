@@ -6,7 +6,7 @@ const Module = require('node:module');
 const ts = require('typescript');
 const { NextRequest } = require('next/server');
 
-function loadRoute({ authenticated = true, configured = true, verifiedIdentity, dispatch } = {}) {
+function loadRoute({ authenticated = true, configured = true, verifiedIdentity, dispatch, qaSupport, qaTransport } = {}) {
   const filename = path.resolve(__dirname, '../src/app/api/admin/reservations/[id]/checkout/route.ts');
   const compiled = ts.transpileModule(fs.readFileSync(filename, 'utf8'), {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
@@ -28,6 +28,10 @@ function loadRoute({ authenticated = true, configured = true, verifiedIdentity, 
       dispatchSquareSandboxCheckout: dispatch || (async () => ({ kind: 'not_found' })),
     };
     if (id === '@/lib/square-payment-pg') return { postgresSquarePaymentCheckoutStore: { qa: true } };
+    if (id === '@/lib/square-qa-faults') return {
+      squareQaSupportConfig: qaSupport || (() => null),
+      squareQaCheckoutTransport: qaTransport || (() => undefined),
+    };
     return require(id);
   };
   mod._compile(compiled, filename);
@@ -70,6 +74,13 @@ test('checkout route fails closed for missing durable storage, bad reservation I
   await withDatabase(async () => {
     assert.equal((await loadRoute().POST(request(), { params: Promise.resolve({ id: '../bad' }) })).status, 400);
     assert.equal((await loadRoute({ configured: false }).POST(request(), { params: Promise.resolve({ id: 'reservation-1' }) })).status, 503);
+    let dispatched = 0;
+    const unsafeQaControl = loadRoute({
+      qaSupport: () => { throw new Error('QA controls are not permitted here'); },
+      dispatch: async () => { dispatched++; return { kind: 'not_found' }; },
+    });
+    assert.equal((await unsafeQaControl.POST(request(), { params: Promise.resolve({ id: 'reservation-1' }) })).status, 503);
+    assert.equal(dispatched, 0);
   });
 });
 
@@ -114,5 +125,24 @@ test('checkout route maps safe retry, terminal, and nonprofit outcomes without c
       const payload = await response.json();
       assert.equal(payload.status === 'paid', false);
     }
+  });
+});
+
+test('a scoped Preview QA checkout fault passes only its in-process transport and blocks other reservations', async () => {
+  await withDatabase(async () => {
+    const transport = async () => new Response(null, { status: 429 });
+    let input;
+    const qaSupport = () => ({ fault: { kind: 'checkout', mode: 'checkout_429', reservationId: 'reservation-1' } });
+    const route = loadRoute({
+      qaSupport,
+      qaTransport: () => transport,
+      dispatch: async value => { input = value; return { kind: 'retry_scheduled', paymentOrderId: 'order' }; },
+    });
+    assert.equal((await route.POST(request(), { params: Promise.resolve({ id: 'reservation-1' }) })).status, 503);
+    assert.equal(input.transport, transport);
+
+    input = undefined;
+    assert.equal((await route.POST(request(), { params: Promise.resolve({ id: 'different-reservation' }) })).status, 503);
+    assert.equal(input, undefined);
   });
 });

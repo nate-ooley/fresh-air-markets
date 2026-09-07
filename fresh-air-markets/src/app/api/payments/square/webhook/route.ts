@@ -1,4 +1,10 @@
 import { squareCheckoutConfig, squareWebhookConfig } from "@/lib/square";
+import {
+  QA_SIGNER_HEADER,
+  squareQaSignerAuthorization,
+  squareQaSupportConfig,
+  squareQaWebhookRollbackEventId,
+} from "@/lib/square-qa-faults";
 import { handleSquarePaymentWebhook } from "@/lib/square-webhook";
 import { persistSquarePaymentWebhook } from "@/lib/square-webhook-pg";
 
@@ -16,6 +22,9 @@ export async function POST(request: Request): Promise<Response> {
     return Response.json({ error: "Persistent Square payment storage is not configured." }, { status: 503 });
   }
   try {
+    const qaSupport = squareQaSupportConfig(process.env);
+    const qaSigner = squareQaSignerAuthorization(request.headers.get(QA_SIGNER_HEADER), qaSupport);
+    if (qaSigner === "unauthorized") return Response.json({ error: "Unauthorized." }, { status: 401 });
     const checkout = squareCheckoutConfig(process.env);
     const webhook = squareWebhookConfig(process.env);
     // The only wired payment flow is Sandbox. A production configuration must
@@ -25,10 +34,14 @@ export async function POST(request: Request): Promise<Response> {
     if (environment !== "sandbox") {
       return Response.json({ error: "Square production webhook processing is not enabled." }, { status: 503 });
     }
+    const qaRollbackEventId = squareQaWebhookRollbackEventId(qaSupport, qaSigner);
     return await handleSquarePaymentWebhook(
       request,
       webhook,
-      event => persistSquarePaymentWebhook(event, { environment }),
+      event => persistSquarePaymentWebhook(
+        event,
+        qaRollbackEventId ? { environment, qaRollbackEventId } : { environment },
+      ),
     );
   } catch {
     // Missing/malformed configuration is not a source error. Do not expose

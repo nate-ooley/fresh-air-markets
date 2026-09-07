@@ -5,7 +5,7 @@ const path = require('node:path');
 const Module = require('node:module');
 const ts = require('typescript');
 
-function loadRoute({ checkout, webhook, handle, persist } = {}) {
+function loadRoute({ checkout, webhook, handle, persist, qaSupport, qaSigner, qaRollback } = {}) {
   const filename = path.resolve(__dirname, '../src/app/api/payments/square/webhook/route.ts');
   const compiled = ts.transpileModule(fs.readFileSync(filename, 'utf8'), {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
@@ -23,6 +23,12 @@ function loadRoute({ checkout, webhook, handle, persist } = {}) {
       return Response.json({ status: 'paid' });
     }) };
     if (id === '@/lib/square-webhook-pg') return { persistSquarePaymentWebhook: persist || (async () => ({ kind: 'paid' })) };
+    if (id === '@/lib/square-qa-faults') return {
+      QA_SIGNER_HEADER: 'x-fame-square-qa-signer',
+      squareQaSupportConfig: qaSupport || (() => null),
+      squareQaSignerAuthorization: qaSigner || (() => 'absent'),
+      squareQaWebhookRollbackEventId: qaRollback || (() => null),
+    };
     return require(id);
   };
   mod._compile(compiled, filename);
@@ -85,5 +91,42 @@ test('Square webhook route blocks production, malformed configuration, and persi
     const broken = loadRoute({ checkout: () => { throw new Error('private access token'); } });
     const body = await (await broken.POST(new Request('https://unit-test.invalid/', { method: 'POST' }))).json();
     assert.deepEqual(body, { error: 'Square payment processing is not configured.' });
+
+    const unsafeQaControl = loadRoute({
+      qaSupport: () => { throw new Error('QA controls are not permitted here'); },
+      handle: async () => { calls++; throw new Error('must not run'); },
+    });
+    assert.equal((await unsafeQaControl.POST(new Request('https://unit-test.invalid/', { method: 'POST' }))).status, 503);
+    assert.equal(calls, 0);
+  });
+});
+
+test('Square webhook rollback is available only to the configured Preview QA signer', async () => {
+  await withDatabase(async () => {
+    let writes = 0;
+    const denied = loadRoute({
+      qaSupport: () => ({ fault: { kind: 'webhook', mode: 'webhook_rollback', eventId: 'qa-event' }, signerSecret: 'private' }),
+      qaSigner: () => 'unauthorized',
+      handle: async () => { writes++; return Response.json({ status: 'paid' }); },
+    });
+    const deniedResponse = await denied.POST(new Request('https://unit-test.invalid/webhook', {
+      method: 'POST', headers: { 'x-fame-square-qa-signer': 'wrong' }, body: '{}',
+    }));
+    assert.equal(deniedResponse.status, 401);
+    assert.equal(writes, 0);
+
+    let persisted;
+    const authorized = loadRoute({
+      qaSupport: () => ({ fault: { kind: 'webhook', mode: 'webhook_rollback', eventId: 'qa-event' }, signerSecret: 'private' }),
+      qaSigner: () => 'authorized',
+      qaRollback: () => 'qa-event',
+      handle: async (_request, _config, write) => {
+        persisted = await write({ eventId: 'qa-event' });
+        return Response.json({ status: 'paid' });
+      },
+      persist: async (_event, config) => config,
+    });
+    assert.equal((await authorized.POST(new Request('https://unit-test.invalid/webhook', { method: 'POST', body: '{}' }))).status, 200);
+    assert.deepEqual(persisted, { environment: 'sandbox', qaRollbackEventId: 'qa-event' });
   });
 });

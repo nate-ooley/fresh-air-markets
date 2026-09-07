@@ -24,13 +24,13 @@ Additional September 7 coverage:
 - Exactly 48 elapsed hours across both daylight-saving changes.
 - The corrected Fresh Air season has 35 unique Saturdays from October 3, 2026 through May 29, 2027; a two-booth Full Season quote is $2,100.
 
-These are component/contract passes. Square transport is replaced with a test double; no external payment is created. The adapter is ready for integration, but checkout routes, durable webhook processing, account credentials and the expiry worker remain open.
+These are component/contract passes. Square transport is replaced with a test double; no external payment is created. The authenticated final-reservation route, checkout route, and durable webhook processing are present, but account credentials, deployed database migrations, and the expiry worker still need QA evidence.
 
 ## Limits of this evidence
 
-The advisory booking rules are not yet integrated into the portal routes or HighLevel. These are code-level tests, not proof of live workflow behavior. Memory-store concurrency is not PostgreSQL concurrency. Production database verification, complete CHECK/RESERVE integration, public-form submissions, trigger-link routing, document signing, inbox delivery, duplicate workflow enrollment, Square payment outcomes and payment webhook replay must still be tested in their intended environments.
+The final CHECK/RESERVE writer is integrated into an authenticated portal route and deliberately reads no legacy booking row. These remain code-level tests, not proof of live workflow behavior. PostgreSQL migration/concurrency verification, public-form submissions, trigger-link routing, document signing, inbox delivery, duplicate workflow enrollment, Square payment outcomes and payment webhook replay must still be tested in their intended environments.
 
-The configured Fresh Air account now uses its confirmed calendar. Other demo accounts and the existing booth-price calculation remain separate from the final Fresh Air pricing rules. Do not use the demo portal as the production reservation/payment system until the calendar, CHECK/RESERVE and payment integration are complete.
+The configured Fresh Air account now uses its confirmed calendar. Other demo accounts and the existing booth-price calculation remain separate from the final Fresh Air pricing rules. Do not use the portal as the production reservation/payment system until the final migrations, explicit booth capacity, and deployed workflow verification are complete.
 
 ## Continuous integration
 
@@ -43,7 +43,7 @@ Five additional public inquiry route scenarios reject malformed text fields, inv
 
 Nine new isolated cases cover IP/email limit responses, limiter failure without downstream writes/sends, bounded request bodies, concurrent in-memory boundaries, retention bounds, trusted-header handling and hashed identity scopes. See docs/inquiry-abuse-protection.md for policy and deployment requirements.
 
-After npm test compiles the sources, npm run test:pg runs twenty additional tests against a disposable local PostgreSQL database. GitHub Actions supplies this service with DATABASE_TEST_URL; the suite rejects remote or non-test database URLs. Five limiter checks cover shared counters across two pools with 100 concurrent requests, independent keys, expiry, non-extending blocked retries and persistence across client reconnection. They do not prove production deployment. The separate booking-store suite below covers existing booth approval transactions.
+After npm test compiles the sources, npm run test:pg runs the PostgreSQL suites against a disposable local database. GitHub Actions supplies this service with DATABASE_TEST_URL; the suite rejects remote or non-test database URLs. The final-reservation suite applies migrations through `013`, races 100 exact retries and competing capacity requests, checks immutable provenance/quote guards, and forces a ledger failure to prove complete rollback. The separate booking-store suite below covers existing booth approval transactions. They do not prove production deployment.
 
 Five application-handoff database checks cover 100 concurrent duplicate deliveries across pools, conflicting event reuse, original application/snapshot preservation with later events, identity separation across contact/season/location/market, and full transaction rollback with successful exact retry over a new connection. The disposable database supplies only the accounts(id) prerequisite plus the actual additive handoff migration; full production schema compatibility and deployed CRM wiring remain unverified. No CRM contact, email or payment API is called.
 

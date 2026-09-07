@@ -52,11 +52,10 @@ Keep the current working front-end form capture active. Add a server-to-server i
 - Retry failed sync from the outbox. A frontend success screen must not conceal lost backend capture; reconciliation catches historical failures.
 
 ## CHECK → manager review → RESERVE
-CHECK validates canonical dates, full-season exclusivity, final integer quantity and document/application state. It reads availability, calculates the entire quote and writes provisional review information only.
-Manager review shows requested dates, quantity, unavailable dates, unit rate and total. Options: approve or request changes.
-RESERVE rereads the current revision, documents, quote and inventory inside one transaction. Lock shared capacity consistently by market/date/booth; enforce booth, Food Truck and nonprofit constraints. A partial failure rolls back the entire date set. Do not hold database locks while awaiting human review.
-After commit, enqueue payment-link creation for paid vendors or final confirmation for a nonprofit. Repeated manager approval returns the existing reservation/payment link. Rejected/cancelled decisions cannot be revived by a late approval.
-Required tests include competing requests for final category/booth capacity, quantity/date revision between check and reserve, retry after timeout, transaction rollback, cross-market isolation and real database restart.
+CHECK validates canonical dates, full-season exclusivity, final integer quantity and document/application state. It reads availability and calculates the entire quote; it does not write a browser-supplied amount.
+The authenticated manager RESERVE route rereads the approved current source event, signed agreement, current approved insurance, and Thomas’s food-license decision/document before it writes. It requires private `FAME_BOOTH_CAPACITY` because no source requirement defines a market-wide capacity. It locks shared capacity in sorted market/date order, re-quotes all dates, enforces booth, Food Truck and nonprofit limits, and rolls back the entire set if any date is unavailable. It never uses the legacy booking table.
+The resulting finalization and allocation evidence is immutable; paid vendors start held for the separate checkout action and nonprofits start confirmed. This route has no outbound message or payment call. Repeated identical manager approval returns the existing reservation; a different selection conflicts. See [final-reservation.md](./final-reservation.md).
+Required QA evidence still includes competing final requests, a quantity/date change before reserve, retry after timeout, full rollback, cross-market isolation, migration against a reviewed database, and fresh-connection behavior.
 
 ## Square API setup and owner credential entry
 Square is the only selected payment provider. The owner signs in to Square Developer Console and privately adds the API settings to the Vercel project connected to this repository.
@@ -105,7 +104,7 @@ Draft PR: https://github.com/nate-ooley/fresh-air-markets/pull/1
 ## Implemented protected application handoff (not deployed)
 POST /api/integrations/highlevel/applications now captures an application snapshot into PostgreSQL using stable location/contact/season IDs. It refuses missing database configuration, short/missing shared secret, unauthorized calls, invalid/wrong-location or wrong-season IDs, non-object snapshots and bodies over 128 KiB.
 The migration adds fame_applications and append-only fame_application_events. An exact event retry is acknowledged without adding another application. Reusing an event ID with different content returns conflict. Failed persistence returns 503 for retry; no memory fallback and no approval reset.
-Configure GHL_APPLICATION_WEBHOOK_SECRET (private random value at least 32 characters), FAME_MARKET_ACCOUNT_ID (existing portal accounts.id), FAME_SEASON_ID=2026-2027, GHL_LOCATION_ID and DATABASE_URL.
+Configure GHL_APPLICATION_WEBHOOK_SECRET (private random value at least 32 characters), FAME_MARKET_ACCOUNT_ID (existing portal accounts.id), FAME_SEASON_ID=2026-2027, FAME_BOOTH_CAPACITY (the approved whole-number market-wide capacity), GHL_LOCATION_ID and DATABASE_URL.
 After applying docs/migrations/001-application-handoff.sql and deploying a verified preview, configure the HighLevel server-side custom webhook action after intake to POST to the deployed route. Authorization header is Bearer followed by the shared secret. Never put that header in AI Studio browser code.
 Body contract:
 {

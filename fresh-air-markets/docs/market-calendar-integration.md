@@ -10,4 +10,9 @@ Vendor and admin map controls provide a labeled date selector containing every s
 
 Five automated component cases cover all 35 Saturdays and immutable values, exact market/season scoping, New York date boundaries and historical admin access, real availability/admin handlers, and real inquiry acceptance/rejection with no writes or CRM sync for invalid dates. Route tests use isolated store/CRM/limiter doubles. Browser interaction, deployed configuration, source-form alignment and production database/calendar persistence remain unverified.
 
-This change connects calendar selection and validation. It does not complete final booth quantity, Fresh Air $30/$35/$40 pricing, category limits or CHECK/RESERVE integration. The legacy booth inquiry price calculation remains separate; do not enable this as the production final-reservation system until those launch tasks are complete. Full Season must ultimately expand to the canonical set and price through the final quote flow, not infer the discount from an arbitrary set of dates.
+The final reservation writer now uses this canonical calendar for final booth
+quantity, Fresh Air $30/$35/$40 pricing, Food Truck/nonprofit limits and atomic
+CHECK/RESERVE allocation. It is separate from the legacy booth inquiry price
+calculation. It remains disabled until the reviewed portal database has the
+required migrations and an explicit private `FAME_BOOTH_CAPACITY`; it never
+infers capacity from a legacy inquiry. See [final-reservation.md](./final-reservation.md).

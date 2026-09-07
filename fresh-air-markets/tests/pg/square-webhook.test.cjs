@@ -113,8 +113,8 @@ function paymentEvent(order, patch = {}) {
   };
 }
 
-function persist(event, sql = first) {
-  return persistSquarePaymentWebhook(event, { environment: 'sandbox', now }, sql);
+function persist(event, sql = first, config = {}) {
+  return persistSquarePaymentWebhook(event, { environment: 'sandbox', now, ...config }, sql);
 }
 
 test('100 concurrent exact Square event deliveries create one receipt and one paid reservation', async () => {
@@ -243,25 +243,21 @@ test('a completed payment ID already bound to another order is held for review i
   assert.deepEqual(receipt, { disposition: 'manual_review', manual_review_reason: 'payment_id_bound_to_other_order' });
 });
 
-test('a transient transaction failure rolls back the receipt and paid state so the exact event can safely retry', async () => {
+test('the scoped QA rollback fault rolls back receipt and paid state so the exact event can safely retry', async () => {
   const order = await seedOrder();
   const event = paymentEvent(order, { eventId: 'square-event-rollback' });
-  await first.unsafe(`CREATE FUNCTION qa_square_fail_payment() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected Square reservation failure'; END $$`);
-  await first.unsafe('CREATE TRIGGER qa_square_fail_payment BEFORE UPDATE ON fame_reservations FOR EACH ROW EXECUTE FUNCTION qa_square_fail_payment()');
-  try {
-    await assert.rejects(persist(event), /injected Square reservation failure/);
-    assert.equal((await first`SELECT * FROM fame_square_webhook_events`).length, 0);
-    let [stored] = await first`SELECT status FROM fame_payment_orders WHERE id = ${order.paymentOrderId}`;
-    let [reservation] = await first`SELECT state FROM fame_reservations WHERE id = ${order.reservationId}`;
-    assert.equal(stored.status, 'checkout_created');
-    assert.equal(reservation.state, 'payment_pending');
-  } finally {
-    await first.unsafe('DROP TRIGGER qa_square_fail_payment ON fame_reservations');
-    await first.unsafe('DROP FUNCTION qa_square_fail_payment()');
-  }
+  await assert.rejects(
+    persist(event, first, { qaRollbackEventId: event.eventId }),
+    /QA Square webhook transaction rollback/,
+  );
+  assert.equal((await first`SELECT * FROM fame_square_webhook_events`).length, 0);
+  let [stored] = await first`SELECT status FROM fame_payment_orders WHERE id = ${order.paymentOrderId}`;
+  let [reservation] = await first`SELECT state FROM fame_reservations WHERE id = ${order.reservationId}`;
+  assert.equal(stored.status, 'checkout_created');
+  assert.equal(reservation.state, 'payment_pending');
   assert.deepEqual(await persist(event, second), { kind: 'paid' });
-  const [stored] = await first`SELECT status FROM fame_payment_orders WHERE id = ${order.paymentOrderId}`;
-  const [reservation] = await first`SELECT state FROM fame_reservations WHERE id = ${order.reservationId}`;
+  [stored] = await first`SELECT status FROM fame_payment_orders WHERE id = ${order.paymentOrderId}`;
+  [reservation] = await first`SELECT state FROM fame_reservations WHERE id = ${order.reservationId}`;
   assert.equal(stored.status, 'paid');
   assert.equal(reservation.state, 'paid');
 });
