@@ -16,7 +16,7 @@ Two regressions were reproduced before fixing them: memory-store approval of an 
 
 Additional September 7 coverage:
 
-- Protected HighLevel application handoff: authorization, location/season validation, original contact/snapshot preservation, duplicate/conflict responses, failed persistence and oversized payloads. Persistence is a test double; PostgreSQL behavior remains unverified.
+- Protected HighLevel application handoff: authorization, location/season validation, original contact/snapshot preservation, duplicate/conflict responses, failed persistence and oversized payloads. The isolated route tests use persistence doubles; the separate PostgreSQL suite below exercises the real handoff transaction.
 
 - Six real route handlers reject null, arrays, scalar JSON and malformed JSON (36 payload cases) without mutations; missing authentication is rejected before reading admin mutation bodies. These routes are invoked in process with isolated external boundary doubles, not over HTTP.
 - Late approval cannot revive rejected/cancelled memory-store bookings; repeated approvals skip duplicate HighLevel lifecycle sync. The matching PostgreSQL status guard is implemented but not yet tested against a real database.
@@ -28,7 +28,7 @@ These are component/contract passes. Square transport is replaced with a test do
 
 ## Limits of this evidence
 
-The advisory booking rules are not yet integrated into the portal routes or HighLevel. These are code-level tests, not proof of live workflow behavior. Memory-store concurrency is not PostgreSQL concurrency. Real database transaction tests, public-form submissions, trigger-link routing, document signing, inbox delivery, duplicate workflow enrollment, Square payment outcomes and payment webhook replay must still be tested in their intended environments.
+The advisory booking rules are not yet integrated into the portal routes or HighLevel. These are code-level tests, not proof of live workflow behavior. Memory-store concurrency is not PostgreSQL concurrency. Production database verification, reservation transaction tests, public-form submissions, trigger-link routing, document signing, inbox delivery, duplicate workflow enrollment, Square payment outcomes and payment webhook replay must still be tested in their intended environments.
 
 The portal's current demo calendar and prices remain separate from the new Fresh Air rules. Do not use the demo portal as the production reservation/payment system until the calendar, CHECK/RESERVE and payment integration are complete.
 
@@ -43,4 +43,6 @@ Five additional public inquiry route scenarios reject malformed text fields, inv
 
 Nine new isolated cases cover IP/email limit responses, limiter failure without downstream writes/sends, bounded request bodies, concurrent in-memory boundaries, retention bounds, trusted-header handling and hashed identity scopes. See docs/inquiry-abuse-protection.md for policy and deployment requirements.
 
-After npm test compiles the sources, npm run test:pg runs five additional tests against a disposable local PostgreSQL database. GitHub Actions supplies this service with DATABASE_TEST_URL; the suite rejects remote or non-test database URLs. These checks cover shared counters across two pools with 100 concurrent requests, independent keys, expiry, non-extending blocked retries and persistence across client reconnection. They do not prove production deployment or reservation/application-handoff database behavior.
+After npm test compiles the sources, npm run test:pg runs ten additional tests against a disposable local PostgreSQL database. GitHub Actions supplies this service with DATABASE_TEST_URL; the suite rejects remote or non-test database URLs. Five limiter checks cover shared counters across two pools with 100 concurrent requests, independent keys, expiry, non-extending blocked retries and persistence across client reconnection. They do not prove production deployment or reservation database behavior.
+
+Five application-handoff database checks cover 100 concurrent duplicate deliveries across pools, conflicting event reuse, original application/snapshot preservation with later events, identity separation across contact/season/location/market, and full transaction rollback with successful exact retry over a new connection. The disposable database supplies only the accounts(id) prerequisite plus the actual additive handoff migration; full production schema compatibility and deployed CRM wiring remain unverified. No CRM contact, email or payment API is called.

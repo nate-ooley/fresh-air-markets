@@ -2,14 +2,18 @@ import { randomUUID } from "node:crypto";
 import postgres from "postgres";
 import type { ApplicationHandoff, HandoffResult } from "./application-handoff";
 
-let sql: ReturnType<typeof postgres> | undefined;
+type Sql = ReturnType<typeof postgres>;
+let client: Sql | undefined;
 
 /** Run docs/migrations/001-application-handoff.sql before enabling the route.
  * Snapshot/event rows are append-only; existing approval history is never reset.
  */
-export async function persistApplicationHandoff(event: ApplicationHandoff): Promise<HandoffResult> {
-  if (!process.env.DATABASE_URL) throw new Error("Persistent storage is required.");
-  sql ??= postgres(process.env.DATABASE_URL, { max: 3, prepare: false });
+export async function persistApplicationHandoff(event: ApplicationHandoff, sql?: Sql): Promise<HandoffResult> {
+  if (!sql) {
+    if (!process.env.DATABASE_URL) throw new Error("Persistent storage is required.");
+    client ??= postgres(process.env.DATABASE_URL, { max: 3, prepare: false });
+    sql = client;
+  }
   return sql.begin(async tx => {
     const market = await tx`SELECT id FROM accounts WHERE id = ${event.marketId}`;
     if (!market.length) throw new Error("Configured market does not exist.");

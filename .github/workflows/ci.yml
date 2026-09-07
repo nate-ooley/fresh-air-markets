@@ -48,7 +48,7 @@ jobs:
         run: npm ci
       - name: Run isolated regression tests
         run: npm test
-      - name: Verify shared limiter against isolated PostgreSQL
+      - name: Verify limiter and application capture in isolated PostgreSQL
         env:
           DATABASE_TEST_URL: postgres://qa:isolated-ci-only@127.0.0.1:5432/fresh_air_test
         run: npm run test:pg
