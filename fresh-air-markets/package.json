@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "next lint",
+    "test": "tsc --module commonjs --moduleResolution node --target es2022 --esModuleInterop --skipLibCheck --outDir .test-build src/lib/store-memory.ts src/lib/vendor-booking-rules.ts && node --experimental-strip-types --test tests/*.test.ts tests/*.test.cjs"
   },
   "dependencies": {
     "next": "^15.3.4",

@@ -43,6 +43,8 @@ export function verifySessionToken(token: string | undefined): string | null {
   const parts = token.split(".");
   if (parts.length !== 3) return null;
   const [accountId, expires, sig] = parts;
+  // Reject malformed signatures before comparing their encoded byte buffers.
+  if (!/^[a-f0-9]{64}$/.test(sig)) return null;
   const expected = sign(`${accountId}.${expires}`);
   if (sig.length !== expected.length) return null;
   if (!timingSafeEqual(Buffer.from(sig), Buffer.from(expected))) return null;

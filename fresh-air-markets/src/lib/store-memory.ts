@@ -113,8 +113,9 @@ export class MemoryStore implements Store {
   async approveBooking(marketId: string, id: string): Promise<ApproveResult> {
     const booking = await this.getBooking(marketId, id);
     if (!booking) return { ok: false, conflicts: [] };
+    if (!await this.getBooth(marketId, booking.boothId)) return { ok: false, conflicts: [] };
     const conflicts = data()
-      .bookings.filter((b) => b.id !== id && b.boothId === booking.boothId && b.status === "approved")
+      .bookings.filter((b) => b.marketId === marketId && b.id !== id && b.boothId === booking.boothId && b.status === "approved")
       .flatMap((b) =>
         b.dates
           .filter((d) => booking.dates.includes(d))

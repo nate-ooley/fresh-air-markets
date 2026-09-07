@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { checkVendorBooking, readyForDateSelection } from "../src/lib/vendor-booking-rules.ts";
+import { checkVendorBooking, readyForDateSelection, FAME_VENDOR_CATEGORIES } from "../src/lib/vendor-booking-rules.ts";
 
 const dates = ["2026-10-03", "2026-10-10", "2026-10-17", "2026-10-24", "2026-11-07", "2026-11-14"];
 const calendar = { dates, boothCapacity: 20 };
@@ -92,4 +92,55 @@ test("document gate requires explicit approval or a deliberate Not Required deci
   assert.equal(readyForDateSelection({ ...ready, agreementStatus: "Sent" }), false);
   assert.equal(readyForDateSelection({ ...ready, insuranceStatus: "Needs Correction" }), false);
   assert.equal(readyForDateSelection({ ...ready, applicationStatus: "Waitlist" }), false);
+});
+
+test("all 2,160 document combinations admit only the two explicitly complete states", () => {
+  let checked = 0, allowed = 0;
+  for (const applicationStatus of ["", "New Application", "Needs Review", "Approved", "Waitlist", "Declined"])
+    for (const agreementStatus of ["", "Sent", "Signed", "Declined"])
+      for (const insuranceStatus of ["", "Submitted", "Approved", "Needs Correction", "Expired"])
+        for (const foodLicenseRequired of [true, false, null])
+          for (const foodLicenseStatus of ["", "Requested", "Submitted", "Approved", "Needs Correction", "Not Required"]) {
+            const state = { applicationStatus, agreementStatus, insuranceStatus, foodLicenseRequired, foodLicenseStatus };
+            const expected = applicationStatus === "Approved" && agreementStatus === "Signed" && insuranceStatus === "Approved"
+              && ((foodLicenseRequired === true && foodLicenseStatus === "Approved") || (foodLicenseRequired === false && foodLicenseStatus === "Not Required"));
+            assert.equal(readyForDateSelection(state), expected, JSON.stringify(state));
+            checked++;
+            if (expected) allowed++;
+          }
+  assert.equal(checked, 2160);
+  assert.equal(allowed, 2);
+});
+
+test("all 63 nonempty date subsets maintain price and quantity consistency", () => {
+  for (let mask = 1; mask < 64; mask++) {
+    const selectedDates = dates.filter((_, i) => mask & (1 << i));
+    const one = checkVendorBooking(calendar, { ...base, selectedDates }, empty);
+    const three = checkVendorBooking(calendar, { ...base, selectedDates, boothsPerMarket: 3 }, empty);
+    assert.equal(three.totalCents, one.totalCents * 3);
+    assert.equal(three.allDatesAvailable, true);
+    assert.equal(three.dates.length, selectedDates.length);
+    const reversed = checkVendorBooking(calendar, { ...base, selectedDates: [...selectedDates].reverse() }, empty);
+    assert.deepEqual(reversed, one);
+  }
+});
+
+test("category validation cannot bypass food-truck capacity with whitespace or an unknown value", () => {
+  for (const vendorCategory of FAME_VENDOR_CATEGORIES) {
+    assert.equal(checkVendorBooking(calendar, { ...base, vendorCategory }, empty).allDatesAvailable, true);
+  }
+  const occupied = empty.map(row => ({ ...row, foodTrucks: 4 }));
+  assert.equal(checkVendorBooking(calendar, { ...base, vendorCategory: " Food Truck " }, occupied).allDatesAvailable, false);
+  assert.throws(() => checkVendorBooking(calendar, { ...base, vendorCategory: "FoodTruck" }, occupied));
+  assert.throws(() => checkVendorBooking(calendar, { ...base, fullSeason: "false" as unknown as boolean }, empty));
+});
+
+test("malformed inventory and oversized totals fail closed", () => {
+  for (const value of [-1, 0.5, NaN, Infinity]) {
+    for (const field of ["booths", "foodTrucks", "nonprofits"]) {
+      assert.throws(() => checkVendorBooking(calendar, base, empty.map(r => ({ ...r, [field]: value }))));
+    }
+  }
+  assert.throws(() => checkVendorBooking(calendar, { ...base, boothsPerMarket: Number.MAX_SAFE_INTEGER }, empty));
+  assert.throws(() => checkVendorBooking({ ...calendar, dates: [...dates, dates[0]] }, base, empty));
 });

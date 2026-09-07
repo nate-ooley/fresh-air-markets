@@ -30,6 +30,12 @@ export interface DocumentState {
   foodLicenseStatus: string;
 }
 
+export const FAME_VENDOR_CATEGORIES = [
+  "Food Truck", "Entertainment", "Arts & Crafts", "Food Products", "Produce",
+  "Florals & Plants", "Health & Personal Care", "Jewelry & Accessories", "Home Goods",
+  "Clothing & Apparel", "Pet Products", "Coffee & Tea", "Baked Goods", "Other (please specify)",
+] as const;
+
 export function readyForDateSelection(state: DocumentState): boolean {
   return state.applicationStatus === "Approved"
     && state.agreementStatus === "Signed"
@@ -63,11 +69,13 @@ export function checkVendorBooking(
   if (calendarDates.length !== calendar.dates.length) throw new Error("Duplicate calendar dates.");
   integer(calendar.boothCapacity, 1, "Booth capacity");
   integer(request.boothsPerMarket, 1, "Final booth quantity");
+  if (typeof request.fullSeason !== "boolean") throw new Error("Full Season must be a boolean.");
   if (!["Vendor", "Non-Profit Organization"].includes(request.applicantType)) {
     throw new Error("A recognized applicant type is required.");
   }
-  if (!request.vendorCategory.trim() && request.applicantType === "Vendor") {
-    throw new Error("Vendor category is required.");
+  const category = request.vendorCategory.trim();
+  if (request.applicantType === "Vendor" && !(FAME_VENDOR_CATEGORIES as readonly string[]).includes(category)) {
+    throw new Error("A recognized vendor category is required.");
   }
   // Reject ambiguous Full Season plus explicit selections rather than silently
   // interpreting a partially edited form as a full-season purchase.
@@ -81,7 +89,7 @@ export function checkVendorBooking(
     throw new Error("Select dates from the configured market calendar.");
   }
   const isNonprofit = request.applicantType === "Non-Profit Organization";
-  const isFoodTruck = request.vendorCategory === "Food Truck";
+  const isFoodTruck = category === "Food Truck";
   // Consecutive means adjacent entries in the market calendar, including any
   // scheduled holiday gaps. The whole selected set must be consecutive.
   const first = calendarDates.indexOf(dates[0]);
