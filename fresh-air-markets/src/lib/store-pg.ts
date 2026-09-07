@@ -15,10 +15,11 @@ function client(): Sql {
   return g.__marketSql;
 }
 
-let ready: Promise<void> | null = null;
+const initialized = new WeakMap<Sql, Promise<void>>();
 
 /** Creates the schema and seeds the demo tenant on first connect. */
 function init(sql: Sql): Promise<void> {
+  let ready = initialized.get(sql);
   if (!ready) {
     ready = (async () => {
       await sql`
@@ -93,15 +94,15 @@ function init(sql: Sql): Promise<void> {
         }
       }
     })().catch((err) => {
-      ready = null; // allow retry on next request
+      initialized.delete(sql); // allow retry on next request
       throw err;
     });
   }
+    initialized.set(sql, ready);
   return ready;
 }
 
-async function db(): Promise<Sql> {
-  const sql = client();
+async function db(sql: Sql = client()): Promise<Sql> {
   await init(sql);
   return sql;
 }
@@ -176,54 +177,56 @@ const BOOKING_SELECT = `
   ) AS dates FROM bookings b`;
 
 export class PgStore implements Store {
+  constructor(private readonly connection?: Sql) {}
+
   /* ── Accounts ────────────────────────────────────────── */
 
   async createAccount(account: Account): Promise<Account> {
-    const sql = await db();
+    const sql = await db(this.connection);
     await insertAccount(sql, account);
     return account;
   }
 
   async getAccountByEmail(email: string): Promise<Account | null> {
-    const sql = await db();
+    const sql = await db(this.connection);
     const rows = await sql<AccountRow[]>`SELECT * FROM accounts WHERE email = ${email.toLowerCase()}`;
     return rows[0] ? toAccount(rows[0]) : null;
   }
 
   async getAccountById(id: string): Promise<Account | null> {
-    const sql = await db();
+    const sql = await db(this.connection);
     const rows = await sql<AccountRow[]>`SELECT * FROM accounts WHERE id = ${id}`;
     return rows[0] ? toAccount(rows[0]) : null;
   }
 
   async getAccountBySlug(slug: string): Promise<Account | null> {
-    const sql = await db();
+    const sql = await db(this.connection);
     const rows = await sql<AccountRow[]>`SELECT * FROM accounts WHERE slug = ${slug}`;
     return rows[0] ? toAccount(rows[0]) : null;
   }
 
   async slugExists(slug: string): Promise<boolean> {
-    const sql = await db();
+    const sql = await db(this.connection);
     const rows = await sql`SELECT 1 FROM accounts WHERE slug = ${slug}`;
     return rows.length > 0;
   }
 
   async seedMarket(marketId: string): Promise<void> {
-    const sql = await db();
+    const sql = await db(this.connection);
     for (const b of defaultBooths(marketId, marketId.slice(0, 8))) await insertBooth(sql, b);
   }
 
   /* ── Booths & bookings ───────────────────────────────── */
 
   async getBooth(marketId: string, id: string): Promise<Booth | null> {
-    const sql = await db();
+    const sql = await db(this.connection);
     const rows = await sql<BoothRow[]>`
       SELECT * FROM booths WHERE market_id = ${marketId} AND id = ${id} AND active`;
     return rows[0] ? toBooth(rows[0]) : null;
   }
 
   async boothsWithAvailability(marketId: string, dates: string[], admin: boolean): Promise<BoothWithAvailability[]> {
-    const sql = await db();
+    const sql = await db(this.connection);
     const booths = await sql<BoothRow[]>`
       SELECT * FROM booths WHERE market_id = ${marketId} AND active ORDER BY label`;
     const approved = dates.length
@@ -248,7 +251,7 @@ export class PgStore implements Store {
   }
 
   async createInquiry(marketId: string, input: InquiryInput, totalPrice: number): Promise<Booking> {
-    const sql = await db();
+    const sql = await db(this.connection);
     const id = randomUUID();
     await sql.begin(async (tx) => {
       await tx`INSERT INTO bookings (id, booth_id, market_id, status, total_price, message,
@@ -263,21 +266,21 @@ export class PgStore implements Store {
   }
 
   async listBookings(marketId: string): Promise<Booking[]> {
-    const sql = await db();
+    const sql = await db(this.connection);
     const rows = await sql.unsafe<BookingRow[]>(
       `${BOOKING_SELECT} WHERE b.market_id = $1 ORDER BY b.created_at DESC`, [marketId]);
     return rows.map(toBooking);
   }
 
   async getBooking(marketId: string, id: string): Promise<Booking | null> {
-    const sql = await db();
+    const sql = await db(this.connection);
     const rows = await sql.unsafe<BookingRow[]>(
       `${BOOKING_SELECT} WHERE b.market_id = $1 AND b.id = $2`, [marketId, id]);
     return rows[0] ? toBooking(rows[0]) : null;
   }
 
   async approveBooking(marketId: string, id: string): Promise<ApproveResult> {
-    const sql = await db();
+    const sql = await db(this.connection);
     return sql.begin(async (tx): Promise<ApproveResult> => {
       const target = await tx.unsafe<BookingRow[]>(
         `${BOOKING_SELECT} WHERE b.market_id = $1 AND b.id = $2 FOR UPDATE OF b`, [marketId, id]);
@@ -313,13 +316,13 @@ export class PgStore implements Store {
   }
 
   async setBookingStatus(marketId: string, id: string, status: "rejected" | "cancelled"): Promise<Booking | null> {
-    const sql = await db();
+    const sql = await db(this.connection);
     await sql`UPDATE bookings SET status = ${status} WHERE market_id = ${marketId} AND id = ${id}`;
     return this.getBooking(marketId, id);
   }
 
   async updateBooth(marketId: string, id: string, patch: Partial<Booth>): Promise<Booth | null> {
-    const sql = await db();
+    const sql = await db(this.connection);
     const current = await this.getBooth(marketId, id);
     if (!current) return null;
     const next = { ...current, ...patch, id, marketId };
@@ -332,13 +335,13 @@ export class PgStore implements Store {
   }
 
   async createBooth(booth: Booth): Promise<Booth> {
-    const sql = await db();
+    const sql = await db(this.connection);
     await insertBooth(sql, booth);
     return booth;
   }
 
   async deleteBooth(marketId: string, id: string): Promise<boolean> {
-    const sql = await db();
+    const sql = await db(this.connection);
     const rows = await sql`
       UPDATE booths SET active = FALSE WHERE market_id = ${marketId} AND id = ${id} RETURNING id`;
     return rows.length > 0;
