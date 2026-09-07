@@ -25,9 +25,13 @@ repository.
 | `FAME_MARKET_ACCOUNT_ID` | portal `accounts.id` for Fresh Air, not the HighLevel location ID |
 | `FAME_SEASON_ID=2026-2027` | all exact-record mappings |
 | `GHL_APPLICATION_WEBHOOK_SECRET` | L06 application intake event |
+| `GHL_API_TOKEN` with `opportunities.readonly` + `opportunities.write` | L06/L07 exact HighLevel opportunity updates |
+| `GHL_APPLICATION_PIPELINE_ID` and the four L06 stage IDs | L06 exact review-stage mapping |
+| `CRON_SECRET` | L06 authenticated retry scheduler |
 | `GHL_AGREEMENT_WEBHOOK_SECRET` | L07 agreement issued/completed events |
 | `GHL_AGREEMENT_TEMPLATE_ID` | L07 approved template gate |
 | `GHL_AGREEMENT_NOTIFICATION_EMAIL=nate@autocraftstudios.com` | QA-only L07 notice destination |
+| `GHL_AGREEMENT_PIPELINE_ID`, sent and completed stage IDs | L07 exact signed-agreement stage mapping |
 | `DOCUMENT_INGRESS_WEBHOOK_SECRET` | L08 private-transfer intake |
 | `DOCUMENT_SCANNER_WEBHOOK_SECRET` | L08 scanner callback |
 
@@ -45,6 +49,8 @@ reviewed QA database:
 2. `docs/migrations/004-application-review-outbox.sql`
 3. `docs/migrations/005-agreement-completion-outbox.sql`
 4. `docs/migrations/006-application-document-ledger.sql`
+5. `docs/migrations/007-agreement-completion-stage-outbox.sql`
+6. `docs/migrations/008-application-opportunity-identity.sql`
 
 For a PostgreSQL command-line session pointed at the reviewed QA database:
 
@@ -53,6 +59,8 @@ psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f docs/migrations/001-application-hando
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f docs/migrations/004-application-review-outbox.sql
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f docs/migrations/005-agreement-completion-outbox.sql
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f docs/migrations/006-application-document-ledger.sql
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f docs/migrations/007-agreement-completion-stage-outbox.sql
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f docs/migrations/008-application-opportunity-identity.sql
 ```
 
 Record the database target, migration timestamp and commit SHA in the Asana
@@ -82,8 +90,14 @@ The manager must load and submit the exact portal review route:
 `GET` / `PATCH /api/admin/applications/:applicationId/review`
 
 The session, path application ID, newest source event and idempotency key bind
-the decision. The review outbox remains a durable record until a separately
-configured delivery worker performs the intended CRM/email action.
+the decision. After it commits, the portal immediately attempts only that new
+outbox item. The worker reads the immutable opportunity and verifies its
+contact, pipeline and stage before it updates the configured stage; it reads
+the opportunity again before recording delivery. This prevents a retry from
+triggering a second workflow. Configure an authenticated scheduler to call
+`GET /api/internal/cron/application-review-outbox` with
+`Authorization: Bearer <CRON_SECRET>` for recovery of transient provider
+failures. Do not configure a cron cadence until the Vercel plan supports it.
 
 ### L07: agreement issued and completed
 
@@ -98,9 +112,15 @@ After a genuine completed signing event, call:
 Both calls use `Authorization: Bearer <GHL_AGREEMENT_WEBHOOK_SECRET>` and
 must contain the real event, document, template, contact and opportunity IDs.
 The completed route accepts only a document that was first bound through the
-issued route. Configure the QA-only notification recipient before any genuine
-signature. Do not conduct a real signing while the global signed-document
-alert can notify a live admin.
+issued route. On a captured completion, it immediately attempts an exact
+opportunity-stage update using the completed document's immutable opportunity
+ID. The worker verifies contact, pipeline, location and the configured
+agreement-sent stage before moving it to the configured completed stage; a
+retry already at the completed stage is a no-op. Use
+`GET /api/internal/cron/agreement-completion-stage-outbox` with
+`Authorization: Bearer <CRON_SECRET>` for recovery. Configure the QA-only
+notification recipient before any genuine signature. Do not conduct a real
+signing while the global signed-document alert can notify a live admin.
 
 ### L08: private document transfer and scanning
 

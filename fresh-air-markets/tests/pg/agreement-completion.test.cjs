@@ -6,11 +6,17 @@ const { randomUUID } = require('node:crypto');
 const postgres = require('postgres');
 const {
   claimAgreementNotificationOutbox,
+  claimAgreementStageOutbox,
+  dispatchAgreementStageOutbox,
+  dispatchAgreementStageOutboxById,
   dispatchAgreementNotificationOutbox,
   markAgreementNotificationDelivered,
+  markAgreementStageOutboxDelivered,
   persistAgreementCompletion,
+  persistAgreementCompletionWithStageOutbox,
   persistAgreementIssuance,
   retryAgreementNotificationOutbox,
+  retryAgreementStageOutbox,
 } = require('../../.test-build/agreement-completion-pg.js');
 
 // This suite creates and drops only a private schema inside the disposable CI DB.
@@ -38,13 +44,14 @@ before(async () => {
   try {
     await migration.unsafe(fs.readFileSync(path.join(__dirname, '../../docs/migrations/001-application-handoff.sql'), 'utf8'));
     await migration.unsafe(fs.readFileSync(path.join(__dirname, '../../docs/migrations/005-agreement-completion-outbox.sql'), 'utf8'));
+    await migration.unsafe(fs.readFileSync(path.join(__dirname, '../../docs/migrations/007-agreement-completion-stage-outbox.sql'), 'utf8'));
   } finally {
     await migration.end();
   }
 });
 
 beforeEach(async () => {
-  await first`TRUNCATE fame_agreement_notification_outbox, fame_agreement_completions,
+  await first`TRUNCATE fame_agreement_stage_outbox, fame_agreement_notification_outbox, fame_agreement_completions,
     fame_agreement_issuances, fame_agreement_events, fame_application_events,
     fame_applications`;
 });
@@ -96,7 +103,7 @@ function completed(issue, patch = {}) {
   };
 }
 
-test('100 concurrent source retries bind one exact document, then create one completion and one QA-notice job', async () => {
+test('100 concurrent source retries bind one exact document, then create one completion, notice and stage job', async () => {
   const application = await seedApplication();
   const issue = issued(application, { eventId: 'issue:race', documentId: 'document:race', payloadHash: 'issue-hash' });
   const issuedResults = await Promise.all(Array.from({ length: 100 }, (_, i) => persistAgreementIssuance(issue, i % 2 ? first : second)));
@@ -109,12 +116,17 @@ test('100 concurrent source retries bind one exact document, then create one com
   assert.equal(completeResults.filter(result => result === 'duplicate').length, 99);
   const [stored] = await first`SELECT * FROM fame_agreement_completions`;
   const [outbox] = await first`SELECT * FROM fame_agreement_notification_outbox`;
+  const [stageOutbox] = await first`SELECT * FROM fame_agreement_stage_outbox`;
   assert.equal(stored.application_id, application.applicationId);
   assert.equal(stored.document_id, issue.documentId);
   assert.equal(stored.contact_id, application.contactId);
   assert.equal(stored.opportunity_id, application.opportunityId);
   assert.equal(outbox.recipient_email, 'nate@autocraftstudios.com');
   assert.equal(outbox.payload.applicationId, application.applicationId);
+  assert.equal(stageOutbox.application_id, application.applicationId);
+  assert.equal(stageOutbox.completion_id, stored.id);
+  assert.equal(stageOutbox.payload.opportunityId, application.opportunityId);
+  assert.equal(stageOutbox.payload.locationId, location);
   assert.equal((await first`SELECT * FROM fame_agreement_events`).length, 2);
 });
 
@@ -198,6 +210,45 @@ test('outbox leases fence stale workers and safely replay failed notification de
   assert.ok(stored.delivered_at);
 });
 
+test('agreement-stage outbox is independent from notices and fences immediate delivery against a scheduler race', async () => {
+  const application = await seedApplication();
+  const issue = issued(application, { eventId: 'issue:stage', documentId: 'document:stage' });
+  await persistAgreementIssuance(issue, first);
+  const completion = await persistAgreementCompletionWithStageOutbox(completed(issue, { eventId: 'complete:stage' }), second);
+  assert.equal(completion.outcome, 'captured');
+  assert.ok(completion.stageOutboxId);
+  assert.equal((await first`SELECT * FROM fame_agreement_notification_outbox`).length, 1);
+
+  const claims = await Promise.all(Array.from({ length: 20 }, (_, i) => claimAgreementStageOutbox(1, 30, i % 2 ? first : second)));
+  const jobs = claims.flat();
+  assert.equal(jobs.length, 1);
+  const original = jobs[0];
+  assert.equal(original.payload.applicationId, application.applicationId);
+  assert.equal(original.payload.opportunityId, application.opportunityId);
+  assert.equal(original.payload.locationId, location);
+  await first`UPDATE fame_agreement_stage_outbox SET locked_until = statement_timestamp() - interval '1 second' WHERE id = ${original.id}`;
+  assert.equal(await markAgreementStageOutboxDelivered(original.id, original.leaseToken, first), false);
+  const [replacement] = await claimAgreementStageOutbox(1, 30, second);
+  assert.ok(replacement);
+  assert.notEqual(replacement.leaseToken, original.leaseToken);
+  assert.equal(await retryAgreementStageOutbox(replacement.id, replacement.leaseToken, 'ghl_unavailable', 1, second), true);
+  await first`UPDATE fame_agreement_stage_outbox SET next_attempt_at = statement_timestamp() - interval '1 second' WHERE id = ${replacement.id}`;
+
+  const delivered = [];
+  const [immediate, scheduled] = await Promise.all([
+    dispatchAgreementStageOutboxById(completion.stageOutboxId, async job => { delivered.push(`immediate:${job.id}`); }, { sql: first }),
+    dispatchAgreementStageOutbox(async job => { delivered.push(`scheduled:${job.id}`); }, { sql: second }),
+  ]);
+  assert.equal(immediate.delivered + scheduled.delivered, 1);
+  assert.equal(delivered.length, 1);
+  const [stored] = await first`SELECT status, attempts, delivered_at FROM fame_agreement_stage_outbox WHERE id = ${completion.stageOutboxId}`;
+  assert.equal(stored.status, 'delivered');
+  assert.ok(stored.attempts >= 3);
+  assert.ok(stored.delivered_at);
+  const [notice] = await first`SELECT status FROM fame_agreement_notification_outbox`;
+  assert.equal(notice.status, 'pending');
+});
+
 test('a failed notification-row write rolls back the completion event and admits an exact retry after repair', async () => {
   const application = await seedApplication();
   const issue = issued(application, { eventId: 'issue:rollback', documentId: 'document:rollback' });
@@ -209,6 +260,7 @@ test('a failed notification-row write rolls back the completion event and admits
     await assert.rejects(persistAgreementCompletion(completion, first), /injected agreement outbox failure/);
     assert.equal((await first`SELECT * FROM fame_agreement_completions`).length, 0);
     assert.equal((await first`SELECT * FROM fame_agreement_notification_outbox`).length, 0);
+    assert.equal((await first`SELECT * FROM fame_agreement_stage_outbox`).length, 0);
     assert.equal((await first`SELECT * FROM fame_agreement_events`).length, 1);
   } finally {
     await first.unsafe('DROP TRIGGER qa_agreement_fail_outbox ON fame_agreement_notification_outbox');
@@ -217,5 +269,29 @@ test('a failed notification-row write rolls back the completion event and admits
   assert.equal(await persistAgreementCompletion(completion, second), 'captured');
   assert.equal((await first`SELECT * FROM fame_agreement_completions`).length, 1);
   assert.equal((await first`SELECT * FROM fame_agreement_notification_outbox`).length, 1);
+  assert.equal((await first`SELECT * FROM fame_agreement_stage_outbox`).length, 1);
   assert.equal((await first`SELECT * FROM fame_agreement_events`).length, 2);
+});
+
+test('a failed stage-row write rolls back the completion and notification, then admits the exact retry', async () => {
+  const application = await seedApplication();
+  const issue = issued(application, { eventId: 'issue:stage-rollback', documentId: 'document:stage-rollback' });
+  const completion = completed(issue, { eventId: 'complete:stage-rollback' });
+  await persistAgreementIssuance(issue, first);
+  await first.unsafe(`CREATE FUNCTION qa_agreement_fail_stage() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected agreement stage failure'; END $$`);
+  await first.unsafe('CREATE TRIGGER qa_agreement_fail_stage BEFORE INSERT ON fame_agreement_stage_outbox FOR EACH ROW EXECUTE FUNCTION qa_agreement_fail_stage()');
+  try {
+    await assert.rejects(persistAgreementCompletion(completion, first), /injected agreement stage failure/);
+    assert.equal((await first`SELECT * FROM fame_agreement_completions`).length, 0);
+    assert.equal((await first`SELECT * FROM fame_agreement_notification_outbox`).length, 0);
+    assert.equal((await first`SELECT * FROM fame_agreement_stage_outbox`).length, 0);
+    assert.equal((await first`SELECT * FROM fame_agreement_events`).length, 1);
+  } finally {
+    await first.unsafe('DROP TRIGGER qa_agreement_fail_stage ON fame_agreement_stage_outbox');
+    await first.unsafe('DROP FUNCTION qa_agreement_fail_stage()');
+  }
+  assert.equal(await persistAgreementCompletion(completion, second), 'captured');
+  assert.equal((await first`SELECT * FROM fame_agreement_completions`).length, 1);
+  assert.equal((await first`SELECT * FROM fame_agreement_notification_outbox`).length, 1);
+  assert.equal((await first`SELECT * FROM fame_agreement_stage_outbox`).length, 1);
 });

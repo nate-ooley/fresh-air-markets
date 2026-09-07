@@ -61,7 +61,7 @@ before(async () => {
   await first`INSERT INTO accounts (id) VALUES (${marketId}), ('qa-market-b'), (${actorAccountId}) ON CONFLICT DO NOTHING`;
   const migration = postgres(url.toString(), { max: 1, prepare: false, connection: { search_path: schema } });
   try {
-    for (const file of ['001-application-handoff.sql', '006-application-document-ledger.sql']) {
+    for (const file of ['001-application-handoff.sql', '006-application-document-ledger.sql', '008-application-opportunity-identity.sql']) {
       await migration.unsafe(fs.readFileSync(path.join(__dirname, '../../docs/migrations', file), 'utf8'));
     }
   } finally {
@@ -247,15 +247,50 @@ test('a queued v1 approval is fenced and retired when a newer current upload arr
   }), second);
   assert.equal(secondVersion.kind, 'captured');
   const delivered = [];
-  const result = await dispatchApplicationDocumentOutbox(async job => { delivered.push(job.payload); }, { limit: 10, sql: first });
+  const result = await dispatchApplicationDocumentOutbox(async envelope => { delivered.push(envelope); }, { limit: 10, sql: first });
   assert.deepEqual(result, { delivered: 1, deferred: 0, superseded: 3, stale: 0 });
-  assert.deepEqual(delivered.map(payload => [payload.topic, payload.version]), [['document-submitted', 2]]);
+  assert.deepEqual(delivered.map(envelope => [envelope.event.topic, envelope.document.version]), [['document-submitted', 2]]);
+  assert.deepEqual(delivered[0].application, {
+    id: applicationId,
+    marketId,
+    locationId,
+    contactId: 'qa-contact',
+    opportunityId: 'qa-opportunity',
+    seasonId: '2026-2027',
+  });
+  assert.equal(JSON.stringify(delivered[0]).includes('storageKey'), false);
   const retired = await first`SELECT topic, last_error_code FROM fame_document_outbox WHERE last_error_code = 'superseded' ORDER BY topic`;
   assert.deepEqual(Array.from(retired), [
     { topic: 'document-ready-for-review', last_error_code: 'superseded' },
     { topic: 'document-review', last_error_code: 'superseded' },
     { topic: 'document-submitted', last_error_code: 'superseded' },
   ]);
+});
+
+test('outbox defers when its exact application has no stored opportunity and never calls a delivery adapter', async () => {
+  const captured = await persistApplicationDocumentSource(source(), first);
+  assert.equal(captured.kind, 'captured');
+  await first`UPDATE fame_applications SET opportunity_id = NULL WHERE id = ${applicationId}`;
+  let calls = 0;
+  const result = await dispatchApplicationDocumentOutbox(async () => { calls++; }, { limit: 10, sql: first });
+  assert.deepEqual(result, { delivered: 0, deferred: 1, superseded: 0, stale: 0 });
+  assert.equal(calls, 0);
+  const [stored] = await first`SELECT status, last_error_code FROM fame_document_outbox`;
+  assert.deepEqual(stored, { status: 'pending', last_error_code: 'document_identity_missing' });
+});
+
+test('an application can receive its first opportunity ID but cannot be reassigned to a newer opportunity', async () => {
+  await assert.rejects(
+    first`UPDATE fame_applications SET opportunity_id = 'qa-opportunity-new' WHERE id = ${applicationId}`,
+    /cannot be reassigned/,
+  );
+  const secondApplicationId = '22222222-2222-4222-8222-222222222222';
+  await first`
+    INSERT INTO fame_applications (id, market_id, location_id, contact_id, season_id, opportunity_id)
+    VALUES (${secondApplicationId}, ${marketId}, ${locationId}, 'qa-contact-without-opportunity', '2026-2027', NULL)`;
+  await first`UPDATE fame_applications SET opportunity_id = 'qa-opportunity-first' WHERE id = ${secondApplicationId}`;
+  const [stored] = await first`SELECT opportunity_id FROM fame_applications WHERE id = ${secondApplicationId}`;
+  assert.deepEqual(stored, { opportunity_id: 'qa-opportunity-first' });
 });
 
 test('a failed submission outbox write rolls back the event and document, then an exact retry succeeds', async () => {

@@ -123,6 +123,84 @@ export interface ApplicationDocumentOutboxMessage {
   payload: ApplicationDocumentOutboxPayload;
 }
 
+/**
+ * Immutable CRM/application identity resolved from the same database rows as
+ * the document. A delivery worker receives this instead of doing a contact or
+ * opportunity search of its own.
+ */
+export interface ApplicationDocumentDeliveryTarget {
+  applicationId: string;
+  marketId: string;
+  locationId: string;
+  contactId: string;
+  opportunityId: string;
+  seasonId: string;
+  documentId: string;
+  documentKind: ApplicationDocumentKind;
+  version: number;
+}
+
+export type ApplicationDocumentDeliveryTargetResolution =
+  | { kind: "ready"; target: ApplicationDocumentDeliveryTarget }
+  | { kind: "stale" }
+  | { kind: "identity_missing" };
+
+export type ApplicationDocumentDeliveryEvent =
+  | { topic: "document-submitted"; sourceEventId: string }
+  | {
+    topic: "document-ready-for-review" | "document-validation-rejected";
+    validationEventId: string;
+    sourceEventId: string;
+    validationState: DocumentValidationState;
+    reason: string;
+  }
+  | {
+    topic: "document-review";
+    reviewEventId: string;
+    actorAccountId: string;
+    reviewState: DocumentReviewState;
+    reason: string;
+  };
+
+/**
+ * The only contract passed to an external document delivery adapter. It
+ * deliberately excludes storage keys, filenames, hashes, source file IDs and
+ * public URLs. A provider-specific adapter can use the immutable application
+ * and opportunity IDs, but cannot mistake arbitrary file metadata for a CRM
+ * routing key.
+ */
+export interface ApplicationDocumentDeliveryEnvelope {
+  schemaVersion: 1;
+  outboxId: string;
+  idempotencyKey: string;
+  application: {
+    id: string;
+    marketId: string;
+    locationId: string;
+    contactId: string;
+    opportunityId: string;
+    seasonId: string;
+  };
+  document: {
+    id: string;
+    kind: ApplicationDocumentKind;
+    version: number;
+  };
+  event: ApplicationDocumentDeliveryEvent;
+}
+
+/** A safe, typed failure code for the retrying outbox worker. */
+export class ApplicationDocumentDeliveryError extends Error {
+  public readonly code: string;
+  public readonly retryAfterSeconds: number | undefined;
+
+  constructor(code: string, message: string, retryAfterSeconds?: number) {
+    super(message);
+    this.code = code;
+    this.retryAfterSeconds = retryAfterSeconds;
+  }
+}
+
 interface ApplicationRow {
   id: string;
   market_id: string;
@@ -148,6 +226,22 @@ interface DocumentRow {
   is_current: boolean;
 }
 
+interface ApplicationDocumentDeliveryRow {
+  document_id: string;
+  application_id: string;
+  market_id: string;
+  kind: ApplicationDocumentKind;
+  version: number;
+  validation_state: DocumentValidationState;
+  review_state: DocumentReviewState;
+  is_current: boolean;
+  application_record_id: string | null;
+  location_id: string | null;
+  contact_id: string | null;
+  opportunity_id: string | null;
+  season_id: string | null;
+}
+
 interface SourceEventRow {
   payload_hash: string;
   document_id: string | null;
@@ -169,6 +263,98 @@ function configuredClient(): Sql {
   if (!process.env.DATABASE_URL) throw new Error("Persistent application document storage is required.");
   client ??= postgres(process.env.DATABASE_URL, { max: 3, prepare: false, connect_timeout: 5 });
   return client;
+}
+
+const DELIVERY_IDENTIFIER = /^[A-Za-z0-9:_-]{1,192}$/;
+
+function validDeliveryIdentifier(value: unknown): value is string {
+  return typeof value === "string" && DELIVERY_IDENTIFIER.test(value);
+}
+
+function payloadMatchesCurrentDocument(
+  payload: ApplicationDocumentOutboxPayload,
+  validationState: DocumentValidationState,
+  reviewState: DocumentReviewState,
+): boolean {
+  if (payload.topic === "document-review") return reviewState === payload.reviewState;
+  if (payload.topic === "document-ready-for-review" || payload.topic === "document-validation-rejected") {
+    return validationState === payload.validationState;
+  }
+  return true;
+}
+
+function deliveryEvent(payload: ApplicationDocumentOutboxPayload): ApplicationDocumentDeliveryEvent {
+  switch (payload.topic) {
+    case "document-submitted":
+      return { topic: payload.topic, sourceEventId: payload.sourceEventId };
+    case "document-ready-for-review":
+    case "document-validation-rejected":
+      return {
+        topic: payload.topic,
+        validationEventId: payload.validationEventId,
+        sourceEventId: payload.sourceEventId,
+        validationState: payload.validationState,
+        reason: payload.reason,
+      };
+    case "document-review":
+      return {
+        topic: payload.topic,
+        reviewEventId: payload.reviewEventId,
+        actorAccountId: payload.actorAccountId,
+        reviewState: payload.reviewState,
+        reason: payload.reason,
+      };
+  }
+}
+
+/**
+ * Create the provider-agnostic delivery payload only after the caller has
+ * obtained a target from `resolveApplicationDocumentDeliveryTarget`. This
+ * makes the stored application opportunity the sole routing identity: there
+ * is no lookup by contact, name, or newest opportunity here.
+ */
+export function buildApplicationDocumentDeliveryEnvelope(
+  message: ApplicationDocumentOutboxMessage,
+  target: ApplicationDocumentDeliveryTarget,
+): ApplicationDocumentDeliveryEnvelope {
+  const payload = message.payload;
+  if (!validDeliveryIdentifier(message.id)
+    || !validDeliveryIdentifier(target.applicationId)
+    || !validDeliveryIdentifier(target.marketId)
+    || !validDeliveryIdentifier(target.locationId)
+    || !validDeliveryIdentifier(target.contactId)
+    || !validDeliveryIdentifier(target.opportunityId)
+    || !validDeliveryIdentifier(target.seasonId)
+    || !validDeliveryIdentifier(target.documentId)) {
+    throw new ApplicationDocumentDeliveryError("document_identity_missing", "Document delivery is missing an exact application identity.");
+  }
+  if (target.applicationId !== payload.applicationId
+    || target.marketId !== message.marketId
+    || target.marketId !== payload.marketId
+    || target.documentId !== payload.documentId
+    || target.documentKind !== payload.documentKind
+    || target.version !== payload.version) {
+    throw new ApplicationDocumentDeliveryError("document_identity_mismatch", "Document delivery identity did not match its outbox record.");
+  }
+  return {
+    schemaVersion: 1,
+    outboxId: message.id,
+    idempotencyKey: `fame-document:${message.id}`,
+    application: {
+      id: target.applicationId,
+      marketId: target.marketId,
+      locationId: target.locationId,
+      contactId: target.contactId,
+      opportunityId: target.opportunityId,
+      seasonId: target.seasonId,
+    },
+    document: {
+      id: target.documentId,
+      kind: target.documentKind,
+      version: target.version,
+    },
+    event: deliveryEvent(payload),
+  };
 }
 
 function documentRecord(row: DocumentRow): ApplicationDocumentRecord {
@@ -542,7 +728,13 @@ export async function retryApplicationDocumentOutbox(
   return rows.length === 1;
 }
 
-export type ApplicationDocumentDelivery = (message: ApplicationDocumentOutboxMessage) => Promise<void>;
+export type ApplicationDocumentDelivery = (envelope: ApplicationDocumentDeliveryEnvelope) => Promise<void>;
+
+export interface ApplicationDocumentOutboxDispatchOptions {
+  limit?: number;
+  leaseSeconds?: number;
+  sql?: Sql;
+}
 
 /**
  * Fence a queued message against the current immutable document version before
@@ -567,11 +759,82 @@ export async function applicationDocumentOutboxMessageIsCurrent(
       AND version = ${message.payload.version}
       AND is_current = TRUE`;
   if (!document) return false;
-  if (message.payload.topic === "document-review") return document.review_state === message.payload.reviewState;
-  if (message.payload.topic === "document-ready-for-review" || message.payload.topic === "document-validation-rejected") {
-    return document.validation_state === message.payload.validationState;
+  return payloadMatchesCurrentDocument(message.payload, document.validation_state, document.review_state);
+}
+
+/**
+ * Resolve the one immutable application/opportunity allowed to receive this
+ * document event. The active outbox lease is part of the lookup, so a worker
+ * that lost its lease cannot make a downstream call after another worker owns
+ * the job. The query has no opportunity ordering or search condition.
+ */
+export async function resolveApplicationDocumentDeliveryTarget(
+  message: ApplicationDocumentOutboxMessage,
+  sql: Sql = configuredClient(),
+): Promise<ApplicationDocumentDeliveryTargetResolution> {
+  const [row] = await sql<ApplicationDocumentDeliveryRow[]>`
+    SELECT d.id AS document_id, d.application_id, d.market_id, d.kind, d.version,
+           d.validation_state, d.review_state, d.is_current,
+           a.id AS application_record_id, a.location_id, a.contact_id,
+           a.opportunity_id, a.season_id
+    FROM fame_document_outbox AS o
+    JOIN fame_application_documents AS d
+      ON d.id = ${message.payload.documentId}
+      AND d.application_id = ${message.payload.applicationId}
+      AND d.market_id = ${message.payload.marketId}
+      AND d.kind = ${message.payload.documentKind}
+      AND d.version = ${message.payload.version}
+      AND d.is_current = TRUE
+    LEFT JOIN fame_applications AS a
+      ON a.id = d.application_id AND a.market_id = d.market_id
+    WHERE o.id = ${message.id}
+      AND o.market_id = ${message.marketId}
+      AND o.status = 'processing'
+      AND o.lease_token = ${message.leaseToken}
+      AND o.payload = ${sql.json(message.payload as unknown as Parameters<typeof sql.json>[0])}
+      AND o.locked_until > statement_timestamp()`;
+  if (!row) return { kind: "stale" };
+  if (!payloadMatchesCurrentDocument(message.payload, row.validation_state, row.review_state)) return { kind: "stale" };
+  if (row.application_record_id !== row.application_id
+    || !validDeliveryIdentifier(row.application_id)
+    || !validDeliveryIdentifier(row.market_id)
+    || !validDeliveryIdentifier(row.location_id)
+    || !validDeliveryIdentifier(row.contact_id)
+    || !validDeliveryIdentifier(row.opportunity_id)
+    || !validDeliveryIdentifier(row.season_id)
+    || !validDeliveryIdentifier(row.document_id)) {
+    return { kind: "identity_missing" };
   }
-  return true;
+  return {
+    kind: "ready",
+    target: {
+      applicationId: row.application_id,
+      marketId: row.market_id,
+      locationId: row.location_id,
+      contactId: row.contact_id,
+      opportunityId: row.opportunity_id,
+      seasonId: row.season_id,
+      documentId: row.document_id,
+      documentKind: row.kind,
+      version: Number(row.version),
+    },
+  };
+}
+
+function deliveryFailure(error: unknown, attempt: number): { code: string; delaySeconds: number } {
+  const fallback = Math.min(3600, 30 * 2 ** Math.min(attempt - 1, 6));
+  if (!error || typeof error !== "object") return { code: "delivery_failed", delaySeconds: fallback };
+  const candidate = error as { code?: unknown; retryAfterSeconds?: unknown };
+  const code = typeof candidate.code === "string" && /^[a-z0-9_.:-]{1,64}$/.test(candidate.code)
+    ? candidate.code
+    : "delivery_failed";
+  const retryAfterSeconds = candidate.retryAfterSeconds;
+  const delaySeconds = Number.isInteger(retryAfterSeconds)
+    && Number(retryAfterSeconds) >= 1
+    && Number(retryAfterSeconds) <= 3600
+    ? Number(retryAfterSeconds)
+    : fallback;
+  return { code, delaySeconds };
 }
 
 /**
@@ -580,7 +843,7 @@ export async function applicationDocumentOutboxMessageIsCurrent(
  */
 export async function dispatchApplicationDocumentOutbox(
   deliver: ApplicationDocumentDelivery,
-  options: { limit?: number; leaseSeconds?: number; sql?: Sql } = {},
+  options: ApplicationDocumentOutboxDispatchOptions = {},
 ): Promise<{ delivered: number; deferred: number; superseded: number; stale: number }> {
   const jobs = await claimApplicationDocumentOutbox(options.limit ?? 10, options.leaseSeconds ?? 300, options.sql);
   let delivered = 0;
@@ -594,12 +857,21 @@ export async function dispatchApplicationDocumentOutbox(
       continue;
     }
     try {
-      await deliver(job);
+      const target = await resolveApplicationDocumentDeliveryTarget(job, options.sql);
+      if (target.kind === "stale") {
+        if (await markApplicationDocumentOutboxSuperseded(job.id, job.leaseToken, options.sql)) superseded++;
+        else stale++;
+        continue;
+      }
+      if (target.kind === "identity_missing") {
+        throw new ApplicationDocumentDeliveryError("document_identity_missing", "Document delivery is waiting for its exact application opportunity.");
+      }
+      await deliver(buildApplicationDocumentDeliveryEnvelope(job, target.target));
       if (await markApplicationDocumentOutboxDelivered(job.id, job.leaseToken, options.sql)) delivered++;
       else stale++;
-    } catch {
-      const seconds = Math.min(3600, 30 * 2 ** Math.min(job.attempt - 1, 6));
-      if (await retryApplicationDocumentOutbox(job.id, job.leaseToken, "delivery_failed", seconds, options.sql)) deferred++;
+    } catch (error) {
+      const failure = deliveryFailure(error, job.attempt);
+      if (await retryApplicationDocumentOutbox(job.id, job.leaseToken, failure.code, failure.delaySeconds, options.sql)) deferred++;
       else stale++;
     }
   }

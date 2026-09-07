@@ -32,6 +32,34 @@ another worker's lease delivered. `dispatchApplicationDocumentOutbox` fences a
 job against the current document/version immediately before delivery; a queued
 notice for a superseded version is retired without a downstream side effect.
 
+## Exact application delivery contract
+
+`dispatchApplicationDocumentOutbox` is the only supported document-delivery
+entry point. Before it calls an injected provider adapter, it checks the active
+outbox lease, the persisted outbox payload, the current document version and
+its event state. It then joins that document to its one stored
+`fame_applications` row. The adapter receives an
+`ApplicationDocumentDeliveryEnvelope` containing the exact application,
+market, location, contact, season and **stored opportunity ID**, along with the
+document ID/kind/version, lifecycle event, and stable outbox idempotency key.
+It never receives a storage key, filename, source file ID, digest, raw file,
+or public file URL.
+
+There is no contact search, opportunity-list query, name match, or “most
+recent opportunity” fallback in this path. If the exact application has not
+yet captured an opportunity ID, the job remains pending with the safe
+`document_identity_missing` code and the adapter is not called. If a job loses
+its lease, its document is superseded, or its saved state no longer matches the
+event, it is retired without a downstream call. A provider adapter added later
+must use only `envelope.application.opportunityId`; for HighLevel that means a
+direct request to that ID followed by identity checks, never an opportunity
+search.
+
+Apply `008-application-opportunity-identity.sql` after migration 006. It lets
+an application gain its first opportunity ID, but rejects later reassignment to
+a different opportunity. This preserves the routing identity used by existing
+document work items.
+
 The protected ingress endpoint is `POST /api/integrations/documents`. It accepts
 only a bounded JSON record from a trusted post-transfer worker and derives the
 market from server configuration. Its bearer secret is
@@ -46,8 +74,9 @@ exact version-bound manager decision through `PATCH
 
 Before enabling the route, the deployment still needs: an object-storage
 transfer worker, a malware/deep-file scanner, a HighLevel source-event mapper
-that passes an internal application ID, an outbox delivery worker, migrations
-004–006, and the five QA upload scenarios in the launch grid. The endpoints do
+that passes an internal application ID, a provider adapter that consumes only
+the exact delivery envelope, an outbox delivery worker, migrations 001, 006
+and 008, and the five QA upload scenarios in the launch grid. The endpoints do
 not send email, update a HighLevel opportunity, or expose a document publicly;
 those downstream mappings need explicit implementation and QA evidence before
 L08 can be marked green.

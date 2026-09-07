@@ -6,6 +6,7 @@ import {
   type AgreementCompleted,
   type AgreementIngressResult,
   type AgreementIssued,
+  validAgreementId,
 } from "./agreement-completion";
 
 type Sql = ReturnType<typeof postgres>;
@@ -56,6 +57,34 @@ export interface AgreementNotificationPayload {
   contactId: string;
   opportunityId: string;
   seasonId: string;
+}
+
+/** Immutable identity for the CRM stage update. This is deliberately separate
+ * from the notification payload: a CRM receipt must never be mistaken for a
+ * delivered email. */
+export interface AgreementStageDeliveryPayload {
+  applicationId: string;
+  completionId: string;
+  documentId: string;
+  templateId: string;
+  marketId: string;
+  locationId: string;
+  contactId: string;
+  opportunityId: string;
+  seasonId: string;
+}
+
+export interface AgreementStageDeliveryMessage {
+  id: string;
+  marketId: string;
+  attempt: number;
+  leaseToken: string;
+  payload: AgreementStageDeliveryPayload;
+}
+
+export interface AgreementCompletionPersistence {
+  outcome: AgreementIngressResult;
+  stageOutboxId?: string;
 }
 
 export interface AgreementNotificationMessage {
@@ -163,17 +192,17 @@ export async function persistAgreementIssuance(
 }
 
 /**
- * Marks one exact active issuance complete and writes its internal-notice
- * outbox item in the same transaction. This function never contacts email or
- * HighLevel; a separately configured worker claims the item after commit.
+ * Marks one exact active issuance complete and writes independent internal
+ * notice and CRM-stage work items in the same transaction. This function never
+ * contacts email or HighLevel; workers claim work only after commit.
  */
-export async function persistAgreementCompletion(
+export async function persistAgreementCompletionWithStageOutbox(
   event: AgreementCompleted,
   sql: Sql = configuredClient(),
-): Promise<AgreementIngressResult> {
+): Promise<AgreementCompletionPersistence> {
   return sql.begin(async tx => {
     const prior = await recordEvent(tx, event, "completed");
-    if (prior) return prior;
+    if (prior) return { outcome: prior };
     // Read only the application key first, then take the same application-row
     // lock used by issuance. Re-read the issuance after that lock: otherwise a
     // concurrent reissue could supersede this document between these two
@@ -223,12 +252,13 @@ export async function persistAgreementCompletion(
         UPDATE fame_agreement_events
         SET application_id = ${application.id}
         WHERE location_id = ${event.locationId} AND event_id = ${event.eventId}`;
-      return "duplicate";
+      return { outcome: "duplicate" };
     }
 
     const completionId = randomUUID();
-    const outboxId = randomUUID();
-    const payload: AgreementNotificationPayload = {
+    const notificationOutboxId = randomUUID();
+    const stageOutboxId = randomUUID();
+    const notificationPayload: AgreementNotificationPayload = {
       applicationId: application.id,
       completionId,
       documentId: event.documentId,
@@ -236,6 +266,11 @@ export async function persistAgreementCompletion(
       contactId: event.contactId,
       opportunityId: event.opportunityId,
       seasonId: event.seasonId,
+    };
+    const stagePayload: AgreementStageDeliveryPayload = {
+      ...notificationPayload,
+      marketId: event.marketId,
+      locationId: event.locationId,
     };
     await tx`
       INSERT INTO fame_agreement_completions
@@ -250,18 +285,35 @@ export async function persistAgreementCompletion(
         (id, market_id, application_id, completion_id, recipient_email, topic,
          dedupe_key, payload)
       VALUES
-        (${outboxId}, ${event.marketId}, ${application.id}, ${completionId},
+        (${notificationOutboxId}, ${event.marketId}, ${application.id}, ${completionId},
          ${event.notificationEmail}, 'agreement-completed',
          ${`agreement-completed:${completionId}`},
-         ${tx.json(payload as unknown as Parameters<typeof tx.json>[0])})
+         ${tx.json(notificationPayload as unknown as Parameters<typeof tx.json>[0])})
       RETURNING id`;
     if (!outbox.length) throw new Error("Agreement notification outbox write failed.");
+    const stageOutbox = await tx`
+      INSERT INTO fame_agreement_stage_outbox
+        (id, market_id, application_id, completion_id, topic, dedupe_key, payload)
+      VALUES
+        (${stageOutboxId}, ${event.marketId}, ${application.id}, ${completionId},
+         'agreement-completed-stage', ${`agreement-stage:${completionId}`},
+         ${tx.json(stagePayload as unknown as Parameters<typeof tx.json>[0])})
+      RETURNING id`;
+    if (!stageOutbox.length) throw new Error("Agreement stage outbox write failed.");
     await tx`
       UPDATE fame_agreement_events
       SET application_id = ${application.id}
       WHERE location_id = ${event.locationId} AND event_id = ${event.eventId}`;
-    return "captured";
+    return { outcome: "captured", stageOutboxId };
   });
+}
+
+/** Backwards-compatible completion persistence for the webhook boundary. */
+export async function persistAgreementCompletion(
+  event: AgreementCompleted,
+  sql: Sql = configuredClient(),
+): Promise<AgreementIngressResult> {
+  return (await persistAgreementCompletionWithStageOutbox(event, sql)).outcome;
 }
 
 /** Claim due agreement notices. Expired leases are replayable, but a stale
@@ -370,4 +422,161 @@ export async function dispatchAgreementNotificationOutbox(
     }
   }
   return { delivered, deferred, stale };
+}
+
+export type AgreementStageDelivery = (message: AgreementStageDeliveryMessage) => Promise<void>;
+export interface AgreementStageDispatchResult { delivered: number; deferred: number; stale: number }
+
+/** Claim stage-transition work independently from internal email notices. */
+export async function claimAgreementStageOutbox(
+  limit = 10,
+  leaseSeconds = 300,
+  sql: Sql = configuredClient(),
+): Promise<AgreementStageDeliveryMessage[]> {
+  return claimAgreementStageOutboxWhere(null, limit, leaseSeconds, sql);
+}
+
+/** The completion webhook uses this to attempt only its own committed item. */
+export async function claimAgreementStageOutboxById(
+  id: string,
+  leaseSeconds = 300,
+  sql: Sql = configuredClient(),
+): Promise<AgreementStageDeliveryMessage[]> {
+  if (!validAgreementId(id)) throw new Error("Agreement stage outbox ID is invalid.");
+  return claimAgreementStageOutboxWhere(id, 1, leaseSeconds, sql);
+}
+
+async function claimAgreementStageOutboxWhere(
+  onlyId: string | null,
+  limit: number,
+  leaseSeconds: number,
+  sql: Sql,
+): Promise<AgreementStageDeliveryMessage[]> {
+  if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new Error("Outbox claim limit is invalid.");
+  if (!Number.isInteger(leaseSeconds) || leaseSeconds < 10 || leaseSeconds > 3600) throw new Error("Outbox lease is invalid.");
+  const leaseToken = randomUUID();
+  return sql.begin(async tx => {
+    const rows = await tx<{
+      id: string; market_id: string; attempts: number; lease_token: string; payload: AgreementStageDeliveryPayload;
+    }[]>`
+      WITH next AS (
+        SELECT id
+        FROM fame_agreement_stage_outbox
+        WHERE ((status = 'pending' AND next_attempt_at <= statement_timestamp())
+           OR (status = 'processing' AND locked_until <= statement_timestamp()))
+          AND (${onlyId}::TEXT IS NULL OR id = ${onlyId})
+        ORDER BY next_attempt_at ASC, created_at ASC
+        LIMIT ${limit}
+        FOR UPDATE SKIP LOCKED
+      )
+      UPDATE fame_agreement_stage_outbox AS job
+      SET status = 'processing',
+          attempts = job.attempts + 1,
+          locked_until = statement_timestamp() + (${leaseSeconds} * interval '1 second'),
+          lease_token = ${leaseToken}
+      FROM next
+      WHERE job.id = next.id
+      RETURNING job.id, job.market_id, job.attempts, job.lease_token, job.payload`;
+    return rows.map(row => ({
+      id: row.id,
+      marketId: row.market_id,
+      attempt: Number(row.attempts),
+      leaseToken: row.lease_token,
+      payload: row.payload,
+    }));
+  });
+}
+
+/** A worker whose lease expired cannot complete a newer worker's result. */
+export async function markAgreementStageOutboxDelivered(
+  id: string,
+  leaseToken: string,
+  sql: Sql = configuredClient(),
+): Promise<boolean> {
+  const rows = await sql`
+    UPDATE fame_agreement_stage_outbox
+    SET status = 'delivered', delivered_at = statement_timestamp(),
+        locked_until = NULL, lease_token = NULL, last_error_code = NULL
+    WHERE id = ${id} AND status = 'processing' AND lease_token = ${leaseToken}
+      AND locked_until > statement_timestamp()
+    RETURNING id`;
+  return rows.length === 1;
+}
+
+/** Provider diagnostics never enter the durable application ledger. */
+export async function retryAgreementStageOutbox(
+  id: string,
+  leaseToken: string,
+  errorCode: string,
+  delaySeconds: number,
+  sql: Sql = configuredClient(),
+): Promise<boolean> {
+  if (!/^[a-z0-9_.:-]{1,64}$/.test(errorCode)) throw new Error("Outbox error code is invalid.");
+  if (!Number.isInteger(delaySeconds) || delaySeconds < 1 || delaySeconds > 86_400) throw new Error("Outbox retry delay is invalid.");
+  const rows = await sql`
+    UPDATE fame_agreement_stage_outbox
+    SET status = 'pending',
+        next_attempt_at = statement_timestamp() + (${delaySeconds} * interval '1 second'),
+        locked_until = NULL, lease_token = NULL, last_error_code = ${errorCode}
+    WHERE id = ${id} AND status = 'processing' AND lease_token = ${leaseToken}
+      AND locked_until > statement_timestamp()
+    RETURNING id`;
+  return rows.length === 1;
+}
+
+function stageDeliveryFailure(error: unknown, attempt: number): { code: string; delaySeconds: number } {
+  const fallback = Math.min(3600, 30 * 2 ** Math.min(attempt - 1, 6));
+  if (!error || typeof error !== "object") return { code: "delivery_failed", delaySeconds: fallback };
+  const candidate = error as { code?: unknown; retryAfterSeconds?: unknown };
+  const code = typeof candidate.code === "string" && /^[a-z0-9_.:-]{1,64}$/.test(candidate.code)
+    ? candidate.code
+    : "delivery_failed";
+  const retryAfterSeconds = candidate.retryAfterSeconds;
+  const delaySeconds = Number.isInteger(retryAfterSeconds)
+    && Number(retryAfterSeconds) >= 1
+    && Number(retryAfterSeconds) <= 3600
+    ? Number(retryAfterSeconds)
+    : fallback;
+  return { code, delaySeconds };
+}
+
+async function dispatchClaimedAgreementStageOutbox(
+  jobs: AgreementStageDeliveryMessage[],
+  deliver: AgreementStageDelivery,
+  sql: Sql | undefined,
+): Promise<AgreementStageDispatchResult> {
+  let delivered = 0;
+  let deferred = 0;
+  let stale = 0;
+  for (const job of jobs) {
+    try {
+      await deliver(job);
+      if (await markAgreementStageOutboxDelivered(job.id, job.leaseToken, sql)) delivered++;
+      else stale++;
+    } catch (error) {
+      const failure = stageDeliveryFailure(error, job.attempt);
+      if (await retryAgreementStageOutbox(job.id, job.leaseToken, failure.code, failure.delaySeconds, sql)) deferred++;
+      else stale++;
+    }
+  }
+  return { delivered, deferred, stale };
+}
+
+/** Recovery worker; delivery receives only a committed exact-ID message. */
+export async function dispatchAgreementStageOutbox(
+  deliver: AgreementStageDelivery,
+  options: { limit?: number; leaseSeconds?: number; sql?: Sql } = {},
+): Promise<AgreementStageDispatchResult> {
+  const jobs = await claimAgreementStageOutbox(options.limit ?? 10, options.leaseSeconds ?? 300, options.sql);
+  return dispatchClaimedAgreementStageOutbox(jobs, deliver, options.sql);
+}
+
+/** Immediate, exact-job attempt after a committed agreement completion. */
+export async function dispatchAgreementStageOutboxById(
+  id: string,
+  deliver: AgreementStageDelivery,
+  options: { leaseSeconds?: number; sql?: Sql } = {},
+): Promise<AgreementStageDispatchResult> {
+  const jobs = await claimAgreementStageOutboxById(id, options.leaseSeconds ?? 60, options.sql);
+  return dispatchClaimedAgreementStageOutbox(jobs, deliver, options.sql);
 }
