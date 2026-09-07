@@ -73,3 +73,90 @@ test('replayed approval does not send another HighLevel lifecycle event', async 
   assert.equal(response.status, 200);
   assert.equal(mutations(), 0);
 });
+
+function inquiryBody() {
+  const { bookableDates } = require('../.test-build/dates.js');
+  return { name: 'QA Nate', businessName: "QA Nate's Citrus & Crafts", email: 'nate@autocraftstudios.com',
+    category: 'Crafts & Artisan', boothId: 'qa-booth', dates: [[...bookableDates()][0]] };
+}
+
+async function callInquiry(body) {
+  const writes = [];
+  const { route, mutations } = loadRoute('m/[slug]/inquiries', true, {
+    getBooth: async () => ({ id: 'qa-booth', label: 'QA', pricePerDay: 40 }),
+    boothsWithAvailability: async () => [{ id: 'qa-booth', bookedDates: [] }],
+    createInquiry: async (account, data, totalPrice) => {
+      writes.push({ account, data, totalPrice });
+      return { id: 'qa-inquiry', ...data };
+    },
+  });
+  const response = await route.POST(new NextRequest('https://unit-test.invalid/', {
+    method: 'POST', body: JSON.stringify(body), headers: { 'content-type': 'application/json' },
+  }), { params: Promise.resolve({ slug: 'qa' }) });
+  return { response, writes, syncs: mutations() };
+}
+
+test('inquiry rejects array/object/boolean/number required text fields without writes or email sync', async () => {
+  for (const field of ['name', 'businessName', 'email', 'category', 'boothId']) {
+    for (const value of [[inquiryBody()[field]], { value: inquiryBody()[field] }, true, 123, null]) {
+      const result = await callInquiry({ ...inquiryBody(), [field]: value });
+      assert.equal(result.response.status, 400, field + ':' + JSON.stringify(value));
+      assert.equal(result.writes.length, 0);
+      assert.equal(result.syncs, 0);
+    }
+  }
+});
+
+test('inquiry optional text allows omission and empty strings but rejects structured values', async () => {
+  for (const field of ['phone', 'message']) {
+    for (const value of [[], {}, false, 0, null]) {
+      const result = await callInquiry({ ...inquiryBody(), [field]: value });
+      assert.equal(result.response.status, 400);
+      assert.equal(result.writes.length + result.syncs, 0);
+    }
+  }
+  for (const body of [inquiryBody(), { ...inquiryBody(), phone: '', message: '' }]) {
+    const result = await callInquiry(body);
+    assert.equal(result.response.status, 201);
+    assert.equal(result.writes.length, 1);
+    assert.equal(result.syncs, 1);
+  }
+});
+
+test('inquiry text size boundaries preserve allowed content and reject overflow', async () => {
+  for (const [field, limit] of Object.entries({ name: 200, businessName: 200, phone: 40, message: 2000 })) {
+    const accepted = await callInquiry({ ...inquiryBody(), [field]: 'x'.repeat(limit) });
+    assert.equal(accepted.response.status, 201, field);
+    assert.equal(accepted.writes[0].data[field].length, limit);
+    const rejected = await callInquiry({ ...inquiryBody(), [field]: 'x'.repeat(limit + 1) });
+    assert.equal(rejected.response.status, 400, field);
+    assert.equal(rejected.writes.length + rejected.syncs, 0);
+  }
+});
+
+test('inquiry rejects nested, non-string, missing, invalid and excessive date input', async () => {
+  const { bookableDates } = require('../.test-build/dates.js');
+  const date = inquiryBody().dates[0];
+  for (const dates of [undefined, null, date, [], [[date]], [{}], [1], ['not-a-date'], Array(bookableDates().size + 1).fill(date)]) {
+    const result = await callInquiry({ ...inquiryBody(), dates });
+    assert.equal(result.response.status, 400, JSON.stringify(dates));
+    assert.equal(result.writes.length + result.syncs, 0);
+  }
+});
+
+test('inquiry normalizes email and duplicate dates while preserving punctuation and correct market', async () => {
+  const body = inquiryBody();
+  body.email = '  NATE@AUTOCRAFTSTUDIOS.COM  ';
+  body.name = '  QA Nate  ';
+  body.dates = [body.dates[0], body.dates[0]];
+  const result = await callInquiry(body);
+  assert.equal(result.response.status, 201);
+  assert.equal(result.writes.length, 1);
+  assert.equal(result.syncs, 1);
+  assert.equal(result.writes[0].account, 'qa-route-market');
+  assert.equal(result.writes[0].data.email, 'nate@autocraftstudios.com');
+  assert.equal(result.writes[0].data.name, 'QA Nate');
+  assert.equal(result.writes[0].data.businessName, "QA Nate's Citrus & Crafts");
+  assert.deepEqual(result.writes[0].data.dates, [body.dates[0]]);
+  assert.equal(result.writes[0].totalPrice, 40);
+});
