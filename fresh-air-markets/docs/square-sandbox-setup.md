@@ -29,7 +29,7 @@ describe these values.
 ## 2. Add the initial variables to the QA Preview branch
 
 In **Vercel → Farmers Market → Settings → Environment Variables**, create these
-four variables with the **Preview** environment selected. Scope them to the
+Square variables with the **Preview** environment selected. Scope them to the
 `codex/vendor-booking-validation` branch when that branch selector is
 available. Do not add them to **Production** or prefix them `NEXT_PUBLIC_`.
 
@@ -59,6 +59,20 @@ Production authentication secret.
 | `SQUARE_ALLOW_LIVE_PAYMENTS` | Exact lower-case `false` | Preview branch only; any other or missing value fails closed |
 | `SQUARE_ACCESS_TOKEN` | Square Sandbox Access Token | Mark sensitive; Preview branch only |
 | `SQUARE_LOCATION_ID` | Square Sandbox Location ID | Preview branch only |
+
+The same QA Preview also needs these existing server-only portal values before
+checkout, webhook, or expiry testing. Do not substitute a HighLevel location
+for `FAME_MARKET_ACCOUNT_ID`, and do not point any one of these settings at
+Production.
+
+| Variable | QA requirement |
+| --- | --- |
+| `DATABASE_URL` | Isolated QA portal database with the full migration sequence applied |
+| `AUTH_SECRET` | Private QA authentication secret and a signed-in QA manager |
+| `FAME_MARKET_ACCOUNT_ID` | Existing portal account ID for the QA market |
+| `FAME_SEASON_ID` | Confirmed QA season (`2026-2027`) |
+| `FAME_BOOTH_CAPACITY` | Approved whole-number market-wide capacity; no fallback |
+| `CRON_SECRET` | Private random 32+ character secret for the authenticated expiry route |
 
 Leave these blank at this stage:
 
@@ -135,6 +149,12 @@ instead of sharing the Preview or disabling its protection. The bypass value is
 an external secret: never add it to source, GitHub, Asana, Linear, a browser
 recording, or chat.
 
+The bypass is a broad capability for protected deployments in the Vercel QA
+project, not a route-specific exception. Use a dedicated QA-only bypass in a
+project that carries no Production configuration. Rotate or revoke it after the
+QA run, then replace the affected QA webhook URL and Sandbox subscription
+before any later run. Never use a Production bypass in this process.
+
 1. In **Vercel → Farmers Market → Settings → Deployment Protection**, create a
    dedicated QA **Protection Bypass for Automation** secret. Leave Vercel
    Authentication enabled for the Preview.
@@ -182,43 +202,62 @@ the QA Preview environment. It authorizes the local replay command's custom
 header; it is separate from Square's webhook signature key and must never be
 put in a browser, ticket, recording, or chat.
 
-For one isolated `QA-SQ-*` reservation at a time, set both
-`SQUARE_QA_FAULT_MODE` and `SQUARE_QA_FAULT_RESERVATION_ID`, redeploy Preview,
-run the case, then remove both values and redeploy again. The supported modes
-are `checkout_429`, `checkout_500`, `checkout_timeout`,
-`checkout_permanent_400`, and `checkout_expired_link`. They replace only the
-payment-link provider transport in-process; no Square checkout API request is
-made. The usual read-only Sandbox identity preflight still runs. While a
-checkout fault is armed, the route blocks checkout for every other reservation.
+Arm only one fault at a time, always against a newly labeled `QA-SQ-*` record,
+then remove every `SQUARE_QA_*` value and redeploy before the next case. The
+configuration rejects mixed targets:
 
-For the transaction rollback case, set
-`SQUARE_QA_FAULT_MODE=webhook_rollback` and the one exact
-`SQUARE_QA_FAULT_EVENT_ID`, keep `SQUARE_QA_SIGNER_SECRET` set, and redeploy.
-Only a locally signed request carrying the matching QA signer header reaches
-the injected rollback. It throws after the paid mutations but before commit,
-so the route returns `503` and the receipt, order, and reservation all roll
-back. Remove the fault and redeploy before replaying the identical bytes.
+| Test path | Required values | Synthetic behavior |
+| --- | --- | --- |
+| Checkout | `SQUARE_QA_FAULT_MODE` plus one exact `SQUARE_QA_FAULT_RESERVATION_ID` | `checkout_429`, `checkout_500`, `checkout_timeout`, `checkout_permanent_400`, or `checkout_expired_link`; replaces only that checkout provider transport and makes no Square checkout API call. Other checkout IDs are blocked while it is armed. |
+| Expiry | `SQUARE_QA_FAULT_MODE` plus one exact `SQUARE_QA_FAULT_PAYMENT_ORDER_ID` | `expiry_429`, `expiry_500`, `expiry_timeout`, `expiry_link_mismatch`, `expiry_cancelled_order_mismatch`, `expiry_cancelled_order_missing`, `expiry_missing_link_open`, or `expiry_missing_link_completed`; replaces only retirement-provider calls for the target order and makes no Square API call. The expiry worker scans only that payment order. |
+| Webhook rollback | `SQUARE_QA_FAULT_MODE=webhook_rollback`, one exact `SQUARE_QA_FAULT_EVENT_ID`, and `SQUARE_QA_SIGNER_SECRET` | Only a locally signed matching event reaches the injected rollback. It throws after the paid mutations but before commit, so the route returns `503` and the receipt, order, and reservation all roll back. |
 
-Run the local command through the linked Vercel CLI so it has the same private
-Preview variables and the exposed Vercel system variables above. If the
+The normal read-only Sandbox identity preflight still runs for checkout and
+expiry. For the expiry route, invoke the protected stable QA Preview URL with
+both its dedicated `x-vercel-protection-bypass` query capability and
+`Authorization: Bearer <CRON_SECRET>`; see
+[square-payment-expiry.md](./square-payment-expiry.md). The bypass is broad to
+the QA Vercel project, so do not reuse it outside this dedicated QA run and
+rotate or revoke it when QA ends.
+
+Create deterministic local webhook bodies with the no-network
+[`scripts/generate-square-qa-webhook-fixture.mjs`](../scripts/generate-square-qa-webhook-fixture.mjs)
+helper before dispatching them. It supports `valid`, `malformed`,
+`wrong-identity`, `late`, `failed`, and `out-of-order` cases, writes a new
+local file with restricted permissions, and never reads credentials, signs a
+webhook, or calls Square. Supply only IDs and cents from the isolated labeled
+QA record; never put the resulting file in source control or a work item.
+
+```bash
+npm run square:qa-webhook-fixture -- --case valid --out /secure/qa-event.json \
+  --merchant-id <qa-merchant-id> --location-id <qa-location-id> \
+  --order-id <qa-square-order-id> --payment-id <qa-payment-id> --amount-cents <qa-cents>
+```
+
+Run the local dispatcher through the linked Vercel CLI so it has the same
+private Preview variables and exposed Vercel system variables above. If the
 variables are scoped to every Preview branch, omit `--git-branch`. It refuses
-every other environment and prints only an HTTP status:
+every other environment and succeeds only when the HTTP status **and exact app
+JSON response** match the requested case; a Vercel authentication page or
+proxy `401` is a failed test, not route evidence:
 
 ```bash
 vercel env run -e preview --git-branch codex/vendor-booking-validation -- \
-  npm run square:qa-webhook -- --ack-preview-sandbox --body-file /secure/qa-event.json
+  npm run square:qa-webhook -- --ack-preview-sandbox --expect paid --body-file /secure/qa-event.json
 ```
 
-Reuse the same local file for an exact replay. Add `--invalid-hmac` for the
-unauthenticated case, or replace `--body-file` with `--oversized` for the
-128-KiB boundary. The command never prints its URL, payload, webhook key, or
-QA signer secret. Keep the fixture local; it is not a production payment
-record and must use only the isolated QA reservation.
+Reuse the exact same local file for a duplicate replay. Use `--invalid-hmac`
+for the unauthenticated case and `--oversized` for the 128-KiB boundary; those
+negative probes select and verify their own expected app responses. The dispatcher
+never prints its URL, payload, webhook key, Vercel bypass, or QA signer secret.
+Keep each fixture local; it is not a production payment record and must use
+only the isolated QA reservation.
 
 ## Current release conditions
 
 The Sandbox credential setup alone does not make L17–L19 green. Before a
 payment flow can be marked green, the QA deployment needs the reviewed database
-migrations, the exact payment-order and webhook ledger, a public HTTPS QA
-endpoint, the five required QA cases, and evidence that no live contact or
-administrator received a test action.
+migrations, the exact payment-order and webhook ledger, a protected stable HTTPS
+QA endpoint reachable only with the dedicated automation bypass, the five
+required QA cases, and evidence that no live contact or administrator received
+a test action.

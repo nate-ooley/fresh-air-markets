@@ -21,8 +21,23 @@ export const SQUARE_QA_CHECKOUT_FAULT_MODES = [
 
 export type SquareQaCheckoutFaultMode = typeof SQUARE_QA_CHECKOUT_FAULT_MODES[number];
 
+/** Preview-only provider simulations for one already-expired QA hold. */
+export const SQUARE_QA_EXPIRY_FAULT_MODES = [
+  "expiry_429",
+  "expiry_500",
+  "expiry_timeout",
+  "expiry_link_mismatch",
+  "expiry_cancelled_order_mismatch",
+  "expiry_cancelled_order_missing",
+  "expiry_missing_link_open",
+  "expiry_missing_link_completed",
+] as const;
+
+export type SquareQaExpiryFaultMode = typeof SQUARE_QA_EXPIRY_FAULT_MODES[number];
+
 export type SquareQaFault =
   | { kind: "checkout"; mode: SquareQaCheckoutFaultMode; reservationId: string }
+  | { kind: "expiry"; mode: SquareQaExpiryFaultMode; paymentOrderId: string }
   | { kind: "webhook"; mode: "webhook_rollback"; eventId: string };
 
 export interface SquareQaSupportConfig {
@@ -44,6 +59,7 @@ function configuredQaValue(env: Environment): boolean {
   return [
     "SQUARE_QA_FAULT_MODE",
     "SQUARE_QA_FAULT_RESERVATION_ID",
+    "SQUARE_QA_FAULT_PAYMENT_ORDER_ID",
     "SQUARE_QA_FAULT_EVENT_ID",
     "SQUARE_QA_SIGNER_SECRET",
   ].some(key => value(env, key) !== null);
@@ -74,6 +90,7 @@ export function squareQaSupportConfig(env: Environment): SquareQaSupportConfig |
 
   const mode = value(env, "SQUARE_QA_FAULT_MODE");
   const reservationId = value(env, "SQUARE_QA_FAULT_RESERVATION_ID");
+  const paymentOrderId = value(env, "SQUARE_QA_FAULT_PAYMENT_ORDER_ID");
   const eventId = value(env, "SQUARE_QA_FAULT_EVENT_ID");
   const signerSecret = value(env, "SQUARE_QA_SIGNER_SECRET");
   if (signerSecret && Buffer.byteLength(signerSecret) < 32) {
@@ -81,12 +98,12 @@ export function squareQaSupportConfig(env: Environment): SquareQaSupportConfig |
   }
 
   if (!mode) {
-    if (reservationId || eventId) throw new Error("Square QA fault target requires a fault mode.");
+    if (reservationId || paymentOrderId || eventId) throw new Error("Square QA fault target requires a fault mode.");
     return { fault: null, signerSecret };
   }
 
   if ((SQUARE_QA_CHECKOUT_FAULT_MODES as readonly string[]).includes(mode)) {
-    if (!reservationId || !RESERVATION_ID.test(reservationId) || eventId) {
+    if (!reservationId || !RESERVATION_ID.test(reservationId) || paymentOrderId || eventId) {
       throw new Error("Square QA checkout fault requires one valid reservation target.");
     }
     return {
@@ -95,8 +112,18 @@ export function squareQaSupportConfig(env: Environment): SquareQaSupportConfig |
     };
   }
 
+  if ((SQUARE_QA_EXPIRY_FAULT_MODES as readonly string[]).includes(mode)) {
+    if (!paymentOrderId || !RESERVATION_ID.test(paymentOrderId) || reservationId || eventId) {
+      throw new Error("Square QA expiry fault requires one valid payment-order target.");
+    }
+    return {
+      fault: { kind: "expiry", mode: mode as SquareQaExpiryFaultMode, paymentOrderId },
+      signerSecret,
+    };
+  }
+
   if (mode === "webhook_rollback") {
-    if (!eventId || !EVENT_ID.test(eventId) || reservationId || !signerSecret) {
+    if (!eventId || !EVENT_ID.test(eventId) || reservationId || paymentOrderId || !signerSecret) {
       throw new Error("Square QA webhook rollback requires one event target and a signer secret.");
     }
     return { fault: { kind: "webhook", mode, eventId }, signerSecret };
@@ -143,6 +170,53 @@ export function squareQaCheckoutTransport(
         },
       }), { status: 200, headers: { "content-type": "application/json" } });
     }
+  }
+}
+
+function urlTerminalId(url: string | URL | Request): string {
+  const pathname = new URL(String(url)).pathname;
+  return decodeURIComponent(pathname.split("/").filter(Boolean).at(-1) ?? "");
+}
+
+/**
+ * A synthetic retirement transport is usable only after the scheduler has
+ * claimed the one explicitly configured payment order. It never calls Square.
+ */
+export function squareQaExpiryTransport(
+  fault: SquareQaFault | null,
+  paymentOrderId: string,
+  locationId: string,
+): typeof fetch | undefined {
+  if (!fault || fault.kind !== "expiry" || fault.paymentOrderId !== paymentOrderId) return undefined;
+  switch (fault.mode) {
+    case "expiry_429":
+      return async () => new Response(null, { status: 429 });
+    case "expiry_500":
+      return async () => new Response(null, { status: 500 });
+    case "expiry_timeout":
+      return async () => { throw new Error("QA simulated Square retirement timeout."); };
+    case "expiry_link_mismatch":
+      return async () => new Response(JSON.stringify({ id: "qa-other-link", cancelled_order_id: "qa-order" }), {
+        status: 200, headers: { "content-type": "application/json" },
+      });
+    case "expiry_cancelled_order_mismatch":
+      return async url => new Response(JSON.stringify({
+        id: urlTerminalId(url), cancelled_order_id: "qa-other-order",
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    case "expiry_cancelled_order_missing":
+      return async url => new Response(JSON.stringify({ id: urlTerminalId(url) }), {
+        status: 200, headers: { "content-type": "application/json" },
+      });
+    case "expiry_missing_link_open":
+    case "expiry_missing_link_completed":
+      return async url => {
+        const path = new URL(String(url)).pathname;
+        if (path.includes("/payment-links/")) return new Response(null, { status: 404 });
+        return new Response(JSON.stringify({ order: {
+          id: urlTerminalId(url), location_id: locationId,
+          state: fault.mode === "expiry_missing_link_open" ? "OPEN" : "COMPLETED",
+        } }), { status: 200, headers: { "content-type": "application/json" } });
+      };
   }
 }
 

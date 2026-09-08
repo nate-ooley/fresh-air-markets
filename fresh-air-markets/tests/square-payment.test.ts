@@ -326,6 +326,44 @@ test("a missing link releases capacity only after exact canceled-order recovery;
   });
 });
 
+test("retirement retry delay begins after a slow provider failure, so one scheduler loop cannot immediately reclaim it", async () => {
+  const claimAt = new Date("2026-10-03T12:00:00.000Z");
+  const providerReturnedAt = new Date("2026-10-03T12:00:15.001Z");
+  let clockCalls = 0;
+  let claimInput: unknown;
+  let failure: unknown;
+  const result = await dispatchSquarePaymentLinkRetirement({
+    marketId: "market-1",
+    paymentOrderId: "qa-payment-order-1",
+    square,
+    clock: () => (++clockCalls === 1 ? claimAt : providerReturnedAt),
+    store: retirementStore({
+      claimPaymentLinkRetirement: async input => {
+        claimInput = input;
+        return {
+          kind: "retirement_required",
+          leaseToken: "retirement-lease-1",
+          retirement: {
+            paymentOrderId: "qa-payment-order-1", marketId: "market-1", environment: "sandbox",
+            merchantId: "sandbox-merchant", locationId: "sandbox-location", paymentLinkId: "link-1",
+            squareOrderId: "square-order-1", attempt: 1,
+          },
+        };
+      },
+      failPaymentLinkRetirement: async value => { failure = value; },
+    }),
+    transport: (async () => { throw new Error("slow provider timeout"); }) as typeof fetch,
+  });
+  assert.deepEqual(result, { kind: "retry_scheduled", paymentOrderId: "qa-payment-order-1" });
+  assert.deepEqual(claimInput, {
+    marketId: "market-1", paymentOrderId: "qa-payment-order-1", square, now: claimAt, leaseSeconds: 60,
+  });
+  assert.deepEqual(failure, {
+    paymentOrderId: "qa-payment-order-1", leaseToken: "retirement-lease-1",
+    code: "square_transport_error", retryable: true, attemptedAt: providerReturnedAt,
+  });
+});
+
 test("missing or mismatched Square cancellation proof enters review and never finalizes retirement", async () => {
   const failures: unknown[] = [];
   const missingProof = await dispatchSquarePaymentLinkRetirement({

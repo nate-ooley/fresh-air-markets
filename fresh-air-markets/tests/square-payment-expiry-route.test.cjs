@@ -5,7 +5,7 @@ const path = require('node:path');
 const Module = require('node:module');
 const ts = require('typescript');
 
-function loadRoute({ authorized = true, expiry, configured = true, verified = true, dispatch } = {}) {
+function loadRoute({ authorized = true, expiry, configured = true, verified = true, dispatch, qaSupport, expiryTransport } = {}) {
   const filename = path.resolve(__dirname, '../src/app/api/internal/cron/square-payment-expiry/route.ts');
   const compiled = ts.transpileModule(fs.readFileSync(filename, 'utf8'), {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
@@ -34,6 +34,10 @@ function loadRoute({ authorized = true, expiry, configured = true, verified = tr
     };
     if (id === '@/lib/square-payment') return {
       dispatchSquarePaymentLinkRetirement: dispatch || (async () => ({ kind: 'no_work' })),
+    };
+    if (id === '@/lib/square-qa-faults') return {
+      squareQaSupportConfig: qaSupport || (() => null),
+      squareQaExpiryTransport: expiryTransport || (() => undefined),
     };
     return require(id);
   };
@@ -131,5 +135,63 @@ test('provider identity failure leaves the claimed hold queued and never invokes
     assert.deepEqual(await response.json(), { error: 'Square payment expiry is unavailable.' });
     assert.equal(claimed, 0);
     assert.equal(dispatched, 0);
+  });
+});
+
+test('a Preview-only expiry fault is fenced to one payment order and supplies only its synthetic transport', async () => {
+  await withSchedulerEnv(async () => {
+    let expiryInput;
+    let dispatchInput;
+    let transportTarget;
+    const route = loadRoute({
+      qaSupport: () => ({
+        fault: { kind: 'expiry', mode: 'expiry_429', paymentOrderId: 'qa-payment-order-1' },
+        signerSecret: null,
+      }),
+      expiry: async input => {
+        expiryInput = input;
+        return { expiryPending: 1, manualReview: 0 };
+      },
+      expiryTransport: (fault, paymentOrderId, locationId) => {
+        transportTarget = { fault, paymentOrderId, locationId };
+        return async () => new Response(null, { status: 429 });
+      },
+      dispatch: async input => {
+        dispatchInput = input;
+        const transport = input.transportForRetirement({ paymentOrderId: 'qa-payment-order-1' });
+        assert.equal((await transport('https://should-not-be-called.invalid')).status, 429);
+        return { kind: 'no_work' };
+      },
+    });
+    const response = await route.GET(new Request('https://unit-test.invalid'));
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { expiryPending: 1, expired: 0, deferred: 0, manualReview: 0 });
+    assert.equal(expiryInput.paymentOrderId, 'qa-payment-order-1');
+    assert.equal(dispatchInput.paymentOrderId, 'qa-payment-order-1');
+    assert.deepEqual(transportTarget, {
+      fault: { kind: 'expiry', mode: 'expiry_429', paymentOrderId: 'qa-payment-order-1' },
+      paymentOrderId: 'qa-payment-order-1',
+      locationId: 'sandbox-location',
+    });
+  });
+});
+
+test('an unrelated QA fault fails closed before the scheduler can claim or retire a hold', async () => {
+  await withSchedulerEnv(async () => {
+    let expiryCalls = 0;
+    let dispatchCalls = 0;
+    const route = loadRoute({
+      qaSupport: () => ({
+        fault: { kind: 'checkout', mode: 'checkout_429', reservationId: 'qa-reservation-1' },
+        signerSecret: null,
+      }),
+      expiry: async () => { expiryCalls++; return { expiryPending: 0, manualReview: 0 }; },
+      dispatch: async () => { dispatchCalls++; return { kind: 'no_work' }; },
+    });
+    const response = await route.GET(new Request('https://unit-test.invalid'));
+    assert.equal(response.status, 503);
+    assert.deepEqual(await response.json(), { error: 'Square payment expiry QA configuration is not applicable.' });
+    assert.equal(expiryCalls, 0);
+    assert.equal(dispatchCalls, 0);
   });
 });

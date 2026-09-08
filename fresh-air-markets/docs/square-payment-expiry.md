@@ -6,30 +6,47 @@ starts only after a usable hosted link was persisted, using Square's
 
 ## Deployment order
 
-1. Apply the portal migrations through `013-final-reservation-writer.sql`.
-2. Apply `014-square-payment-expiry.sql`, then
-   `015-square-payment-expiry-retry-schedule.sql`, to the same QA database.
-3. Deploy the matching Preview revision with the existing private `DATABASE_URL`,
-   `CRON_SECRET`, Sandbox access token, Sandbox location ID, and exact
-   `SQUARE_ALLOW_LIVE_PAYMENTS=false`. Enable Vercel system variables so the
-   route receives `VERCEL=1` and `VERCEL_ENV=preview`; it refuses to claim a
-   hold without that Preview/Sandbox gate.
-4. Verify the Sandbox token/location first with `npm run square:verify-sandbox`.
-5. Configure a trusted scheduler to call the endpoint below. In QA, call it
-   manually only against the QA Preview and a labeled QA reservation.
+1. Apply the portal migration chain through `010`, then apply
+   `011-square-payment-checkout-ledger.sql`, `012-square-webhook-events.sql`,
+   `013-final-reservation-writer.sql`, `014-square-payment-expiry.sql`, and
+   `015-square-payment-expiry-retry-schedule.sql` to the same QA database, in
+   that order.
+2. Deploy the matching Preview revision with its private QA-only
+   `DATABASE_URL`, `AUTH_SECRET`, `FAME_MARKET_ACCOUNT_ID`,
+   `FAME_SEASON_ID`, `FAME_BOOTH_CAPACITY`, `CRON_SECRET`, Sandbox access
+   token, Sandbox location ID, and exact `SQUARE_ALLOW_LIVE_PAYMENTS=false`.
+   `FAME_MARKET_ACCOUNT_ID` is the portal account ID for this QA market, not a
+   HighLevel location ID. Enable Vercel system variables so the route receives
+   `VERCEL=1` and `VERCEL_ENV=preview`; it refuses to claim a hold without that
+   Preview/Sandbox gate.
+3. Verify the Sandbox token/location first with `npm run square:verify-sandbox`.
+4. In QA, call the endpoint below manually only against the QA Preview and a
+   labeled QA reservation. A trusted scheduler can be reviewed separately after
+   QA; this runbook does not configure one.
 
 `CRON_SECRET` must be a private, random value of at least 32 characters.
 `FAME_MARKET_ACCOUNT_ID` must name the one portal market that this worker may
-scan. The endpoint accepts only `Authorization: Bearer <CRON_SECRET>` and
-returns aggregate counts; it never returns vendor or payment data.
+scan. The endpoint accepts only `Authorization: Bearer <CRON_SECRET>` after
+Vercel has admitted the protected Preview request, and returns aggregate
+counts; it never returns vendor or payment data.
 
 ```
-GET /api/internal/cron/square-payment-expiry
+GET https://<stable-qa-preview>/api/internal/cron/square-payment-expiry?x-vercel-protection-bypass=<private-qa-bypass>
 Authorization: Bearer <CRON_SECRET>
 ```
 
+The query capability gets through Vercel Deployment Protection; the bearer
+credential authenticates the application route. Both are required for a
+protected Preview and neither belongs in a shell history, issue, recording,
+browser address bar capture, or test output. A Vercel automation-bypass secret
+can bypass protection across protected deployments in its project; it is not a
+route-scoped permission. Use a dedicated QA-only project/Preview capability,
+never a Production bypass, then rotate or revoke it after QA. Do not configure
+a production scheduler as part of this runbook.
+
 Run it frequently enough for the desired operational precision (for example,
-every five minutes once a supported trusted scheduler is available). Do not
+every five minutes once a supported trusted scheduler is available). QA uses a
+manual, protected Preview invocation against one labeled QA record. Do not
 invent a Vercel schedule or expose this endpoint publicly. The payment rule is
 still an exact UTC deadline: a job that runs later expires the due hold then;
 it never extends the deadline.
@@ -91,7 +108,18 @@ result, redacted Square Dashboard confirmation of the matching cancelled order,
 and the payment/reservation/retirement states before and after deletion. For a
 retry, show `expiry_pending` + `payment_pending` + `pending` with a future
 `next_attempt_at` and capacity still held. Do not record credentials, full
-payment payloads, card values, or personal contact data. The local tests cover
-the timing boundary, concurrency, retry schedule, provider delete retry,
-identity fence, legacy upgrade quarantine, and completion race. A real Sandbox
-run remains required before L18 is green.
+payment payloads, card values, personal contact data, the Vercel bypass, or
+`CRON_SECRET`.
+
+For negative expiry cases, arm exactly one Preview-only
+`SQUARE_QA_FAULT_MODE` together with exactly one
+`SQUARE_QA_FAULT_PAYMENT_ORDER_ID`; do not set a reservation or event target at
+the same time. The available synthetic modes are `expiry_429`, `expiry_500`,
+`expiry_timeout`, `expiry_link_mismatch`, `expiry_cancelled_order_mismatch`,
+`expiry_cancelled_order_missing`, `expiry_missing_link_open`, and
+`expiry_missing_link_completed`. They replace only the provider transport for
+that claimed payment order and make no Square API call. Remove the controls and
+redeploy before the next case. The local tests cover the timing boundary,
+concurrency, retry schedule, provider delete retry, identity fence, legacy
+upgrade quarantine, and completion race. A real Sandbox run remains required
+before L18 is green.

@@ -458,6 +458,12 @@ function validSchedulerLimit(value: number): boolean {
   return Number.isSafeInteger(value) && value >= 1 && value <= 100;
 }
 
+const SCHEDULER_PAYMENT_ORDER_ID = /^[A-Za-z0-9:_-]{1,192}$/;
+
+function validSchedulerPaymentOrderId(value: string | undefined): boolean {
+  return value === undefined || SCHEDULER_PAYMENT_ORDER_ID.test(value);
+}
+
 // A failed DELETE must not be reclaimed by the next loop iteration of the
 // same scheduler invocation. Keep the retry time durable so concurrent workers
 // and later invocations observe one shared, bounded exponential schedule.
@@ -488,12 +494,16 @@ function retirementRetryAt(attemptedAt: Date, attemptCount: number): Date {
  */
 export async function expireDueSquarePaymentHolds(input: {
   marketId: string;
+  /** QA fault runs can fence exactly one durable payment order. */
+  paymentOrderId?: string;
   now: Date;
   limit: number;
 }, sql: Sql = configuredClient()): Promise<SquarePaymentExpiryResult> {
-  if (!input.marketId || !Number.isFinite(input.now.valueOf()) || !validSchedulerLimit(input.limit)) {
+  if (!input.marketId || !validSchedulerPaymentOrderId(input.paymentOrderId)
+    || !Number.isFinite(input.now.valueOf()) || !validSchedulerLimit(input.limit)) {
     throw new Error("Square payment expiry input is invalid.");
   }
+  const paymentOrderId = input.paymentOrderId ?? null;
   return sql.begin(async tx => {
     // Lock in the same payment-order/reservation relationship that webhook
     // reconciliation uses. Whichever transaction wins the row lock decides:
@@ -510,6 +520,7 @@ export async function expireDueSquarePaymentHolds(input: {
         ON r.id = p.reservation_id AND r.market_id = p.market_id
       WHERE p.status = 'checkout_created'
         AND p.market_id = ${input.marketId}
+        AND (${paymentOrderId}::text IS NULL OR p.id = ${paymentOrderId})
         AND r.state = 'payment_pending'
         -- A missing or divergent persisted deadline is unsafe even when both
         -- values would otherwise be in the future. Fence it immediately for
@@ -604,14 +615,18 @@ function retirementFromRow(row: PaymentLinkRetirementRow): SquarePaymentLinkReti
 /** Claim one due Sandbox link retirement while its allocation remains held. */
 export async function claimSquarePaymentLinkRetirement(input: {
   marketId: string;
+  /** QA fault runs can claim only this known durable payment order. */
+  paymentOrderId?: string;
   square: Pick<VerifiedSquareSandbox, "environment" | "merchantId" | "locationId">;
   now: Date;
   leaseSeconds: number;
 }, sql: Sql = configuredClient()): Promise<SquarePaymentLinkRetirementClaim> {
-  if (!input.marketId || !Number.isFinite(input.now.valueOf())
+  if (!input.marketId || !validSchedulerPaymentOrderId(input.paymentOrderId)
+    || !Number.isFinite(input.now.valueOf())
     || !Number.isSafeInteger(input.leaseSeconds)
     || input.leaseSeconds < 10
     || input.leaseSeconds > 300) throw new Error("Square payment-link retirement claim is invalid.");
+  const paymentOrderId = input.paymentOrderId ?? null;
   return sql.begin(async tx => {
     const [row] = await tx<PaymentLinkRetirementCandidateRow[]>`
       SELECT q.payment_order_id, q.market_id, q.square_environment,
@@ -628,6 +643,7 @@ export async function claimSquarePaymentLinkRetirement(input: {
       JOIN fame_reservations r ON r.id = p.reservation_id AND r.market_id = p.market_id
       WHERE q.status IN ('pending', 'processing')
         AND p.market_id = ${input.marketId}
+        AND (${paymentOrderId}::text IS NULL OR q.payment_order_id = ${paymentOrderId})
         AND (
           (q.status = 'pending' AND q.next_attempt_at <= ${input.now})
           OR (q.status = 'processing' AND q.locked_until <= ${input.now})

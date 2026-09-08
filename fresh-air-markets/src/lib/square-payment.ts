@@ -136,6 +136,8 @@ export type SquarePaymentLinkRetirementFinalizeResult =
 export interface SquarePaymentLinkRetirementStore {
   claimPaymentLinkRetirement(input: {
     marketId: string;
+    /** Preview QA may scope one synthetic fault to this durable work item. */
+    paymentOrderId?: string;
     square: Pick<VerifiedSquareSandbox, "environment" | "merchantId" | "locationId">;
     now: Date;
     leaseSeconds: number;
@@ -299,12 +301,19 @@ export async function dispatchSquarePaymentLinkRetirement(input: {
   square: VerifiedSquareSandbox;
   store: SquarePaymentLinkRetirementStore;
   transport?: typeof fetch;
+  /** Optional QA transport chosen only after the exact durable row is claimed. */
+  transportForRetirement?: (retirement: SquarePaymentLinkRetirement) => typeof fetch | undefined;
+  /** Preview QA may scope this invocation to one payment order. */
+  paymentOrderId?: string;
   now?: Date;
+  /** Injectable clock keeps provider-response-time retry tests deterministic. */
+  clock?: () => Date;
   leaseSeconds?: number;
 }): Promise<SquarePaymentLinkRetirementDispatchResult> {
   if (input.square.environment !== "sandbox") throw new Error("Only Square Sandbox payment-link retirement is enabled.");
   if (!validSquareReservationId(input.marketId)) throw new Error("Invalid market ID.");
-  const now = input.now ?? new Date();
+  const clock = input.clock ?? (() => new Date());
+  const now = input.now ?? clock();
   if (!Number.isFinite(now.valueOf())) throw new Error("A valid server time is required.");
   const leaseSeconds = input.leaseSeconds ?? 60;
   if (!Number.isSafeInteger(leaseSeconds) || leaseSeconds < 10 || leaseSeconds > 300) {
@@ -312,6 +321,7 @@ export async function dispatchSquarePaymentLinkRetirement(input: {
   }
   const claim = await input.store.claimPaymentLinkRetirement({
     marketId: input.marketId,
+    paymentOrderId: input.paymentOrderId,
     square: input.square,
     now,
     leaseSeconds,
@@ -319,6 +329,11 @@ export async function dispatchSquarePaymentLinkRetirement(input: {
   if (claim.kind === "no_work") return claim;
   if (claim.kind === "in_progress") return claim;
   if (claim.kind === "manual_review") return claim;
+  // `now` fences the lease claim. A provider call can take seconds after it,
+  // so normal runtime records completion/failure with the response-time clock.
+  // That prevents a timeout from making its retry eligible in this same loop.
+  const actionTime = () => input.now ?? clock();
+  const transport = input.transportForRetirement?.(claim.retirement) ?? input.transport;
   // The durable row is identity-fenced at creation and is rechecked when it
   // is claimed. Do not let an unrelated configured Square location delete it.
   if (claim.retirement.environment !== input.square.environment
@@ -334,7 +349,7 @@ export async function dispatchSquarePaymentLinkRetirement(input: {
     return { kind: "manual_review", paymentOrderId: claim.retirement.paymentOrderId };
   }
   try {
-    const deletion = await deleteSquarePaymentLink(input.square, claim.retirement.paymentLinkId, input.transport);
+    const deletion = await deleteSquarePaymentLink(input.square, claim.retirement.paymentLinkId, transport);
     let cancelledOrderId: string | null = null;
     let proofFailure: string | null = null;
     if (deletion.kind === "deleted") {
@@ -351,7 +366,7 @@ export async function dispatchSquarePaymentLinkRetirement(input: {
       // Retry after a process crash can see a missing link. Recover only when
       // Square's exact stored order is demonstrably CANCELED at this location;
       // OPEN, COMPLETED, absent, or malformed state remains operator review.
-      const recovered = await retrieveSquareOrderForRetirement(input.square, claim.retirement.squareOrderId, input.transport);
+      const recovered = await retrieveSquareOrderForRetirement(input.square, claim.retirement.squareOrderId, transport);
       if (recovered.orderId === claim.retirement.squareOrderId
         && recovered.locationId === input.square.locationId
         && recovered.state === "CANCELED") {
@@ -366,7 +381,7 @@ export async function dispatchSquarePaymentLinkRetirement(input: {
         leaseToken: claim.leaseToken,
         code: proofFailure ?? "square_retirement_cancellation_unproven",
         retryable: false,
-        attemptedAt: now,
+        attemptedAt: actionTime(),
       });
       return { kind: "manual_review", paymentOrderId: claim.retirement.paymentOrderId };
     }
@@ -374,7 +389,7 @@ export async function dispatchSquarePaymentLinkRetirement(input: {
       paymentOrderId: claim.retirement.paymentOrderId,
       leaseToken: claim.leaseToken,
       cancelledOrderId,
-      retiredAt: now,
+      retiredAt: actionTime(),
     });
     if (completed.kind === "retired") return { kind: "retired", paymentOrderId: claim.retirement.paymentOrderId };
     if (completed.kind === "manual_review") return { kind: "manual_review", paymentOrderId: claim.retirement.paymentOrderId };
@@ -387,7 +402,7 @@ export async function dispatchSquarePaymentLinkRetirement(input: {
         leaseToken: claim.leaseToken,
         code: failure.code,
         retryable: failure.retryable,
-        attemptedAt: now,
+        attemptedAt: actionTime(),
       });
     } catch {
       return { kind: "retry_scheduled", paymentOrderId: claim.retirement.paymentOrderId };

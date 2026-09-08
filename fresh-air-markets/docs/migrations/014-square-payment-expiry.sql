@@ -73,20 +73,45 @@ BEGIN
   FROM fame_payment_orders p
   JOIN fame_square_payment_link_retirements q ON q.payment_order_id = p.id
   WHERE r.id = p.reservation_id AND r.market_id = p.market_id
-    AND q.status = 'retired' AND q.retired_square_order_id IS NULL
-    AND r.state = 'expired';
+    AND q.status = 'retired'
+    AND (
+      q.retired_at IS NULL
+      OR q.retired_square_order_id IS NULL
+      OR q.retired_square_order_id IS DISTINCT FROM q.square_order_id
+    )
+    AND r.state IN ('held', 'payment_pending', 'expired');
   UPDATE fame_payment_orders p
   SET status = 'manual_review', last_error_code = 'legacy_retired_without_cancellation_proof',
       updated_at = now()
   FROM fame_square_payment_link_retirements q
   WHERE q.payment_order_id = p.id
-    AND q.status = 'retired' AND q.retired_square_order_id IS NULL
-    AND p.status = 'expired';
+    AND q.status = 'retired'
+    AND (
+      q.retired_at IS NULL
+      OR q.retired_square_order_id IS NULL
+      OR q.retired_square_order_id IS DISTINCT FROM q.square_order_id
+    )
+    AND p.status IN ('pending_checkout', 'processing_checkout', 'checkout_created', 'expiry_pending', 'expired');
   UPDATE fame_square_payment_link_retirements
-  SET status = 'manual_review', retired_at = NULL, retired_square_order_id = NULL,
+  SET status = 'manual_review', locked_until = NULL, lease_token = NULL,
+      retired_at = NULL, retired_square_order_id = NULL,
       last_error_code = 'legacy_retired_without_cancellation_proof', updated_at = now()
-  WHERE status = 'retired' AND retired_square_order_id IS NULL;
+  WHERE status = 'retired'
+    AND (
+      retired_at IS NULL
+      OR retired_square_order_id IS NULL
+      OR retired_square_order_id IS DISTINCT FROM square_order_id
+    );
   GET DIAGNOSTICS quarantined_count = ROW_COUNT;
+  -- A pre-proof draft could also leave proof fields on non-retired work.
+  -- Clear them before the constraint below; they cannot prove cancellation
+  -- unless the row is explicitly retired with its exact Square order.
+  UPDATE fame_square_payment_link_retirements
+  SET retired_at = NULL, retired_square_order_id = NULL,
+      last_error_code = COALESCE(last_error_code, 'legacy_retirement_proof_cleared'),
+      updated_at = now()
+  WHERE status <> 'retired'
+    AND (retired_at IS NOT NULL OR retired_square_order_id IS NOT NULL);
   IF quarantined_count > 0 THEN
     RAISE WARNING 'Quarantined % legacy Square retirement rows without cancellation proof; reconcile in Square before release.', quarantined_count;
   END IF;

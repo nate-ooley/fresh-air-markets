@@ -7,9 +7,9 @@ payment successful from a browser return.
 
 ## Apply and deploy order
 
-1. Apply the existing portal migrations through
-   `006-application-document-ledger.sql` first. Migration `006` supplies the
-   composite `(id, market_id)` application key required by `011`.
+1. Apply the existing portal migration chain through `010`. Migration `006`
+   within that chain supplies the composite `(id, market_id)` application key
+   required by `011`.
 2. Apply `011-square-payment-checkout-ledger.sql` to the QA portal database.
 3. Apply `012-square-webhook-events.sql` before enabling a Sandbox checkout.
 4. Apply `013-final-reservation-writer.sql`; it is the only writer that creates
@@ -17,9 +17,11 @@ payment successful from a browser return.
 5. Apply `014-square-payment-expiry.sql`, then
    `015-square-payment-expiry-retry-schedule.sql`, which atomically expires
    unpaid holds and queues idempotent hosted-link retirement with durable retry
-   scheduling.
-6. Deploy the matching Preview revision with its private Square variables and
-   `CRON_SECRET` for the trusted expiry endpoint.
+   scheduling. This completes the canonical `010`, then `011`–`015` sequence.
+6. Deploy the matching Preview revision with private QA-only Square variables,
+   `FAME_MARKET_ACCOUNT_ID`, `FAME_SEASON_ID`, `FAME_BOOTH_CAPACITY`, and
+   `CRON_SECRET` for the protected expiry endpoint. `FAME_MARKET_ACCOUNT_ID`
+   is a portal account ID, not a HighLevel location ID.
 7. Run the read-only Sandbox identity verification in
    [square-sandbox-setup.md](./square-sandbox-setup.md).
 8. Create the exact Sandbox webhook subscription only after the deployed
@@ -85,10 +87,15 @@ nonprofit/expired/cancelled/in-progress stop paths, configuration failures,
 manager authentication, and request-body substitution attempts. These are
 isolated tests; they do not create a Square payment or contact a vendor.
 
-The remaining release evidence is a deployed QA database with the final
-reservation writer and migrations `014` and `015`, an authenticated expiry scheduler,
-Preview webhook subscription, and real Sandbox tests for successful, declined,
-abandoned, expired and retried payment attempts.
+The remaining release evidence is a deployed QA database with the complete
+canonical migration chain through `010`, then `011`–`015`; the final
+reservation writer; a protected, authenticated Preview expiry invocation;
+Preview webhook subscription; and real Sandbox tests for successful, declined,
+abandoned, expired and retried payment attempts. The expiry invocation needs
+both the private Vercel protection-bypass capability and `CRON_SECRET`; see
+[square-payment-expiry.md](./square-payment-expiry.md). The bypass applies
+broadly within its QA project, so rotate or revoke it after QA and never use a
+Production bypass.
 
 Square's `payment_link.created_at` must be a strict RFC 3339 calendar timestamp
 with an explicit timezone and may be no more than five minutes ahead of the

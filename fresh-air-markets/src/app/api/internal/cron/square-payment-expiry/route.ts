@@ -5,6 +5,7 @@ import {
 } from "@/lib/square-payment-pg";
 import { dispatchSquarePaymentLinkRetirement } from "@/lib/square-payment";
 import { squarePreviewSandboxRuntimeConfig, verifySquareSandboxSetup } from "@/lib/square";
+import { squareQaExpiryTransport, squareQaSupportConfig } from "@/lib/square-qa-faults";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -38,6 +39,22 @@ export async function GET(request: Request): Promise<Response> {
     return Response.json({ error: "Square payment expiry market scope is not configured." }, { status: 503 });
   }
 
+  let qaSupport;
+  try {
+    qaSupport = squareQaSupportConfig(process.env);
+    // A checkout or webhook fault must never be ignored by the expiry worker:
+    // otherwise a test setting could accidentally make this path touch an
+    // unrelated real Sandbox hold. Expiry simulations have one exact target.
+    if (qaSupport?.fault && qaSupport.fault.kind !== "expiry") {
+      return Response.json({ error: "Square payment expiry QA configuration is not applicable." }, { status: 503 });
+    }
+  } catch {
+    return Response.json({ error: "Square payment expiry is unavailable." }, { status: 503 });
+  }
+  const qaPaymentOrderId = qaSupport?.fault?.kind === "expiry"
+    ? qaSupport.fault.paymentOrderId
+    : undefined;
+
   let setup;
   try {
     // Check the local Preview/Sandbox gate before claiming anything. A copied
@@ -49,7 +66,9 @@ export async function GET(request: Request): Promise<Response> {
 
   let expiry;
   try {
-    expiry = await expireDueSquarePaymentHolds({ marketId, now: new Date(), limit: EXPIRY_LIMIT });
+    expiry = await expireDueSquarePaymentHolds({
+      marketId, paymentOrderId: qaPaymentOrderId, now: new Date(), limit: EXPIRY_LIMIT,
+    });
   } catch {
     return Response.json({ error: "Square payment expiry is unavailable." }, { status: 503 });
   }
@@ -75,10 +94,19 @@ export async function GET(request: Request): Promise<Response> {
   let manualReview = expiry.manualReview;
   try {
     for (let index = 0; index < RETIREMENT_LIMIT; index++) {
-      const result = await dispatchSquarePaymentLinkRetirement({
+      const dispatchInput = {
         marketId,
         square,
         store: postgresSquarePaymentLinkRetirementStore,
+        ...(qaPaymentOrderId ? {
+          paymentOrderId: qaPaymentOrderId,
+          transportForRetirement: (retirement: { paymentOrderId: string }) => squareQaExpiryTransport(
+            qaSupport?.fault ?? null, retirement.paymentOrderId, square.locationId,
+          ),
+        } : {}),
+      };
+      const result = await dispatchSquarePaymentLinkRetirement({
+        ...dispatchInput,
       });
       if (result.kind === "no_work") break;
       if (result.kind === "retired") expired++;

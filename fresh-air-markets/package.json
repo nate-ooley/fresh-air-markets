@@ -10,6 +10,7 @@
     "test": "tsc --module commonjs --moduleResolution node --target es2022 --esModuleInterop --skipLibCheck --outDir .test-build src/lib/store-memory.ts src/lib/vendor-booking-rules.ts src/lib/request-body.ts src/lib/plans.ts src/lib/inquiry-body.ts src/lib/inquiry-rate-limit.ts src/lib/application-handoff-pg.ts src/lib/application-review-pg.ts src/lib/agreement-completion-pg.ts src/lib/application-document-pg.ts src/lib/application-document-ingress.ts src/lib/private-document-transfer.ts src/lib/ghl-application-review-delivery.ts src/lib/ghl-agreement-completion-delivery.ts src/lib/cron-auth.ts src/lib/store-pg.ts src/lib/market-calendar.ts src/lib/final-reservation.ts src/lib/final-reservation-pg.ts src/lib/square.ts src/lib/square-webhook.ts src/lib/square-payment.ts src/lib/square-payment-pg.ts src/lib/square-webhook-pg.ts src/lib/square-qa-faults.ts && node --experimental-strip-types --test tests/*.test.ts tests/*.test.cjs",
     "square:verify-sandbox": "node --experimental-strip-types scripts/verify-square-sandbox.mjs",
     "square:qa-webhook": "node --experimental-strip-types scripts/square-qa-webhook.mjs",
+    "square:qa-webhook-fixture": "node scripts/generate-square-qa-webhook-fixture.mjs",
     "test:pg": "node --test --test-concurrency=1 tests/pg/*.test.cjs"
   },
   "dependencies": {

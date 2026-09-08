@@ -203,8 +203,8 @@ function paymentEvent(order, patch = {}) {
   return { ...event, rawBodySha256: createHash('sha256').update(JSON.stringify(event)).digest('hex') };
 }
 
-function expire(sql = first, now = dueAt, limit = 25) {
-  return expireDueSquarePaymentHolds({ marketId, now, limit }, sql);
+function expire(sql = first, now = dueAt, limit = 25, paymentOrderId) {
+  return expireDueSquarePaymentHolds({ marketId, now, limit, paymentOrderId }, sql);
 }
 
 test('exactly one concurrent expiry claims the 48-hour hold, then provider retirement releases capacity once', async () => {
@@ -247,6 +247,21 @@ test('exactly one concurrent expiry claims the 48-hour hold, then provider retir
     now: dueAt,
   }, second);
   assert.equal(next.kind, 'created');
+});
+
+test('a payment-order fence leaves every other QA hold untouched until the exact target is selected', async () => {
+  const order = await checkoutForApplication();
+  assert.deepEqual(await expire(first, dueAt, 25, 'qa-not-this-payment-order'), { expiryPending: 0, manualReview: 0 });
+  assert.deepEqual(rows(await first`
+    SELECT status FROM fame_payment_orders WHERE id = ${order.paymentOrderId}`), [{ status: 'checkout_created' }]);
+  assert.deepEqual(await expire(first, dueAt, 25, order.paymentOrderId), { expiryPending: 1, manualReview: 0 });
+  const square = { environment: 'sandbox', merchantId, locationId: squareLocationId };
+  assert.deepEqual(await claimSquarePaymentLinkRetirement({
+    marketId, paymentOrderId: 'qa-not-this-payment-order', square, now: dueAt, leaseSeconds: 60,
+  }, first), { kind: 'no_work' });
+  assert.equal((await claimSquarePaymentLinkRetirement({
+    marketId, paymentOrderId: order.paymentOrderId, square, now: dueAt, leaseSeconds: 60,
+  }, first)).kind, 'retirement_required');
 });
 
 test('retirement leases back off after provider failure while the claimed hold keeps capacity', async () => {
@@ -420,7 +435,7 @@ test('a configured Square identity mismatch fences the order, reservation, and r
   [{ status: 'manual_review', last_error_code: 'square_retirement_identity_mismatch' }]);
 });
 
-test('migration 015 quarantines proofless legacy retirements and their active parents', async () => {
+test('the 014-to-015 upgrade chain quarantines proofless legacy retirements before the proof constraint is installed', async () => {
   const legacySchema = 'qa_square_payment_expiry_legacy';
   await admin.unsafe(`DROP SCHEMA IF EXISTS ${legacySchema} CASCADE`);
   await admin.unsafe(`CREATE SCHEMA ${legacySchema}`);
@@ -442,6 +457,7 @@ test('migration 015 quarantines proofless legacy retirements and their active pa
         reservation_id TEXT NOT NULL,
         market_id TEXT NOT NULL,
         status TEXT NOT NULL,
+        square_order_id TEXT,
         locked_until TIMESTAMPTZ,
         lease_token TEXT,
         last_error_code TEXT,
@@ -449,7 +465,13 @@ test('migration 015 quarantines proofless legacy retirements and their active pa
       );
       CREATE TABLE fame_square_payment_link_retirements (
         payment_order_id TEXT PRIMARY KEY,
+        market_id TEXT NOT NULL,
+        square_environment TEXT NOT NULL,
+        square_merchant_id TEXT NOT NULL,
+        square_location_id TEXT NOT NULL,
+        square_payment_link_id TEXT NOT NULL,
         status TEXT NOT NULL,
+        attempt_count INTEGER NOT NULL DEFAULT 0,
         square_order_id TEXT,
         retired_square_order_id TEXT,
         retired_at TIMESTAMPTZ,
@@ -462,18 +484,27 @@ test('migration 015 quarantines proofless legacy retirements and their active pa
       INSERT INTO fame_reservations (id, market_id, state) VALUES
         ('legacy-reservation-missing', 'legacy-market', 'payment_pending'),
         ('legacy-reservation-mismatch', 'legacy-market', 'payment_pending'),
-        ('legacy-reservation-no-time', 'legacy-market', 'payment_pending');
-      INSERT INTO fame_payment_orders (id, reservation_id, market_id, status) VALUES
-        ('legacy-order-missing', 'legacy-reservation-missing', 'legacy-market', 'checkout_created'),
-        ('legacy-order-mismatch', 'legacy-reservation-mismatch', 'legacy-market', 'checkout_created'),
-        ('legacy-order-no-time', 'legacy-reservation-no-time', 'legacy-market', 'checkout_created');
+        ('legacy-reservation-no-time', 'legacy-market', 'payment_pending'),
+        ('legacy-reservation-stale-proof', 'legacy-market', 'payment_pending');
+      INSERT INTO fame_payment_orders (id, reservation_id, market_id, status, square_order_id) VALUES
+        ('legacy-order-missing', 'legacy-reservation-missing', 'legacy-market', 'checkout_created', 'square-order-missing'),
+        ('legacy-order-mismatch', 'legacy-reservation-mismatch', 'legacy-market', 'checkout_created', 'square-order-mismatch'),
+        ('legacy-order-no-time', 'legacy-reservation-no-time', 'legacy-market', 'checkout_created', 'square-order-no-time'),
+        ('legacy-order-stale-proof', 'legacy-reservation-stale-proof', 'legacy-market', 'checkout_created', 'square-order-stale-proof');
       INSERT INTO fame_square_payment_link_retirements
-        (payment_order_id, status, square_order_id, retired_square_order_id, retired_at)
+        (payment_order_id, market_id, square_environment, square_merchant_id, square_location_id,
+         square_payment_link_id, status, square_order_id, retired_square_order_id, retired_at)
       VALUES
-        ('legacy-order-missing', 'retired', 'square-order-missing', NULL, '2026-10-03T12:00:00.000Z'),
-        ('legacy-order-mismatch', 'retired', 'square-order-mismatch', 'other-square-order', '2026-10-03T12:00:00.000Z'),
-        ('legacy-order-no-time', 'retired', 'square-order-no-time', 'square-order-no-time', NULL);
+        ('legacy-order-missing', 'legacy-market', 'sandbox', 'legacy-merchant', 'legacy-location',
+         'legacy-link-missing', 'retired', 'square-order-missing', NULL, '2026-10-03T12:00:00.000Z'),
+        ('legacy-order-mismatch', 'legacy-market', 'sandbox', 'legacy-merchant', 'legacy-location',
+         'legacy-link-mismatch', 'retired', 'square-order-mismatch', 'other-square-order', '2026-10-03T12:00:00.000Z'),
+        ('legacy-order-no-time', 'legacy-market', 'sandbox', 'legacy-merchant', 'legacy-location',
+         'legacy-link-no-time', 'retired', 'square-order-no-time', 'square-order-no-time', NULL),
+        ('legacy-order-stale-proof', 'legacy-market', 'sandbox', 'legacy-merchant', 'legacy-location',
+         'legacy-link-stale-proof', 'pending', 'square-order-stale-proof', 'stale-proof', '2026-10-03T12:00:00.000Z');
     `);
+    await legacy.unsafe(fs.readFileSync(path.join(__dirname, '../../docs/migrations/014-square-payment-expiry.sql'), 'utf8'));
     await legacy.unsafe(fs.readFileSync(path.join(__dirname, '../../docs/migrations/015-square-payment-expiry-retry-schedule.sql'), 'utf8'));
     assert.deepEqual(rows(await legacy`
       SELECT id, status, last_error_code
@@ -482,6 +513,7 @@ test('migration 015 quarantines proofless legacy retirements and their active pa
       { id: 'legacy-order-mismatch', status: 'manual_review', last_error_code: 'legacy_retired_without_cancellation_proof' },
       { id: 'legacy-order-missing', status: 'manual_review', last_error_code: 'legacy_retired_without_cancellation_proof' },
       { id: 'legacy-order-no-time', status: 'manual_review', last_error_code: 'legacy_retired_without_cancellation_proof' },
+      { id: 'legacy-order-stale-proof', status: 'checkout_created', last_error_code: null },
     ]);
     assert.deepEqual(rows(await legacy`
       SELECT state
@@ -490,15 +522,24 @@ test('migration 015 quarantines proofless legacy retirements and their active pa
       { state: 'manual_review' },
       { state: 'manual_review' },
       { state: 'manual_review' },
+      { state: 'payment_pending' },
     ]);
-    assert.deepEqual(rows(await legacy`
+    const retirements = rows(await legacy`
       SELECT status, retired_at, retired_square_order_id, next_attempt_at, last_error_code
       FROM fame_square_payment_link_retirements
-      ORDER BY payment_order_id`), [
+      ORDER BY payment_order_id`);
+    assert.deepEqual(retirements.slice(0, 3), [
       { status: 'manual_review', retired_at: null, retired_square_order_id: null, next_attempt_at: null, last_error_code: 'legacy_retired_without_cancellation_proof' },
       { status: 'manual_review', retired_at: null, retired_square_order_id: null, next_attempt_at: null, last_error_code: 'legacy_retired_without_cancellation_proof' },
       { status: 'manual_review', retired_at: null, retired_square_order_id: null, next_attempt_at: null, last_error_code: 'legacy_retired_without_cancellation_proof' },
     ]);
+    assert.deepEqual({
+      ...retirements[3],
+      next_attempt_at: retirements[3].next_attempt_at ? 'set' : null,
+    }, {
+      status: 'pending', retired_at: null, retired_square_order_id: null,
+      next_attempt_at: 'set', last_error_code: 'legacy_retirement_proof_cleared',
+    });
   } finally {
     await legacy.end();
     await admin.unsafe(`DROP SCHEMA IF EXISTS ${legacySchema} CASCADE`);

@@ -6,6 +6,7 @@ const require = createRequire(import.meta.url);
 const {
   QA_SIGNER_HEADER,
   squareQaCheckoutTransport,
+  squareQaExpiryTransport,
   squareQaSignerAuthorization,
   squareQaSupportConfig,
   squareQaWebhookRollbackEventId,
@@ -48,12 +49,26 @@ test("QA controls require one exact target and a webhook rollback requires the p
     fault: { kind: "checkout", mode: "checkout_429", reservationId: "qa-reservation-1" },
     signerSecret: null,
   });
+  assert.deepEqual(squareQaSupportConfig({
+    ...previewSandbox,
+    SQUARE_QA_FAULT_MODE: "expiry_429",
+    SQUARE_QA_FAULT_PAYMENT_ORDER_ID: "qa-payment-order-1",
+  }), {
+    fault: { kind: "expiry", mode: "expiry_429", paymentOrderId: "qa-payment-order-1" },
+    signerSecret: null,
+  });
   assert.throws(() => squareQaSupportConfig({ ...previewSandbox, SQUARE_QA_FAULT_MODE: "checkout_429" }));
   assert.throws(() => squareQaSupportConfig({
     ...previewSandbox,
     SQUARE_QA_FAULT_MODE: "checkout_429",
     SQUARE_QA_FAULT_RESERVATION_ID: "qa-reservation-1",
     SQUARE_QA_FAULT_EVENT_ID: "qa-event-1",
+  }));
+  assert.throws(() => squareQaSupportConfig({
+    ...previewSandbox,
+    SQUARE_QA_FAULT_MODE: "expiry_429",
+    SQUARE_QA_FAULT_PAYMENT_ORDER_ID: "qa-payment-order-1",
+    SQUARE_QA_FAULT_RESERVATION_ID: "qa-reservation-1",
   }));
   assert.throws(() => squareQaSupportConfig({
     ...previewSandbox,
@@ -110,6 +125,52 @@ test("checkout QA transports return every synthetic provider fault and never cal
   });
   const payload = await (await squareQaCheckoutTransport(expiredSupport?.fault ?? null, "qa-reservation-1", at)?.("https://should-not-be-called.invalid")).json();
   assert.ok(Date.parse(payload.payment_link.created_at) < at.valueOf() - 48 * 60 * 60 * 1000);
+});
+
+test("expiry QA transports are target-bound and cover retry plus cancellation-proof failure paths without a network request", async () => {
+  const paymentOrderId = "qa-payment-order-1";
+  const locationId = "qa-sandbox-location";
+  const transportFor = (mode: string) => {
+    const support = squareQaSupportConfig({
+      ...previewSandbox,
+      SQUARE_QA_FAULT_MODE: mode,
+      SQUARE_QA_FAULT_PAYMENT_ORDER_ID: paymentOrderId,
+    });
+    return squareQaExpiryTransport(support?.fault ?? null, paymentOrderId, locationId);
+  };
+
+  assert.equal((await transportFor("expiry_429")?.("https://should-not-be-called.invalid")).status, 429);
+  assert.equal((await transportFor("expiry_500")?.("https://should-not-be-called.invalid")).status, 500);
+  await assert.rejects(transportFor("expiry_timeout")?.("https://should-not-be-called.invalid"));
+  assert.equal(squareQaExpiryTransport({
+    kind: "expiry", mode: "expiry_429", paymentOrderId,
+  }, "another-order", locationId), undefined);
+
+  const linkMismatch = await (await transportFor("expiry_link_mismatch")?.(
+    "https://connect.squareupsandbox.com/v2/online-checkout/payment-links/link-1",
+  )).json();
+  assert.equal(linkMismatch.id, "qa-other-link");
+
+  const cancelledMismatch = await (await transportFor("expiry_cancelled_order_mismatch")?.(
+    "https://connect.squareupsandbox.com/v2/online-checkout/payment-links/link-1",
+  )).json();
+  assert.deepEqual(cancelledMismatch, { id: "link-1", cancelled_order_id: "qa-other-order" });
+
+  const cancelledMissing = await (await transportFor("expiry_cancelled_order_missing")?.(
+    "https://connect.squareupsandbox.com/v2/online-checkout/payment-links/link-1",
+  )).json();
+  assert.deepEqual(cancelledMissing, { id: "link-1" });
+
+  for (const [mode, state] of [["expiry_missing_link_open", "OPEN"], ["expiry_missing_link_completed", "COMPLETED"]] as const) {
+    const transport = transportFor(mode);
+    assert.equal((await transport?.(
+      "https://connect.squareupsandbox.com/v2/online-checkout/payment-links/link-1",
+    )).status, 404);
+    const recovered = await (await transport?.(
+      "https://connect.squareupsandbox.com/v2/orders/square-order-1",
+    )).json();
+    assert.deepEqual(recovered, { order: { id: "square-order-1", location_id: locationId, state } });
+  }
 });
 
 test("the local signer capability is constant-time checked and unlocks only its one configured rollback event", () => {
