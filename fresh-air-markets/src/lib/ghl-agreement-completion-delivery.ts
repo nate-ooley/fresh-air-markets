@@ -1,7 +1,10 @@
 import type { AgreementStageDeliveryMessage } from "./agreement-completion-pg";
+import { AGREEMENT_STATUS_FIELD, assertOpportunityStatusFieldMetadata,
+  readOpportunityStatusField, OpportunityStatusFieldError } from "./ghl-opportunity-status-fields";
+import { makeOpportunityFieldProof, type GhlOpportunityFieldProof } from "./ghl-opportunity-field-proof";
 
 /**
- * A signed agreement moves only the immutable opportunity recorded with that
+ * A signed agreement updates only the status field on the immutable opportunity recorded with that
  * document completion. The worker never searches contacts, creates records,
  * or relies on HighLevel's "most recent opportunity" selection.
  */
@@ -19,8 +22,8 @@ export interface AgreementStageDeliveryConfig {
   apiToken: string;
   locationId: string;
   pipelineId: string;
-  sentStageId: string;
-  completedStageId: string;
+  approvedStageId: string;
+  agreementStatusFieldId: string;
 }
 
 export class AgreementStageDeliveryError extends Error {
@@ -48,12 +51,12 @@ export function readAgreementStageDeliveryConfig(
   const mode = env.VERCEL_ENV === "preview" ? "qa" : "production";
   const pipelineId = mode === "qa" ? env.GHL_QA_APPLICATION_PIPELINE_ID?.trim() ?? "" : productionPipelineId;
   const legacyPipelineId = env.GHL_AGREEMENT_PIPELINE_ID?.trim() ?? "";
-  const sentStageId = env.GHL_AGREEMENT_SENT_STAGE_ID?.trim() ?? "";
-  const completedStageId = env.GHL_AGREEMENT_COMPLETED_STAGE_ID?.trim() ?? "";
-  const ids = [locationId, pipelineId, sentStageId, completedStageId];
+  const approvedStageId = env.GHL_APPLICATION_APPROVED_STAGE_ID?.trim() ?? "";
+  const agreementStatusFieldId = env.GHL_AGREEMENT_STATUS_FIELD_ID?.trim() ?? "";
+  const ids = [locationId, pipelineId, approvedStageId, agreementStatusFieldId];
   if (env.VERCEL !== "1" || !["preview", "production"].includes(env.VERCEL_ENV ?? "")
     || apiToken.length < 16 || /[\r\n\0]/.test(apiToken) || locationId !== LOCATION
-    || ids.some(id => !validIdentifier(id)) || sentStageId === completedStageId
+    || ids.some(id => !validIdentifier(id))
     || (legacyPipelineId && legacyPipelineId !== pipelineId)
     || (mode === "qa" && (env.GHL_PAYMENT_QA_ROUTING_VERIFIED !== "true"
       || !validIdentifier(productionPipelineId) || pipelineId === productionPipelineId))
@@ -61,7 +64,7 @@ export function readAgreementStageDeliveryConfig(
       && (key.startsWith("GHL_QA_") || key.startsWith("GHL_PAYMENT_QA_"))))) {
     throw new AgreementStageDeliveryError("ghl_config_missing", "HighLevel agreement-stage delivery is not configured.");
   }
-  return { apiToken, locationId, pipelineId, sentStageId, completedStageId, mode };
+  return { apiToken, locationId, pipelineId, approvedStageId, agreementStatusFieldId, mode };
 }
 
 export function agreementStageDeliveryConfigured(env: Record<string, string | undefined>): boolean {
@@ -73,7 +76,7 @@ export function agreementStageDeliveryConfigured(env: Record<string, string | un
   }
 }
 
-interface OpportunityIdentity {
+interface OpportunityIdentity extends Record<string, unknown> {
   id: string;
   contactId: string;
   pipelineId: string;
@@ -112,7 +115,7 @@ function opportunityFromResponse(body: Record<string, unknown> | null): Opportun
   const locationId = text(candidate, "locationId", "location_id");
   return id && contactId && pipelineId && pipelineStageId
     && (status === "open" || status === "won" || status === "lost" || status === "abandoned")
-    ? { id, contactId, pipelineId, pipelineStageId, status, locationId }
+    ? { id, contactId, pipelineId, pipelineStageId, status, locationId, customFields: candidate.customFields }
     : null;
 }
 
@@ -166,6 +169,8 @@ function exactOpportunity(
   if (opportunity.pipelineId !== config.pipelineId) {
     throw new AgreementStageDeliveryError("ghl_pipeline_mismatch", "HighLevel opportunity pipeline did not match the agreement configuration.");
   }
+  if (opportunity.status !== "open") throw new AgreementStageDeliveryError("ghl_status_diverged", "HighLevel opportunity was not open.");
+  if (opportunity.pipelineStageId !== config.approvedStageId) throw new AgreementStageDeliveryError("ghl_stage_diverged", "HighLevel opportunity was not approved.");
   return opportunity;
 }
 
@@ -179,7 +184,7 @@ async function getExactOpportunity(
   return exactOpportunity(opportunityFromResponse(await responseJson(response)), message, config);
 }
 
-/** QA must verify the current contact immediately before any workflow-triggering stage write. */
+/** QA must verify the current contact immediately before any workflow-triggering field write. */
 async function verifyQaContact(message: AgreementStageDeliveryMessage, config: AgreementStageDeliveryConfig,
   transport: FetchTransport): Promise<void> {
   if (config.mode !== "qa") return;
@@ -192,43 +197,37 @@ async function verifyQaContact(message: AgreementStageDeliveryMessage, config: A
   }
 }
 
-/**
- * The preflight/final read is intentional: if HighLevel accepts a PUT but the
- * process exits before the local receipt is written, the retry sees the target
- * state and marks the same job delivered without a second workflow trigger.
- */
+/** A retry verifies the field again instead of trusting an old stage-only receipt. */
 export async function deliverAgreementStageToGhl(
   message: AgreementStageDeliveryMessage,
   config: AgreementStageDeliveryConfig,
   transport: FetchTransport = fetch,
-): Promise<void> {
-  if (message.payload.locationId !== config.locationId) {
-    throw new AgreementStageDeliveryError("ghl_identity_mismatch", "Agreement completion location did not match the HighLevel configuration.");
+): Promise<GhlOpportunityFieldProof> {
+  if (message.payload.locationId !== config.locationId
+    || ![message.payload.contactId, message.payload.opportunityId, message.payload.completionId,
+      message.payload.applicationId, message.payload.documentId, message.payload.templateId].every(validIdentifier)) {
+    throw new AgreementStageDeliveryError("ghl_identity_mismatch", "Agreement completion identity did not match configuration.");
   }
   await verifyQaContact(message, config, transport);
   const before = await getExactOpportunity(message, config, transport);
-  // Agreement completion is a stage transition, not a lifecycle-status change.
-  // Never reopen a won/lost/abandoned opportunity merely because a stale
-  // completion event arrives after an operator moved it out of the open flow.
-  if (before.status !== "open") {
-    throw new AgreementStageDeliveryError("ghl_status_diverged", "HighLevel opportunity was not open for agreement completion.");
-  }
-  if (before.pipelineStageId === config.completedStageId) return;
-  if (before.pipelineStageId !== config.sentStageId) {
-    throw new AgreementStageDeliveryError("ghl_stage_diverged", "HighLevel opportunity was not in the configured agreement-sent stage.");
-  }
+  const metadata = await request(transport, config,
+    `/locations/${encodeURIComponent(config.locationId)}/customFields/${encodeURIComponent(config.agreementStatusFieldId)}`, { method: "GET" });
+  if (!metadata.ok) throw providerError(metadata);
+  assertOpportunityStatusFieldMetadata(await responseJson(metadata), { fieldId: config.agreementStatusFieldId,
+    locationId: config.locationId, ...AGREEMENT_STATUS_FIELD });
+  const proof = () => makeOpportunityFieldProof({ locationId: config.locationId, contactId: message.payload.contactId,
+    opportunityId: message.payload.opportunityId, pipelineId: config.pipelineId }, [
+    { fieldId: config.agreementStatusFieldId, fieldValue: "Signed" },
+  ]);
+  const current = readOpportunityStatusField(before, config.agreementStatusFieldId);
+  if (current === "Signed") return proof();
+  if (current !== "Sent") throw new OpportunityStatusFieldError();
   await verifyQaContact(message, config, transport);
-
   const update = await request(transport, config, `/opportunities/${encodeURIComponent(message.payload.opportunityId)}`, {
-    method: "PUT",
-    body: JSON.stringify({
-      pipelineStageId: config.completedStageId,
-    }),
+    method: "PUT", body: JSON.stringify({ customFields: [{ id: config.agreementStatusFieldId, fieldValue: "Signed" }] }),
   });
   if (!update.ok) throw providerError(update);
-
   const after = await getExactOpportunity(message, config, transport);
-  if (after.pipelineStageId !== config.completedStageId || after.status !== before.status) {
-    throw new AgreementStageDeliveryError("ghl_stage_diverged", "HighLevel did not confirm the agreement-completed opportunity state.");
-  }
+  if (readOpportunityStatusField(after, config.agreementStatusFieldId) !== "Signed") throw new OpportunityStatusFieldError();
+  return proof();
 }

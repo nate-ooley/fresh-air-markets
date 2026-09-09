@@ -109,11 +109,20 @@ test('rapid repeated clicks submit one POST and block simultaneous refresh durin
   assert.match(panel.text(), /HighLevel accepted the email/); assert.match(panel.text(), /Inbox delivery has not yet been confirmed/);
 }));
 
-test('accepted and provider-delivered states are distinct; deliberate refresh only issues GET', async () => boundary(async ({ panel, calls, respond, mount, click }) => {
-  respond(() => json(record(calls.length === 1 ? 'accepted' : 'delivered'))); await mount();
+test('email delivery and HighLevel payment status remain distinct across read-only refreshes', async () => boundary(async ({ panel, calls, respond, mount, click }) => {
+  const states = [undefined, 'pending', 'failed', 'skipped_paid', 'delivered'];
+  respond(() => json({ notification: { ...record(calls.length === 1 ? 'accepted' : 'delivered').notification,
+    paymentSentSyncStatus: states[calls.length - 1] } })); await mount();
   assert.match(panel.text(), /Inbox delivery has not yet been confirmed/); assert.doesNotMatch(panel.text(), /reports that the email was delivered/);
   await click('Refresh delivery status'); assert.match(panel.text(), /HighLevel reports that the email was delivered/);
-  assert.equal(panel.button('Send payment email'), undefined); assert.equal(calls.length, 2);
+  assert.match(panel.text(), /Payment Sent update is pending/);
+  await click('Refresh delivery status'); assert.match(panel.text(), /HighLevel reports that the email was delivered/);
+  assert.match(panel.text(), /payment status update needs attention/); assert.equal(panel.alerts().length, 1);
+  assert.equal(panel.button('Send payment email'), undefined); assert.equal(panel.checkbox(), undefined);
+  await click('Refresh delivery status'); assert.match(panel.text(), /Payment has advanced to Paid/);
+  assert.match(panel.text(), /HighLevel reports that the email was delivered/);
+  await click('Refresh delivery status'); assert.match(panel.text(), /HighLevel payment status is Payment Sent/);
+  assert.equal(panel.button('Send payment email'), undefined); assert.equal(calls.length, 5);
   assert.equal(calls.every(call => call.options.method === 'GET'), true);
 }));
 

@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import postgres from "postgres";
+import { verifiedOpportunityFields, type GhlOpportunityFieldProof } from "./ghl-opportunity-field-proof";
 import {
   AgreementAlreadyCompletedError,
   AgreementMappingError,
@@ -424,7 +425,13 @@ export async function dispatchAgreementNotificationOutbox(
   return { delivered, deferred, stale };
 }
 
-export type AgreementStageDelivery = (message: AgreementStageDeliveryMessage) => Promise<void>;
+export interface AgreementFieldScope { pipelineId: string; agreementStatusFieldId: string }
+export type AgreementStageDelivery = (message: AgreementStageDeliveryMessage) => Promise<GhlOpportunityFieldProof>;
+function validFieldScope(scope: AgreementFieldScope): void {
+  if (!scope || ![scope.pipelineId, scope.agreementStatusFieldId].every(id => typeof id === "string" && /^[A-Za-z0-9_-]{1,192}$/.test(id))) {
+    throw new Error("Agreement field delivery scope is invalid.");
+  }
+}
 export interface AgreementStageDispatchResult { delivered: number; deferred: number; failed: number; stale: number }
 
 /** Claim stage-transition work independently from internal email notices. */
@@ -489,15 +496,23 @@ async function claimAgreementStageOutboxWhere(
 
 /** A worker whose lease expired cannot complete a newer worker's result. */
 export async function markAgreementStageOutboxDelivered(
-  id: string,
-  leaseToken: string,
+  message: AgreementStageDeliveryMessage,
+  proof: GhlOpportunityFieldProof,
+  fieldScope: AgreementFieldScope,
   sql: Sql = configuredClient(),
 ): Promise<boolean> {
+  validFieldScope(fieldScope);
+  if (!verifiedOpportunityFields(proof, {
+    locationId: message.payload.locationId, contactId: message.payload.contactId,
+    opportunityId: message.payload.opportunityId, pipelineId: fieldScope.pipelineId,
+    fields: [{ fieldId: fieldScope.agreementStatusFieldId, fieldValue: "Signed" }],
+  })) throw Object.assign(new Error("Agreement field delivery proof is invalid."), { code: "ghl_field_proof_invalid" });
   const rows = await sql`
     UPDATE fame_agreement_stage_outbox
     SET status = 'delivered', delivered_at = statement_timestamp(),
+        delivery_receipt = ${sql.json(proof as unknown as Parameters<typeof sql.json>[0])},
         locked_until = NULL, lease_token = NULL, last_error_code = NULL
-    WHERE id = ${id} AND status = 'processing' AND lease_token = ${leaseToken}
+    WHERE id = ${message.id} AND status = 'processing' AND lease_token = ${message.leaseToken}
       AND locked_until > statement_timestamp()
     RETURNING id`;
   return rows.length === 1;
@@ -547,6 +562,8 @@ export async function failAgreementStageOutbox(
 }
 
 const TERMINAL_STAGE_DELIVERY_CODES = new Set([
+  "ghl_field_proof_invalid",
+  "ghl_field_mismatch",
   "ghl_config_missing",
   "ghl_identity_mismatch",
   "ghl_pipeline_mismatch",
@@ -574,6 +591,7 @@ function stageDeliveryFailure(error: unknown, attempt: number): { code: string; 
 async function dispatchClaimedAgreementStageOutbox(
   jobs: AgreementStageDeliveryMessage[],
   deliver: AgreementStageDelivery,
+  fieldScope: AgreementFieldScope,
   sql: Sql | undefined,
 ): Promise<AgreementStageDispatchResult> {
   let delivered = 0;
@@ -582,8 +600,8 @@ async function dispatchClaimedAgreementStageOutbox(
   let stale = 0;
   for (const job of jobs) {
     try {
-      await deliver(job);
-      if (await markAgreementStageOutboxDelivered(job.id, job.leaseToken, sql)) delivered++;
+      const proof = await deliver(job);
+      if (await markAgreementStageOutboxDelivered(job, proof, fieldScope, sql)) delivered++;
       else stale++;
     } catch (error) {
       const failure = stageDeliveryFailure(error, job.attempt);
@@ -600,18 +618,20 @@ async function dispatchClaimedAgreementStageOutbox(
 /** Recovery worker; delivery receives only a committed exact-ID message. */
 export async function dispatchAgreementStageOutbox(
   deliver: AgreementStageDelivery,
-  options: { limit?: number; leaseSeconds?: number; sql?: Sql } = {},
+  options: { fieldScope: AgreementFieldScope; limit?: number; leaseSeconds?: number; sql?: Sql },
 ): Promise<AgreementStageDispatchResult> {
+  validFieldScope(options.fieldScope);
   const jobs = await claimAgreementStageOutbox(options.limit ?? 10, options.leaseSeconds ?? 300, options.sql);
-  return dispatchClaimedAgreementStageOutbox(jobs, deliver, options.sql);
+  return dispatchClaimedAgreementStageOutbox(jobs, deliver, options.fieldScope, options.sql);
 }
 
 /** Immediate, exact-job attempt after a committed agreement completion. */
 export async function dispatchAgreementStageOutboxById(
   id: string,
   deliver: AgreementStageDelivery,
-  options: { leaseSeconds?: number; sql?: Sql } = {},
+  options: { fieldScope: AgreementFieldScope; leaseSeconds?: number; sql?: Sql },
 ): Promise<AgreementStageDispatchResult> {
+  validFieldScope(options.fieldScope);
   const jobs = await claimAgreementStageOutboxById(id, options.leaseSeconds ?? 60, options.sql);
-  return dispatchClaimedAgreementStageOutbox(jobs, deliver, options.sql);
+  return dispatchClaimedAgreementStageOutbox(jobs, deliver, options.fieldScope, options.sql);
 }

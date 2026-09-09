@@ -35,7 +35,7 @@ function loadRoute({ configured = false, persist, dispatch, deliver } = {}) {
     };
     if (id === '@/lib/ghl-agreement-completion-delivery') return {
       agreementStageDeliveryConfigured: () => configured,
-      readAgreementStageDeliveryConfig: () => ({ qa: true }),
+      readAgreementStageDeliveryConfig: () => ({ pipelineId: 'qa-pipeline', agreementStatusFieldId: 'agreement-status' }),
       deliverAgreementStageToGhl: deliver || (async () => {}),
     };
     return require(id);
@@ -89,7 +89,9 @@ test('captured completion immediately dispatches only its returned stage outbox 
     const response = await route.POST(new Request('https://unit-test.invalid/', { method: 'POST' }));
     assert.equal(response.status, 201);
     assert.equal(persisted.opportunityId, event.opportunityId);
-    assert.deepEqual(dispatched, { id: 'qa-stage-outbox', options: { leaseSeconds: 60 } });
+    assert.deepEqual(dispatched, { id: 'qa-stage-outbox', options: {
+      fieldScope: { pipelineId: 'qa-pipeline', agreementStatusFieldId: 'agreement-status' }, leaseSeconds: 60,
+    } });
     assert.equal(delivered, 1);
   });
 });

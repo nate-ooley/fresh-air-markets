@@ -3,7 +3,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 type Status = "pending" | "preparing" | "send_started" | "accepted" | "delivered" | "failed" | "uncertain" | "cancelled";
-interface Notification { id: string; status: Status; canRetryPreflight: boolean }
+type PaymentSyncStatus = "pending" | "delivered" | "skipped_paid" | "failed" | "unknown";
+interface Notification { id: string; status: Status; canRetryPreflight: boolean; paymentSentSyncStatus?: PaymentSyncStatus }
 const LABELS: Record<Status, string> = {
   pending: "Queued for delivery.",
   preparing: "Checking the vendor and payment request before sending.",
@@ -14,12 +15,20 @@ const LABELS: Record<Status, string> = {
   uncertain: "The send result is uncertain. Check the vendor’s HighLevel conversation before sending a replacement.",
   cancelled: "This payment link is no longer eligible for delivery.",
 };
+const PAYMENT_SYNC_LABELS: Record<PaymentSyncStatus, string> = {
+  pending: "The Payment Sent update is pending in HighLevel.",
+  delivered: "HighLevel payment status is Payment Sent.",
+  skipped_paid: "Payment has advanced to Paid. The Payment Sent update was skipped.",
+  failed: "The HighLevel payment status update needs attention. The email delivery result is shown above.",
+  unknown: "The HighLevel payment status update could not be verified.",
+};
 function notificationValue(value: unknown): Notification | null | undefined {
   if (value === null) return null;
   if (!value || typeof value !== "object") return undefined;
   const row = value as Notification;
   return typeof row.id === "string" && row.id.length > 0 && Object.hasOwn(LABELS, row.status)
-    ? { id: row.id, status: row.status, canRetryPreflight: row.canRetryPreflight === true && ["failed", "cancelled"].includes(row.status) }
+    ? { id: row.id, status: row.status, canRetryPreflight: row.canRetryPreflight === true && ["failed", "cancelled"].includes(row.status),
+      ...(row.paymentSentSyncStatus === undefined ? {} : { paymentSentSyncStatus: Object.hasOwn(PAYMENT_SYNC_LABELS, row.paymentSentSyncStatus) ? row.paymentSentSyncStatus : "unknown" as const }) }
     : undefined;
 }
 
@@ -71,6 +80,8 @@ export default function PaymentEmailPanel({ reservationId }: { reservationId: st
     <p className="mt-2 text-sm leading-relaxed text-ink/65">Send the private reservation link to the verified vendor contact for this application. The payment deadline stays unchanged.</p>
     {loading && <p role="status" className="mt-3 text-sm text-ink/60">Checking delivery status…</p>}
     {notification && <p role="status" className="mt-4 rounded-xl bg-parchment p-4 text-sm text-pine">{LABELS[notification.status]}</p>}
+    {notification?.paymentSentSyncStatus && <p role={notification.paymentSentSyncStatus === "failed" || notification.paymentSentSyncStatus === "unknown" ? "alert" : "status"}
+      className="mt-3 text-sm leading-relaxed text-ink/70"><strong>Vendor payment status: </strong>{PAYMENT_SYNC_LABELS[notification.paymentSentSyncStatus]}</p>}
     {error && <p role="alert" className="mt-4 rounded-xl bg-clay/10 p-4 text-sm text-clay">{error}</p>}
     {!loading && (!notification || notification.canRetryPreflight) && !error && <>
       {notification?.canRetryPreflight && <p className="mt-3 text-sm text-ink/65">The server confirms this attempt stopped before email submission. Correct the preparation issue before trying again.</p>}

@@ -11,9 +11,11 @@ import {
   encryptPaymentEmailInvitation, decryptPaymentEmailInvitation, validatePaymentEmailSecret,
 } from "./payment-email";
 import {
-  preflightPaymentEmail, sendPaymentEmail, verifyPaymentEmailReceipt, PaymentEmailDeliveryError,
-  type PaymentEmailDeliveryConfig, type PaymentEmailMessage, type PaymentEmailAcceptedReceipt,
+  preflightPaymentEmail, sendPaymentEmail, verifyPaymentEmailReceipt, deliverPaymentEmailSentToGhl, PaymentEmailDeliveryError,
+  type PaymentEmailDeliveryConfig, type PaymentEmailMessage, type PaymentEmailAcceptedReceipt, type PaymentEmailProviderStatus,
 } from "./ghl-payment-email-delivery";
+import { verifiedOpportunityFields } from "./ghl-opportunity-field-proof";
+import { withPaymentStageLock } from "./payment-stage-lock";
 
 type Sql = ReturnType<typeof postgres>;
 type QuerySql = Sql | postgres.TransactionSql;
@@ -28,6 +30,7 @@ const MAX_PREPARE_ATTEMPTS = 5;
 export type PaymentEmailState = "pending" | "preparing" | "send_started" | "accepted" | "delivered" | "failed" | "uncertain" | "cancelled";
 export interface PaymentEmailStatus {
   id: string; status: PaymentEmailState; createdAt: string; sentAt?: string; safeError?: string; canRetryPreflight: boolean;
+  paymentSentSyncStatus?: "pending" | "delivered" | "skipped_paid" | "failed";
 }
 interface OutboxRow {
   id: string; market_id: string; application_id: string; reservation_id: string; reservation_revision: number;
@@ -37,6 +40,9 @@ interface OutboxRow {
   lease_id: string | null; lease_expires_at: Date | null; safe_error: string | null;
   provider_message_id: string | null; provider_conversation_id: string | null; provider_email_message_id: string | null;
   created_at: Date; sent_at: Date | null; send_started_at: Date | null;
+  provider_receipt_status: PaymentEmailProviderStatus | null; provider_receipt_verified_at: Date | null;
+  payment_sent_sync_status: "pending" | "delivered" | "skipped_paid" | "failed" | null;
+  payment_sent_sync_attempts: number; payment_sent_sync_error: string | null;
 }
 interface EligibleRow {
   id: string; market_id: string; application_id: string; revision: number; state: string;
@@ -64,7 +70,9 @@ function safeCode(value: unknown, fallback = "payment_email_unavailable"): strin
 function status(row: OutboxRow): PaymentEmailStatus {
   return { id: row.id, status: row.state, createdAt: row.created_at.toISOString(),
     canRetryPreflight: row.send_started_at === null && (row.state === "failed" || row.state === "cancelled"),
-    ...(row.sent_at ? { sentAt: row.sent_at.toISOString() } : {}), ...(row.safe_error ? { safeError: safeCode(row.safe_error) } : {}) };
+    ...(row.sent_at ? { sentAt: row.sent_at.toISOString() } : {}),
+    ...(row.payment_sent_sync_status ? { paymentSentSyncStatus: row.payment_sent_sync_status } : {}),
+    ...(row.payment_sent_sync_error || row.safe_error ? { safeError: safeCode(row.payment_sent_sync_error || row.safe_error) } : {}) };
 }
 function recipient(value: unknown): string | null {
   if (typeof value !== "string") return null;
@@ -174,7 +182,8 @@ async function claim(sql: Sql, input: DispatchPaymentEmailsInput, now: Date): Pr
     const [row] = await tx<OutboxRow[]>`SELECT * FROM fame_payment_email_outbox
       WHERE market_id = ${input.marketId}
         ${input.notificationId ? tx`AND id = ${input.notificationId}` : tx``}
-        AND state IN ('pending', 'preparing', 'send_started', 'accepted')
+        AND (state IN ('pending', 'preparing', 'send_started', 'accepted')
+          OR (state = 'delivered' AND (payment_sent_sync_status IS NULL OR payment_sent_sync_status = 'pending')))
         AND next_attempt_at <= ${now} AND (lease_expires_at IS NULL OR lease_expires_at <= ${now})
       ORDER BY next_attempt_at, created_at, id LIMIT 1 FOR UPDATE SKIP LOCKED`;
     if (!row) return null;
@@ -184,7 +193,7 @@ async function claim(sql: Sql, input: DispatchPaymentEmailsInput, now: Date): Pr
         WHERE id = ${row.id} RETURNING *`;
       return parked;
     }
-    if (row.state !== "accepted" && row.prepare_attempts >= MAX_PREPARE_ATTEMPTS) {
+    if (!["accepted", "delivered"].includes(row.state) && row.prepare_attempts >= MAX_PREPARE_ATTEMPTS) {
       const [failed] = await tx<OutboxRow[]>`UPDATE fame_payment_email_outbox SET state = 'failed', invitation_ciphertext = NULL,
         safe_error = 'payment_email_preflight_exhausted', lease_id = NULL, lease_expires_at = NULL, updated_at = ${now}
         WHERE id = ${row.id} RETURNING *`;
@@ -192,9 +201,9 @@ async function claim(sql: Sql, input: DispatchPaymentEmailsInput, now: Date): Pr
     }
     const leaseId = randomUUID();
     const [claimed] = await tx<OutboxRow[]>`UPDATE fame_payment_email_outbox SET
-      state = ${row.state === "accepted" ? "accepted" : "preparing"}, lease_id = ${leaseId},
+      state = ${["accepted", "delivered"].includes(row.state) ? row.state : "preparing"}, lease_id = ${leaseId},
       lease_expires_at = ${new Date(now.valueOf() + LEASE_MS)}, updated_at = ${now},
-      prepare_attempts = prepare_attempts + ${row.state === "accepted" ? 0 : 1}
+      prepare_attempts = prepare_attempts + ${["accepted", "delivered"].includes(row.state) ? 0 : 1}
       WHERE id = ${row.id} RETURNING *`;
     return claimed;
   }) as Promise<OutboxRow | null>;
@@ -228,11 +237,11 @@ async function checkSend(sql: Sql, row: OutboxRow, input: DispatchPaymentEmailsI
         safe_error = 'payment_email_reservation_changed', lease_id = NULL, lease_expires_at = NULL, updated_at = ${now} WHERE id = ${row.id}`;
       return "cancelled";
     }
-    // Checkout creation queues the Pending CRM stage before a manager can ask
-    // to send this email. Preserve the email intent until that exact stage
-    // receipt arrives instead of treating normal asynchronous ordering as failure.
-    const [prerequisite] = await tx<{ status: string; delivered_at: Date | null }[]>`
-      SELECT j.status, j.delivered_at FROM fame_payment_pending_sync_outbox j
+    // Checkout creation queues the Ready for Payment field before a manager can ask
+    // to send this email. Preserve the email intent until that exact field
+    // field receipt arrives instead of treating normal asynchronous ordering as failure.
+    const [prerequisite] = await tx<{ status: string; delivered_at: Date | null; delivery_receipt: unknown }[]>`
+      SELECT j.status, j.delivered_at, j.delivery_receipt FROM fame_payment_pending_sync_outbox j
       JOIN fame_payment_orders p ON p.id = j.payment_order_id AND p.market_id = j.market_id
       JOIN fame_reservation_finalizations f ON f.reservation_id = p.reservation_id AND f.market_id = p.market_id
       JOIN fame_agreement_completions g ON g.id = f.agreement_completion_id AND g.market_id = f.market_id AND g.application_id = f.application_id
@@ -249,7 +258,11 @@ async function checkSend(sql: Sql, row: OutboxRow, input: DispatchPaymentEmailsI
         lease_id = NULL, lease_expires_at = NULL, updated_at = ${now} WHERE id = ${row.id}`;
       return "waiting";
     }
-    if (prerequisite?.status !== "delivered" || !prerequisite.delivered_at) {
+    if (prerequisite?.status !== "delivered" || !prerequisite.delivered_at || !verifiedOpportunityFields(prerequisite.delivery_receipt, {
+      locationId: row.source_location_id, contactId: row.contact_id, opportunityId: row.opportunity_id, pipelineId: input.deliveryConfig.pipelineId,
+      fields: [{ fieldId: input.deliveryConfig.agreementStatusFieldId, fieldValue: "Signed" },
+        { fieldId: input.deliveryConfig.paymentStatusFieldId, fieldValue: "Ready for Payment" }],
+    })) {
       await tx`UPDATE fame_payment_email_outbox SET state = 'failed', invitation_ciphertext = NULL,
         safe_error = 'payment_email_pending_prerequisite_failed', lease_id = NULL, lease_expires_at = NULL,
         updated_at = ${now} WHERE id = ${row.id}`;
@@ -274,6 +287,88 @@ async function failPreflight(sql: Sql, row: OutboxRow, error: unknown, now: Date
   return !updated || retry ? "pending" : "failed";
 }
 
+function sentProof(row: OutboxRow): boolean {
+  return Boolean(row.sent_at && row.provider_receipt_verified_at && row.provider_receipt_status
+    && ["sent", "delivered", "opened", "read"].includes(row.provider_receipt_status)
+    && row.provider_message_id && row.provider_conversation_id && row.provider_email_message_id);
+}
+
+async function exactPaidEmailReservation(sql: QuerySql, row: OutboxRow, input: DispatchPaymentEmailsInput): Promise<boolean> {
+  const [paid] = await sql`SELECT 1 FROM fame_payment_paid_sync_eligible
+    WHERE market_id = ${row.market_id} AND application_id = ${row.application_id}
+      AND reservation_id = ${row.reservation_id} AND reservation_revision = ${row.reservation_revision}
+      AND location_id = ${row.source_location_id} AND contact_id = ${row.contact_id} AND opportunity_id = ${row.opportunity_id}
+      AND square_environment = ${input.accessConfig.environment}`;
+  return Boolean(paid);
+}
+
+/** This operation is separate from the irreversible email submission. A field
+ * failure can retry a field-only PUT; it can never cause another email POST. */
+async function syncPaymentSentField(sql: Sql, row: OutboxRow, input: DispatchPaymentEmailsInput, now: Date): Promise<Outcome> {
+  const outcome = row.state === "delivered" ? "delivered" : "accepted";
+  try {
+    const locked = await withPaymentStageLock(sql, { marketId: row.market_id, reservationId: row.reservation_id }, async tx => {
+      const [owned] = await tx<OutboxRow[]>`SELECT * FROM fame_payment_email_outbox WHERE id = ${row.id}
+        AND state IN ('accepted', 'delivered') AND lease_id = ${row.lease_id} AND lease_expires_at > ${now}
+        AND payment_sent_sync_status = 'pending'`;
+      if (!owned) return "stale";
+      if (!sentProof(owned)) throw new PaymentEmailDeliveryError("payment_email_sent_evidence_invalid");
+      const current = await eligibleSnapshot(tx, row.market_id, row.reservation_id);
+      if (!matches(row, current)) throw new PaymentEmailDeliveryError("payment_email_sent_identity_changed");
+      // The authoritative paid view requires an exact reconciled Square event.
+      // It may commit while we perform reads; the same advisory lock prevents
+      // its CRM writer from racing a lower Payment Sent field transition.
+      if (await exactPaidEmailReservation(tx, row, input)) {
+        await tx`UPDATE fame_payment_email_outbox SET payment_sent_sync_status = 'skipped_paid', payment_sent_sync_error = NULL,
+          lease_id = NULL, lease_expires_at = NULL, next_attempt_at = ${new Date(now.valueOf() + 30_000)}, updated_at = ${now}
+          WHERE id = ${row.id} AND lease_id = ${row.lease_id}`;
+        return "saved";
+      }
+      if (!isPayable(current, input.accessConfig, now)) throw new PaymentEmailDeliveryError("payment_email_sent_reservation_changed");
+      const proof = await deliverPaymentEmailSentToGhl({ id: row.id, marketId: row.market_id, locationId: row.source_location_id,
+        contactId: row.contact_id, opportunityId: row.opportunity_id, recipientEmail: row.recipient_email }, {
+        kind: "verified", status: owned.provider_receipt_status!, messageId: owned.provider_message_id!,
+        conversationId: owned.provider_conversation_id!, emailMessageId: owned.provider_email_message_id!,
+      }, input.deliveryConfig, input.transport);
+      const expectation = { locationId: row.source_location_id, contactId: row.contact_id, opportunityId: row.opportunity_id,
+        pipelineId: input.deliveryConfig.pipelineId, fields: [
+          { fieldId: input.deliveryConfig.agreementStatusFieldId, fieldValue: "Signed" },
+          { fieldId: input.deliveryConfig.paymentStatusFieldId, fieldValue: "Payment Sent" },
+        ] };
+      const alreadyPaid = verifiedOpportunityFields(proof, { ...expectation, fields: [expectation.fields[0],
+        { fieldId: input.deliveryConfig.paymentStatusFieldId, fieldValue: "Paid" }] });
+      if (!alreadyPaid && !verifiedOpportunityFields(proof, expectation)) throw new PaymentEmailDeliveryError("payment_email_sent_receipt_mismatch");
+      // Native Paid may be a manual or unrelated CRM change. Only an exact
+      // reconciled Square payment can suppress Sent as a verified Paid result.
+      // Recheck here because the webhook can commit during provider reads.
+      if (alreadyPaid && !await exactPaidEmailReservation(tx, row, input)) {
+        throw new PaymentEmailDeliveryError("payment_email_sent_paid_evidence_missing");
+      }
+      await tx`UPDATE fame_payment_email_outbox SET payment_sent_sync_status = ${alreadyPaid ? "skipped_paid" : "delivered"},
+        payment_sent_sync_attempts = payment_sent_sync_attempts + 1, payment_sent_sync_error = NULL,
+        payment_sent_delivery_receipt = ${tx.json(proof as unknown as Parameters<typeof tx.json>[0])},
+        lease_id = NULL, lease_expires_at = NULL, next_attempt_at = ${new Date(now.valueOf() + 30_000)}, updated_at = ${now}
+        WHERE id = ${row.id} AND lease_id = ${row.lease_id}`;
+      return "saved";
+    });
+    if (!locked.acquired) {
+      await sql`UPDATE fame_payment_email_outbox SET payment_sent_sync_error = 'payment_email_sent_sync_busy',
+        next_attempt_at = ${new Date(now.valueOf() + 30_000)}, lease_id = NULL, lease_expires_at = NULL, updated_at = ${now}
+        WHERE id = ${row.id} AND lease_id = ${row.lease_id}`;
+    }
+  } catch (error) {
+    const attempts = row.payment_sent_sync_attempts + 1;
+    const retry = (!(error instanceof PaymentEmailDeliveryError) || error.retryable) && attempts < 5;
+    await sql`UPDATE fame_payment_email_outbox SET payment_sent_sync_status = ${retry ? "pending" : "failed"},
+      payment_sent_sync_attempts = ${Math.min(5, attempts)},
+      payment_sent_sync_error = ${safeCode(error instanceof PaymentEmailDeliveryError ? error.code : null, "payment_email_sent_sync_unavailable")},
+      next_attempt_at = ${new Date(now.valueOf() + Math.min(300_000, 30_000 * 2 ** attempts))},
+      lease_id = NULL, lease_expires_at = NULL, updated_at = ${now}
+      WHERE id = ${row.id} AND lease_id = ${row.lease_id} AND payment_sent_sync_status = 'pending'`;
+  }
+  return outcome;
+}
+
 async function pollReceipt(sql: Sql, row: OutboxRow, input: DispatchPaymentEmailsInput, now: Date): Promise<Outcome> {
   const receipt: PaymentEmailAcceptedReceipt = { messageId: row.provider_message_id!, conversationId: row.provider_conversation_id!, emailMessageId: row.provider_email_message_id! };
   let result;
@@ -285,14 +380,20 @@ async function pollReceipt(sql: Sql, row: OutboxRow, input: DispatchPaymentEmail
   const failed = result.kind === "verified" && ["failed", "undelivered"].includes(result.status);
   const sent = result.kind === "verified" && ["sent", "delivered", "opened", "read"].includes(result.status);
   const exhausted = !verified && row.receipt_failures + 1 >= 5;
-  const [updated] = await sql`UPDATE fame_payment_email_outbox SET state = ${delivered ? "delivered" : failed ? "failed" : exhausted ? "uncertain" : "accepted"},
+  const syncPending = sent && (!row.payment_sent_sync_status || row.payment_sent_sync_status === "pending");
+  const [updated] = await sql<OutboxRow[]>`UPDATE fame_payment_email_outbox SET state = ${delivered ? "delivered" : failed ? "failed" : exhausted ? "uncertain" : "accepted"},
     safe_error = ${result.kind === "unavailable" ? safeCode(result.code) : failed ? "payment_email_delivery_failed" : null},
     receipt_attempts = receipt_attempts + 1,
     receipt_failures = ${verified ? 0 : Math.min(5, row.receipt_failures + 1)},
+    provider_receipt_status = ${result.kind === "verified" ? result.status : row.provider_receipt_status},
+    provider_receipt_verified_at = ${verified ? now : row.provider_receipt_verified_at},
+    payment_sent_sync_status = ${syncPending ? "pending" : row.payment_sent_sync_status},
     sent_at = ${sent ? row.sent_at || now : row.sent_at}, delivered_at = ${delivered ? now : null},
     next_attempt_at = ${new Date(now.valueOf() + Math.min(300_000, 15_000 * 2 ** Math.min(row.receipt_attempts, 5)))},
-    lease_id = NULL, lease_expires_at = NULL, updated_at = ${now}
-    WHERE id = ${row.id} AND state = 'accepted' AND lease_id = ${row.lease_id} RETURNING id`;
+    lease_id = ${syncPending ? row.lease_id : null}, lease_expires_at = ${syncPending ? row.lease_expires_at : null}, updated_at = ${now}
+    WHERE id = ${row.id} AND state IN ('accepted', 'delivered') AND lease_id = ${row.lease_id} RETURNING *`;
+  // This statement committed the actual provider evidence before any CRM PUT.
+  if (updated && syncPending) return syncPaymentSentField(sql, updated, input, now);
   return updated ? delivered ? "delivered" : failed ? "failed" : exhausted ? "uncertain" : "accepted" : "pending";
 }
 
@@ -308,7 +409,10 @@ export async function dispatchPaymentEmails(input: DispatchPaymentEmailsInput, s
     if (!row) break;
     report.processed++;
     if (row.state === "uncertain" || row.state === "failed") { report[row.state]++; continue; }
-    if (row.state === "accepted") { report[await pollReceipt(sql, row, input, clock())]++; continue; }
+    if (row.state === "accepted" || row.state === "delivered") {
+      report[await (row.payment_sent_sync_status === "pending" && sentProof(row)
+        ? syncPaymentSentField(sql, row, input, clock()) : pollReceipt(sql, row, input, clock()))]++; continue;
+    }
     const beforePreflight = await checkSend(sql, row, input, clock(), false);
     if (beforePreflight !== "ready") { report[beforePreflight === "cancelled" || beforePreflight === "failed" ? beforePreflight : "pending"]++; continue; }
     let prepared: PaymentEmailMessage;

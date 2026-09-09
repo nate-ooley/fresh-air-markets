@@ -4,6 +4,9 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { randomUUID } = require('node:crypto');
 const postgres = require('postgres');
+const { makeOpportunityFieldProof } = require('../../.test-build/ghl-opportunity-field-proof.js');
+const fieldScope = { pipelineId: 'qa-pipeline', agreementStatusFieldId: 'agreement-field' };
+const proofFor = job => makeOpportunityFieldProof({ locationId: job.payload.locationId, contactId: job.payload.contactId, opportunityId: job.payload.opportunityId, pipelineId: fieldScope.pipelineId }, [{ fieldId: fieldScope.agreementStatusFieldId, fieldValue: 'Signed' }]);
 const {
   claimAgreementNotificationOutbox,
   claimAgreementStageOutbox,
@@ -42,10 +45,7 @@ before(async () => {
   await first`INSERT INTO accounts (id) VALUES (${market}), (${otherMarket})`;
   const migration = postgres(url.toString(), { max: 1, prepare: false, connection: { search_path: schema } });
   try {
-    await migration.unsafe(fs.readFileSync(path.join(__dirname, '../../docs/migrations/001-application-handoff.sql'), 'utf8'));
-    await migration.unsafe(fs.readFileSync(path.join(__dirname, '../../docs/migrations/005-agreement-completion-outbox.sql'), 'utf8'));
-    await migration.unsafe(fs.readFileSync(path.join(__dirname, '../../docs/migrations/007-agreement-completion-stage-outbox.sql'), 'utf8'));
-    await migration.unsafe(fs.readFileSync(path.join(__dirname, '../../docs/migrations/009-agreement-stage-terminal-state.sql'), 'utf8'));
+    for (const file of ['001-application-handoff.sql', '004-application-review-outbox.sql', '005-agreement-completion-outbox.sql', '006-application-document-ledger.sql', '007-agreement-completion-stage-outbox.sql', '009-agreement-stage-terminal-state.sql', '011-square-payment-checkout-ledger.sql', '012-square-webhook-events.sql', '013-final-reservation-writer.sql', '017-vendor-payment-access.sql', '018-payment-paid-sync-outbox.sql', '019-payment-email-outbox.sql', '020-payment-pending-sync-outbox.sql', '021-opportunity-field-delivery-receipts.sql']) await migration.unsafe(fs.readFileSync(path.join(__dirname, '../../docs/migrations', file), 'utf8'));
   } finally {
     await migration.end();
   }
@@ -54,7 +54,7 @@ before(async () => {
 beforeEach(async () => {
   await first`TRUNCATE fame_agreement_stage_outbox, fame_agreement_notification_outbox, fame_agreement_completions,
     fame_agreement_issuances, fame_agreement_events, fame_application_events,
-    fame_applications`;
+    fame_applications CASCADE`;
 });
 
 after(async () => {
@@ -67,9 +67,9 @@ after(async () => {
 async function seedApplication(patch = {}) {
   const applicationId = patch.applicationId || randomUUID();
   const marketId = patch.marketId || market;
-  const contactId = patch.contactId || `contact:${applicationId}`;
+  const contactId = patch.contactId || `contact-${applicationId}`;
   const seasonId = patch.seasonId || '2026-2027';
-  const opportunityId = patch.opportunityId === undefined ? `opportunity:${applicationId}` : patch.opportunityId;
+  const opportunityId = patch.opportunityId === undefined ? `opportunity-${applicationId}` : patch.opportunityId;
   await first`
     INSERT INTO fame_applications (id, market_id, location_id, contact_id, season_id, opportunity_id)
     VALUES (${applicationId}, ${marketId}, ${location}, ${contactId}, ${seasonId}, ${opportunityId})`;
@@ -228,7 +228,7 @@ test('agreement-stage outbox is independent from notices and fences immediate de
   assert.equal(original.payload.opportunityId, application.opportunityId);
   assert.equal(original.payload.locationId, location);
   await first`UPDATE fame_agreement_stage_outbox SET locked_until = statement_timestamp() - interval '1 second' WHERE id = ${original.id}`;
-  assert.equal(await markAgreementStageOutboxDelivered(original.id, original.leaseToken, first), false);
+  assert.equal(await markAgreementStageOutboxDelivered(original, proofFor(original), fieldScope, first), false);
   const [replacement] = await claimAgreementStageOutbox(1, 30, second);
   assert.ok(replacement);
   assert.notEqual(replacement.leaseToken, original.leaseToken);
@@ -237,8 +237,8 @@ test('agreement-stage outbox is independent from notices and fences immediate de
 
   const delivered = [];
   const [immediate, scheduled] = await Promise.all([
-    dispatchAgreementStageOutboxById(completion.stageOutboxId, async job => { delivered.push(`immediate:${job.id}`); }, { sql: first }),
-    dispatchAgreementStageOutbox(async job => { delivered.push(`scheduled:${job.id}`); }, { sql: second }),
+    dispatchAgreementStageOutboxById(completion.stageOutboxId, async job => { delivered.push(`immediate:${job.id}`); return proofFor(job); }, { sql: first, fieldScope }),
+    dispatchAgreementStageOutbox(async job => { delivered.push(`scheduled:${job.id}`); return proofFor(job); }, { sql: second, fieldScope }),
   ]);
   assert.equal(immediate.delivered + scheduled.delivered, 1);
   assert.equal(delivered.length, 1);
@@ -260,13 +260,13 @@ test('a permanent agreement-stage mismatch is terminal, visible, and never repla
     const error = new Error('stage changed outside the agreement workflow');
     error.code = 'ghl_stage_diverged';
     throw error;
-  }, { sql: first });
+  }, { sql: first, fieldScope });
   assert.deepEqual(terminal, { delivered: 0, deferred: 0, failed: 1, stale: 0 });
   const [stored] = await first`SELECT status, last_error_code, failed_at FROM fame_agreement_stage_outbox`;
   assert.equal(stored.status, 'failed');
   assert.equal(stored.last_error_code, 'ghl_stage_diverged');
   assert.ok(stored.failed_at);
-  assert.deepEqual(await dispatchAgreementStageOutbox(async () => { throw new Error('must not run'); }, { sql: second }), {
+  assert.deepEqual(await dispatchAgreementStageOutbox(async () => { throw new Error('must not run'); }, { sql: second, fieldScope }), {
     delivered: 0, deferred: 0, failed: 0, stale: 0,
   });
 });
@@ -316,4 +316,49 @@ test('a failed stage-row write rolls back the completion and notification, then 
   assert.equal((await first`SELECT * FROM fame_agreement_completions`).length, 1);
   assert.equal((await first`SELECT * FROM fame_agreement_notification_outbox`).length, 1);
   assert.equal((await first`SELECT * FROM fame_agreement_stage_outbox`).length, 1);
+});
+
+test('field delivery receipt binds exact opportunity, configured field and Signed value; stage-only or wrong-field results fail', async () => {
+  for (const malformed of [() => undefined, proof => ({ stageId: 'signed-stage' }),
+    proof => ({ ...proof, fields: [{ fieldId: 'different-field', fieldValue: 'Signed' }] }),
+    proof => ({ ...proof, opportunityId: 'different-opportunity' })]) {
+    const application = await seedApplication(); const issue = issued(application);
+    await persistAgreementIssuance(issue, first);
+    const completedResult = await persistAgreementCompletionWithStageOutbox(completed(issue), first);
+    const result = await dispatchAgreementStageOutboxById(completedResult.stageOutboxId,
+      async job => malformed(proofFor(job)), { fieldScope, sql: first });
+    assert.equal(result.failed, 1);
+    const [row] = await first`SELECT status, last_error_code, delivery_receipt FROM fame_agreement_stage_outbox WHERE id = ${completedResult.stageOutboxId}`;
+    assert.deepEqual(row, { status: 'failed', last_error_code: 'ghl_field_proof_invalid', delivery_receipt: null });
+  }
+});
+
+test('verified agreement field receipt persists and cannot be rewritten as another proof', async () => {
+  const application = await seedApplication(); const issue = issued(application);
+  await persistAgreementIssuance(issue, first);
+  const completedResult = await persistAgreementCompletionWithStageOutbox(completed(issue), first);
+  let expected;
+  assert.equal((await dispatchAgreementStageOutboxById(completedResult.stageOutboxId,
+    async job => (expected = proofFor(job)), { fieldScope, sql: first })).delivered, 1);
+  const [row] = await first`SELECT delivery_receipt FROM fame_agreement_stage_outbox WHERE id = ${completedResult.stageOutboxId}`;
+  assert.deepEqual(row.delivery_receipt, expected);
+  await assert.rejects(first`UPDATE fame_agreement_stage_outbox SET delivery_receipt = '{}'::jsonb WHERE id = ${completedResult.stageOutboxId}`, /receipt is immutable/);
+});
+
+test('migration requeues legacy agreement stage success without fabricating field proof or repeating internal email', async () => {
+  const application = await seedApplication(); const issue = issued(application);
+  await persistAgreementIssuance(issue, first);
+  const completedResult = await persistAgreementCompletionWithStageOutbox(completed(issue), first);
+  await first`ALTER TABLE fame_agreement_stage_outbox DROP CONSTRAINT fame_agreement_field_delivery_proof`;
+  await first`UPDATE fame_agreement_stage_outbox SET status = 'delivered', delivered_at = statement_timestamp(), attempts = 2 WHERE id = ${completedResult.stageOutboxId}`;
+  await first.unsafe(fs.readFileSync(path.join(__dirname, '../../docs/migrations/021-opportunity-field-delivery-receipts.sql'), 'utf8'));
+  const [legacy] = await first`SELECT status, delivered_at, delivery_receipt, legacy_delivery_receipt FROM fame_agreement_stage_outbox WHERE id = ${completedResult.stageOutboxId}`;
+  assert.equal(legacy.status, 'pending'); assert.equal(legacy.delivered_at, null); assert.equal(legacy.delivery_receipt, null);
+  assert.equal(legacy.legacy_delivery_receipt.status, 'delivered'); assert.equal(legacy.legacy_delivery_receipt.attempts, 2);
+  await assert.rejects(first`UPDATE fame_agreement_stage_outbox SET status = 'delivered', delivered_at = statement_timestamp() WHERE id = ${completedResult.stageOutboxId}`, /fame_agreement_field_delivery_proof/);
+  let calls = 0;
+  assert.equal((await dispatchAgreementStageOutboxById(completedResult.stageOutboxId,
+    async job => { calls++; return proofFor(job); }, { fieldScope, sql: first })).delivered, 1);
+  assert.equal(calls, 1);
+  assert.equal((await first`SELECT status FROM fame_agreement_notification_outbox WHERE application_id = ${application.applicationId}`)[0].status, 'pending');
 });

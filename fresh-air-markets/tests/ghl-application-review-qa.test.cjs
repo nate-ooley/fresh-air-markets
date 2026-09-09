@@ -11,8 +11,7 @@ const env = {
   GHL_APPLICATION_REVIEW_STAGE_ID: 'qa-review', GHL_APPLICATION_APPROVED_STAGE_ID: 'qa-approved',
   GHL_APPLICATION_CHANGES_REQUESTED_STAGE_ID: 'qa-changes', GHL_APPLICATION_DECLINED_STAGE_ID: 'qa-declined',
   GHL_PAYMENT_SYNC_ENABLED: 'true', GHL_PAYMENT_EMAIL_ENABLED: 'true', GHL_PAYMENT_DELIVERY_MODE: 'qa',
-  GHL_PAYMENT_PENDING_STAGE_ID: 'qa-payment-pending', GHL_PAYMENT_CONFIRMED_STAGE_ID: 'qa-paid',
-  GHL_AGREEMENT_COMPLETED_STAGE_ID: 'qa-agreement-signed',
+  GHL_AGREEMENT_STATUS_FIELD_ID: 'agreement-field', GHL_PAYMENT_STATUS_FIELD_ID: 'payment-field',
   GHL_PAYMENT_EMAIL_FROM: 'nate@autocraftstudios.com', FAME_VENDOR_PORTAL_ORIGIN: 'https://qa-farmers-market.vercel.app',
   FAME_MARKET_ACCOUNT_ID: 'qa-market', FAME_SEASON_ID: '2026-2027',
   SQUARE_ENVIRONMENT: 'sandbox', SQUARE_ALLOW_LIVE_PAYMENTS: 'false',
@@ -29,7 +28,11 @@ function provider({ contactPatch = {}, opportunityPatch = {}, changedEmail } = {
   let contactReads = 0;
   const opportunity = { id: review.payload.opportunityId, contactId: review.payload.contactId,
     locationId: env.GHL_LOCATION_ID, pipelineId: env.GHL_QA_APPLICATION_PIPELINE_ID,
-    pipelineStageId: env.GHL_APPLICATION_REVIEW_STAGE_ID, status: 'open', ...opportunityPatch };
+    pipelineStageId: env.GHL_APPLICATION_REVIEW_STAGE_ID, status: 'open', customFields: [
+      { id: env.GHL_AGREEMENT_STATUS_FIELD_ID, fieldValue: 'Signed' },
+      { id: env.GHL_PAYMENT_STATUS_FIELD_ID, fieldValue: 'Ready for Payment' },
+      { id: 'unrelated-field', fieldValue: 'preserve me' },
+    ], ...opportunityPatch };
   const transport = async (url, init) => {
     calls.push({ url, ...init });
     assert.equal(init.redirect, 'error');
@@ -39,8 +42,24 @@ function provider({ contactPatch = {}, opportunityPatch = {}, changedEmail } = {
       return Response.json({ contact: { id: review.payload.contactId, locationId: env.GHL_LOCATION_ID,
         email: contactReads > 1 && changedEmail ? changedEmail : 'nate@autocraftstudios.com', ...contactPatch } });
     }
+    if (url.includes('/customFields/')) {
+      const agreement = url.endsWith('/agreement-field');
+      return Response.json({ customField: {
+        id: agreement ? 'agreement-field' : 'payment-field', locationId: env.GHL_LOCATION_ID, model: 'opportunity',
+        name: agreement ? 'Vendor Agreement Status' : 'Vendor Payment Status', dataType: 'SINGLE_OPTIONS',
+        fieldKey: agreement ? 'opportunity.vendor_agreement_status' : 'opportunity.vendor_payment_status',
+        picklistOptions: agreement ? ['Not Sent', 'Sent', 'Signed'] : ['Not Ready', 'Ready for Payment', 'Payment Sent', 'Paid', 'Payment Issue'],
+      } });
+    }
     assert.equal(url, `https://services.leadconnectorhq.com/opportunities/${review.payload.opportunityId}`);
-    if (init.method === 'PUT') Object.assign(opportunity, JSON.parse(init.body));
+    if (init.method === 'PUT') {
+      const update = JSON.parse(init.body);
+      if (update.customFields) {
+        for (const field of update.customFields) {
+          opportunity.customFields = opportunity.customFields.map(existing => existing.id === field.id ? field : existing);
+        }
+      } else Object.assign(opportunity, update);
+    }
     return Response.json({ opportunity });
   };
   return { calls, opportunity, transport };
@@ -56,9 +75,8 @@ test('one Preview configuration keeps the same exact opportunity in the QA pipel
   await deliverApplicationReviewToGhl(review, reviewConfig, mock.transport);
   assert.equal(mock.opportunity.pipelineStageId, env.GHL_APPLICATION_APPROVED_STAGE_ID);
   assert.deepEqual(mock.calls.map(call => call.method), ['GET', 'GET', 'GET', 'PUT', 'GET']);
-  // The agreement/reservation workflow owns this intervening state transition.
-  // This test exercises adapter compatibility, not those independent workflows.
-  mock.opportunity.pipelineStageId = env.GHL_PAYMENT_PENDING_STAGE_ID;
+  // Signing and checkout readiness are represented by fields in this fixture.
+  // The independent ledger workflows are covered by PostgreSQL scenarios.
   await preflightPaymentEmail({ id: 'email-1', marketId: env.FAME_MARKET_ACCOUNT_ID,
     applicationId: review.payload.applicationId, reservationId: 'reservation-1', revision: 1,
     contactId: review.payload.contactId, locationId: env.GHL_LOCATION_ID, opportunityId: review.payload.opportunityId,
@@ -71,7 +89,10 @@ test('one Preview configuration keeps the same exact opportunity in the QA pipel
     squareMerchantId: 'merchant-1', squareLocationId: 'square-location', squareOrderId: 'square-order',
     paymentId: 'payment-1', eventId: 'event-1', attempt: 1, leaseToken: 'lease',
   }, paidConfig, mock.transport);
-  assert.equal(mock.opportunity.pipelineStageId, env.GHL_PAYMENT_CONFIRMED_STAGE_ID);
+  assert.equal(mock.opportunity.pipelineStageId, env.GHL_APPLICATION_APPROVED_STAGE_ID);
+  assert.equal(mock.opportunity.status, 'open');
+  assert.equal(mock.opportunity.customFields.find(field => field.id === env.GHL_PAYMENT_STATUS_FIELD_ID).fieldValue, 'Paid');
+  assert.equal(mock.opportunity.customFields.find(field => field.id === 'unrelated-field').fieldValue, 'preserve me');
   assert.equal(mock.opportunity.pipelineId, env.GHL_QA_APPLICATION_PIPELINE_ID);
   assert.equal(mock.calls.filter(call => call.method === 'PUT').length, 2);
 });

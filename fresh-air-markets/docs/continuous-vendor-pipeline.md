@@ -1,62 +1,70 @@
-# Continuous vendor pipeline repair
+# Vendor workflow alignment
 
-## Problem and resulting behavior
+## Corrected behavior
 
-The review adapter previously selected the Production application pipeline even
-in Preview. Agreement delivery allowed a different pipeline although the stored
-application requires one immutable opportunity. Checkout creation then changed
-the database to Payment Pending without scheduling the matching HighLevel stage.
-Those mismatches prevented a single vendor from completing the intended journey.
+The original Asana reference (task 1218142524078858, sections 4, 11, 23 and 26)
+keeps the application pipeline simple and records agreement/payment progress in
+Opportunity custom fields. Earlier adapters incorrectly used extra operational
+stages. The repaired adapters preserve the exact opportunity in Approved with
+lifecycle status open and update only the corresponding custom field.
 
-Review, agreement, payment request, and paid status now use the same selected
-application pipeline. Preview selects `GHL_QA_APPLICATION_PIPELINE_ID` and
-Production selects `GHL_APPLICATION_PIPELINE_ID`. The optional legacy
-`GHL_AGREEMENT_PIPELINE_ID` must match the selected pipeline. Stage updates send
-only `pipelineStageId`; they do not move the opportunity or reopen its status.
-
-The intended accepted path is Needs Review → Approved → Agreement Signed →
-Payment Pending → Payment Confirmed. Approved can also serve as the configured
-agreement-sent stage while the issued agreement awaits signing. Agreement Signed,
-Payment Pending, and Payment Confirmed must have three distinct stage IDs.
-
-Migration 020 queues Payment Pending when a valid Square checkout commits.
-Both payment-stage workers wait for the exact agreement-stage delivery receipt.
-They share a reservation lock so a delayed Pending action cannot run after the
-Paid action. A fast paid webhook can advance Agreement Signed directly to Payment
-Confirmed; obsolete Pending work cancels. The webhook remains free to commit
-while a CRM operation is running. Provider-side human edits cannot be locked
-atomically by these workers and remain a documented integration limit.
-
-## Native configuration verified September 8, 2026
-
-| Environment | Pipeline | Verified configuration |
+| Event with verified evidence | HighLevel field | Value |
 | --- | --- | --- |
-| Preview QA | QA ONLY - FAME Intake Tests (`inltlurydNKw0FerWQXn`) | Added Agreement Signed; all nine stages persisted after reload. Payment Pending, Payment Confirmed, and Changes Requested already existed. |
-| Production | Fresh Air Markets-Vendor Management (`wAMTir0CzlAStr9GgGvr`) | Added Agreement Signed and Changes Requested; all nine stages persisted after reload. Payment Pending and Payment Confirmed already existed. |
+| Bound agreement completed | Vendor Agreement Status | Signed |
+| Valid checkout committed, before email | Vendor Payment Status | Ready for Payment |
+| Exact email provider receipt confirms sent/delivered | Vendor Payment Status | Payment Sent |
+| Exact signed Square COMPLETED event reconciled | Vendor Payment Status | Paid |
 
-The exact Fresh Air location is `aooAnUXF0COePorBo7wL`. Existing opportunity
-records and stage probabilities were preserved. No workflow was published and
-no email, SMS, or payment was sent by this configuration work. Stage IDs still
-need to be retrieved and configured; names are not substitutes.
+Preview uses the separate `GHL_QA_APPLICATION_PIPELINE_ID`; Production uses
+`GHL_APPLICATION_PIPELINE_ID`. Configured field IDs must belong to the correct
+Fresh Air location and pass metadata checks. The API token also needs
+`locations/customFields.readonly`. Neither a field name nor an extra stage ID is
+a substitute for the actual custom-field ID.
 
-## Verification and remaining acceptance
+Migration 021 replaces stage-only acknowledgements with verified field receipts.
+Apply it while old workers are paused. Legacy successful/in-flight jobs retain
+an audit snapshot and are fenced/requeued for verification; migration does not
+call HighLevel or mark them green. Expired or otherwise obsolete payment work
+is cancelled by current eligibility checks. Failed/manual-review work is not
+silently revived. Never run the old stage-writing workers after this migration.
 
-Automated checks cover selected pipeline identity, current QA recipient checks,
-stage-only updates, stale retries, queued agreement prerequisites, checkout
-rollback/recovery, and concurrent Pending/Paid workers. The six-worker scheduler
-runs review, agreement, pending, email, paid, then expiry. It remains disabled.
-See the exact-commit CI linked in Linear for final database/build results.
+The same reservation advisory lock orders Ready, Payment Sent and Paid writes.
+Provider email proof is stored before the separate CRM synchronization, so a CRM
+failure cannot erase a sent email or cause a second email POST. A late Payment
+Sent action skips an exactly reconciled paid reservation. Native human edits
+are not locked by our worker; diverged or closed opportunities require review.
 
-Hosted acceptance still requires authorized Vercel access, the private database
-with migrations 001–020, the confirmed booth capacity, configured stage IDs,
-native QA notification routing, actual Sandbox checkout/webhook proof, inbox
-evidence, and canonical website routing. Automated transport fixtures are not
-evidence that those external workflows ran.
+## Native configuration evidence
 
-The document flow has a separate unfinished bridge: HighLevel document upload
-and Thomas's review decisions must reach the portal's document ledger. The
-original business reference requires insurance approval and food-license
-approval when Thomas decides it is required. A separate malware scanning service
-was not specified there; it is a gate introduced by the current implementation.
-Resolve that integration against the existing HighLevel process before declaring
-the full approval-to-payment journey complete.
+Correct subaccount: `aooAnUXF0COePorBo7wL`.
+
+- QA Intake pipeline: `inltlurydNKw0FerWQXn`.
+- Production Vendor Management pipeline: `wAMTir0CzlAStr9GgGvr`.
+- Earlier work added Agreement Signed, Payment Pending, Payment Confirmed and
+  Changes Requested stages. Those additions are not proof of the original
+  workflow working. The three agreement/payment stages are no longer used by
+  the repaired adapters. They have not been deleted while references remain
+  unaudited. Changes Requested still needs a separate review-workflow correction.
+- September 9: created and read back Contact file field Food License / Permit,
+  key `contact.food_license__permit`, in Additional Info. It accepts one PDF,
+  JPG/JPEG, or PNG. No contact was changed and no message was sent. The field
+  must still be placed on a tested upload form and bound to exact application
+  review evidence.
+- AI Studio project `1779802876495102326` lists default domain
+  `https://fresh-air-landing.vibepreview.com` and live apex/www domains. UI
+  configuration alone does not prove the default domain serves independently.
+
+## Remaining acceptance
+
+The six recovery workers remain disabled pending verified native routing.
+Hosted acceptance requires Vercel access, migrations 001–021 in the private
+Preview database, actual Approved stage and custom-field IDs, booth capacity,
+and proof that every field-triggered QA notification is contained to authorized
+recipients. Then test real Square Sandbox checkout/webhooks, email inboxes,
+replays, failures and canonical website routing.
+
+HighLevel document uploads and Thomas's decisions still need a verified bridge
+to the portal's document ledger. The original reference did not require a
+separate malware-scanning product; resolve the current implementation's
+unconnected private-transfer/scanning gates against the native process.
+Automated provider fixtures and PostgreSQL tests do not prove hosted acceptance.

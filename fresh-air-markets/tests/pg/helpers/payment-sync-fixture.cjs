@@ -1,5 +1,6 @@
 const assert = require('node:assert/strict');
 const { randomUUID, createHash } = require('node:crypto');
+const { makeOpportunityFieldProof } = require('../../../.test-build/ghl-opportunity-field-proof.js');
 const { reserveFinalApplication } = require('../../../.test-build/final-reservation-pg.js');
 
 async function seedEligibleApplication(sql, scope, now, patch = {}) {
@@ -63,11 +64,11 @@ async function seedPaymentSync(sql, scope, now = new Date(), options = {}) {
   if (options.agreementStage !== 'missing') {
     const status = options.agreementStage || 'delivered';
     await sql`INSERT INTO fame_agreement_stage_outbox (id, market_id, application_id, completion_id, topic,
-      dedupe_key, payload, status, delivered_at)
+      dedupe_key, payload, status, delivered_at, delivery_receipt)
       VALUES (${stageJob}, ${scope.marketId}, ${app}, ${agreement}, 'agreement-completed-stage', ${`agreement-stage:${agreement}`},
         ${sql.json({ marketId: scope.marketId, applicationId: app, completionId: agreement, locationId: scope.locationId,
           contactId: `contact-${app}`, opportunityId: `opportunity-${app}`, seasonId: scope.seasonId })},
-        ${status}, ${status === 'delivered' ? now : null})`;
+        ${status}, ${status === 'delivered' ? now : null}, ${status === 'delivered' ? sql.json(agreementProof({ locationId: scope.locationId, contactId: `contact-${app}`, opportunityId: `opportunity-${app}` }, scope)) : null})`;
   }
   const result = await reserveFinalApplication({ marketId: scope.marketId, applicationId: app, actorAccountId: scope.marketId, now,
     config: { marketId: scope.marketId, seasonId: scope.seasonId, boothCapacity: 100, calendarDates: ['2026-10-03'], quoteVersion: 'fresh-air-2026-2027-v1' },
@@ -92,4 +93,16 @@ async function seedPaymentSync(sql, scope, now = new Date(), options = {}) {
   event.rawBodySha256 = createHash('sha256').update(JSON.stringify(event)).digest('hex');
   return { app, reservation, order, event, agreement, stageJob, now, due };
 }
-module.exports = { seedPaymentSync };
+function agreementProof(identity, scope) {
+  return makeOpportunityFieldProof({ locationId: identity.locationId, contactId: identity.contactId,
+    opportunityId: identity.opportunityId, pipelineId: scope.pipelineId },
+    [{ fieldId: scope.agreementStatusFieldId, fieldValue: 'Signed' }]);
+}
+function paymentProof(job, scope, value = 'Paid') {
+  return makeOpportunityFieldProof({ locationId: job.locationId, contactId: job.contactId,
+    opportunityId: job.opportunityId, pipelineId: scope.pipelineId }, [
+    { fieldId: scope.agreementStatusFieldId, fieldValue: 'Signed' },
+    { fieldId: scope.paymentStatusFieldId, fieldValue: value },
+  ]);
+}
+module.exports = { seedPaymentSync, agreementProof, paymentProof };

@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import postgres from "postgres";
+import { verifiedOpportunityFields, type GhlOpportunityFieldProof } from "./ghl-opportunity-field-proof";
 import { withPaymentStageLock, paymentAgreementStageReadiness, type PaymentStageSql } from "./payment-stage-lock";
 
 type Sql = ReturnType<typeof postgres>;
@@ -9,12 +10,15 @@ function configuredClient(): Sql {
   return client ??= postgres(process.env.DATABASE_URL, { max: 3, prepare: false, connect_timeout: 5 });
 }
 export interface PaymentPaidSyncScope {
+  pipelineId: string;
+  agreementStatusFieldId: string;
+  paymentStatusFieldId: string;
   marketId: string;
   seasonId: string;
   locationId: string;
   squareEnvironment: "sandbox" | "production";
 }
-export interface PaymentPaidSyncMessage extends PaymentPaidSyncScope {
+export interface PaymentPaidSyncMessage extends Omit<PaymentPaidSyncScope, "pipelineId" | "agreementStatusFieldId" | "paymentStatusFieldId"> {
   paymentOrderId: string;
   applicationId: string;
   contactId: string;
@@ -48,7 +52,7 @@ function message(row: Row): PaymentPaidSyncMessage {
   };
 }
 function validate(scope: PaymentPaidSyncScope, limit: number): void {
-  if (![scope.marketId, scope.seasonId, scope.locationId].every(v => /^[A-Za-z0-9_-]{1,192}$/.test(v))
+  if (![scope.marketId, scope.seasonId, scope.locationId, scope.pipelineId, scope.agreementStatusFieldId, scope.paymentStatusFieldId].every(v => typeof v === "string" && /^[A-Za-z0-9_-]{1,192}$/.test(v))
     || !["sandbox", "production"].includes(scope.squareEnvironment)
     || !Number.isInteger(limit) || limit < 1 || limit > 5) throw new Error("Invalid payment sync scope.");
 }
@@ -99,9 +103,16 @@ export async function paymentPaidSyncStillEligible(job: PaymentPaidSyncMessage, 
       AND e.payment_id = j.payment_id AND e.event_id = j.event_id`;
   return rows.length === 1;
 }
-export async function markPaymentPaidSyncDelivered(job: PaymentPaidSyncMessage, sql: PaymentStageSql = configuredClient()): Promise<boolean> {
+export async function markPaymentPaidSyncDelivered(job: PaymentPaidSyncMessage, proof: GhlOpportunityFieldProof,
+  scope: PaymentPaidSyncScope, sql: PaymentStageSql = configuredClient()): Promise<boolean> {
+  if (!verifiedOpportunityFields(proof, { locationId: job.locationId, contactId: job.contactId,
+    opportunityId: job.opportunityId, pipelineId: scope.pipelineId, fields: [
+      { fieldId: scope.agreementStatusFieldId, fieldValue: "Signed" },
+      { fieldId: scope.paymentStatusFieldId, fieldValue: "Paid" },
+    ] })) throw { code: "ghl_field_proof_invalid" };
   const rows = await sql`
     UPDATE fame_payment_paid_sync_outbox j SET status = 'delivered', delivered_at = statement_timestamp(),
+      delivery_receipt = ${sql.json(proof as unknown as Parameters<typeof sql.json>[0])},
       locked_until = NULL, lease_token = NULL, last_error_code = NULL, updated_at = statement_timestamp()
     FROM fame_payment_paid_sync_eligible e
     WHERE j.payment_order_id = ${job.paymentOrderId} AND j.lease_token = ${job.leaseToken}
@@ -117,7 +128,7 @@ export async function markPaymentPaidSyncDelivered(job: PaymentPaidSyncMessage, 
 }
 const WAIT_CODES = new Set(["payment_stage_busy", "agreement_prerequisite_pending"]);
 const RETRY_CODES = new Set(["ghl_rate_limited", "ghl_unavailable", "delivery_unavailable", ...WAIT_CODES]);
-const TERMINAL_CODES = new Set(["ghl_config_missing", "ghl_identity_mismatch", "ghl_qa_recipient_rejected", "ghl_pipeline_mismatch", "ghl_stage_diverged", "ghl_status_diverged", "ghl_rejected", "paid_evidence_changed", "agreement_prerequisite_failed"]);
+const TERMINAL_CODES = new Set(["ghl_field_proof_invalid", "ghl_field_mismatch", "ghl_config_missing", "ghl_identity_mismatch", "ghl_qa_recipient_rejected", "ghl_pipeline_mismatch", "ghl_stage_diverged", "ghl_status_diverged", "ghl_rejected", "paid_evidence_changed", "agreement_prerequisite_failed"]);
 export function paymentPaidSyncFailure(error: unknown, attempt: number): { code: string; terminal: boolean; delay: number } {
   const candidate = error && typeof error === "object" ? error as { code?: unknown; retryAfterSeconds?: unknown } : {};
   const supplied = typeof candidate.code === "string" ? candidate.code : "";
@@ -137,7 +148,7 @@ export async function failOrRetryPaymentPaidSync(job: PaymentPaidSyncMessage, er
       AND status = 'processing' AND locked_until > statement_timestamp() RETURNING payment_order_id`;
   return rows.length ? failure.terminal ? "manual_review" : "deferred" : "stale";
 }
-export async function dispatchPaymentPaidSync(deliver: (job: PaymentPaidSyncMessage) => Promise<void>, scope: PaymentPaidSyncScope,
+export async function dispatchPaymentPaidSync(deliver: (job: PaymentPaidSyncMessage) => Promise<GhlOpportunityFieldProof>, scope: PaymentPaidSyncScope,
   options: { limit?: number; sql?: Sql } = {}): Promise<{ queued: number; delivered: number; deferred: number; manual_review: number; stale: number }> {
   const sql = options.sql ?? configuredClient();
   const limit = options.limit ?? 5;
@@ -150,10 +161,10 @@ export async function dispatchPaymentPaidSync(deliver: (job: PaymentPaidSyncMess
     try {
       const locked = await withPaymentStageLock(sql, job, async tx => {
         if (!await paymentPaidSyncStillEligible(job, tx)) throw { code: "paid_evidence_changed" };
-        const prerequisite = await paymentAgreementStageReadiness(tx, job);
+        const prerequisite = await paymentAgreementStageReadiness(tx, job, scope);
         if (prerequisite !== "ready") throw { code: `agreement_prerequisite_${prerequisite}` };
-        await deliver(job);
-        return markPaymentPaidSyncDelivered(job, tx);
+        const proof = await deliver(job);
+        return markPaymentPaidSyncDelivered(job, proof, scope, tx);
       });
       if (!locked.acquired) throw { code: "payment_stage_busy" };
       if (locked.value) result.delivered++; else result.stale++;

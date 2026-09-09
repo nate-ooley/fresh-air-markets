@@ -14,13 +14,13 @@ acceptance remain unverified until the release checks below are completed.
    Reloading reads that committed reservation without reserving again.
 4. Create its Square payment request. Retrying retrieves the same provider order
    and deadline. Nonprofits skip payment. Creating this request does not send email.
-   A durable job queues Payment Pending sync for the application's same
-   HighLevel opportunity. The protected worker waits for the exact Agreement
-   Signed delivery receipt before updating its stage; it never creates another
+   A durable job queues Ready for Payment custom-field sync for the application's same
+   HighLevel opportunity. The protected worker waits for the exact Signed agreement-field
+   delivery receipt before updating Vendor Payment Status; it never creates another
    opportunity or changes the application's pipeline.
 5. Send the private payment email through the explicit manager confirmation.
-   Preparation verifies the current contact, email, opportunity and Payment
-   Pending stage. A durable send record prevents a second submission after an
+   Preparation verifies the current contact, email, opportunity, Approved/open state, Signed agreement and Ready for
+   Payment status. A durable send record prevents a second submission after an
    uncertain response. Provider acceptance and delivery are shown separately.
    A separately created vendor access link can also be copied deliberately;
    replacing it revokes the previous link and its browser sessions.
@@ -46,20 +46,21 @@ merchant, location, order, amount and reservation before the page says paid.
 
 ## Required release work
 
-- Apply and verify migrations 001–020 on the reviewed Preview database, including
+- Apply and verify migrations 001–021 on the reviewed Preview database, including
   the private Fresh Air account and confirmed overall booth capacity.
 - Set `FAME_VENDOR_PORTAL_ORIGIN` as **Config** to the exact Preview HTTPS origin
   used for testing. Production must use `https://freshairmarketsandevents.com`.
-- Route `/vendor/payment`, `/api/vendor/*`, the Square webhook and the portal's
-  required assets to this application under the marketing domain. This code
+- Route vendor payment, staff login/application pages, their APIs, the Square
+  webhook, recovery endpoints and required assets to this application under
+  the canonical marketing domain. Staff payment actions also enforce that origin. This code
   does not change domain ownership, DNS or the HighLevel-hosted site.
 - Privately verify Sandbox merchant/location and webhook credentials, then run
   real Sandbox success, decline, return, replay, expiry and recovery scenarios.
 - Complete the correct HighLevel application/document handoff, automated private
   link delivery, paid-state synchronization and the authorized inbox checks.
 - Invoke the protected QA workers in application review, agreement completion,
-  Payment Pending, payment email, paid-state sync and expiry order. Creating
-  checkout queues pending-stage work; this batch does not dispatch it inline.
+  Ready for Payment, payment email, paid-state sync and expiry order. Creating
+  checkout queues readiness-field work; this batch does not dispatch it inline.
   Keep the Production scheduler disabled until hosted acceptance passes.
 - Verify Production settings and the website routing; review and authorize the
   final release. Adding production code does not enable live payments.

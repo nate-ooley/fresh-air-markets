@@ -5,13 +5,13 @@ The `.github/workflows/payment-scheduler.yml` workflow calls six authenticated w
 The caller is fixed to `https://freshairmarketsandevents.com`; repository variables, query parameters, workflow inputs and provider responses cannot redirect it. These paths must already route to the released backend and return authenticated JSON on that exact domain:
 
 1. `/api/internal/cron/application-review-outbox` — failed review delivery recovery.
-2. `/api/internal/cron/agreement-completion-stage-outbox` — failed agreement-stage recovery.
-3. `/api/internal/cron/payment-pending-sync` — move the exact signed, payable application's HighLevel opportunity to Payment Pending.
+2. `/api/internal/cron/agreement-completion-stage-outbox` — Signed agreement-field recovery.
+3. `/api/internal/cron/payment-pending-sync` — set the exact signed, payable application's Vendor Payment Status to Ready for Payment.
 4. `/api/internal/cron/payment-email` — submission recovery and provider receipt polling.
 5. `/api/internal/cron/payment-paid-sync` — exact paid-state HighLevel sync.
 6. `/api/internal/cron/square-payment-expiry` — due holds and Square link retirement.
 
-This order lets earlier application and agreement deliveries become prerequisites for later payment work in the same run. Pending-stage sync waits for the exact agreement-stage delivery receipt; it does not replace or manually move an opportunity to bypass that requirement. The pending worker uses `GHL_PAYMENT_SYNC_ENABLED`, like paid-stage sync, and handles at most one job per invocation. Creating checkout only queues pending-stage work; this batch adds no immediate provider dispatch to checkout creation.
+This order lets earlier application and agreement deliveries become prerequisites for later payment work in the same run. Readiness sync waits for the exact Signed agreement-field receipt; it does not replace or manually move an opportunity to bypass that requirement. The pending worker uses `GHL_PAYMENT_SYNC_ENABLED`, like paid-field sync, and handles at most one job per invocation. Creating checkout only queues readiness-field work; this batch adds no immediate provider dispatch to checkout creation.
 
 Each GET requires the shared `Authorization: Bearer <CRON_SECRET>` header. The script refuses missing, short or malformed secrets. It follows no redirects, invokes workers sequentially, and gives each request a 55-second deadline: all six requests are bounded to under six minutes, excluding runner setup. One worker failure does not skip the others. Output contains only worker names, bounded integer counts, HTTP status codes and fixed error codes. Secrets, authorization headers, raw response bodies, vendor identities and invitation URLs are never printed.
 
@@ -19,7 +19,7 @@ HTTP/transport/invalid-response failures and returned permanent-failure/manual-r
 
 ## Exact setup after QA and production approval
 
-Do not enable this workflow until the production release, domain routing, private database, Square identity/webhook, and HighLevel stage/email routing have passed acceptance. Production HighLevel settings must use the live pipeline and approved recipients, without QA flags. This scheduler's enable flag does not bypass any worker's configuration checks.
+Do not enable this workflow until the production release, domain routing, private database, Square identity/webhook, and HighLevel status-field/email routing have passed acceptance. Production HighLevel settings must use the live pipeline and approved recipients, without QA flags. This scheduler's enable flag does not bypass any worker's configuration checks.
 
 In the `nate-ooley/fresh-air-markets` GitHub repository:
 

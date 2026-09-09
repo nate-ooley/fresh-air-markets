@@ -8,6 +8,7 @@ import {
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const maxDuration = 60;
 
 /**
  * Recovery-only endpoint. It has no recipient/email behavior and returns only
@@ -25,7 +26,7 @@ export async function GET(request: Request): Promise<Response> {
     const config = readAgreementStageDeliveryConfig(process.env);
     const result = await dispatchAgreementStageOutbox(
       message => deliverAgreementStageToGhl(message, config),
-      { limit: 5, leaseSeconds: 60 },
+      { fieldScope: config, limit: 1, leaseSeconds: 60 },
     );
     return Response.json(result);
   } catch {

@@ -1,4 +1,5 @@
 import type postgres from "postgres";
+import { verifiedOpportunityFields } from "./ghl-opportunity-field-proof";
 
 export type PaymentStageSql = ReturnType<typeof postgres> | postgres.TransactionSql;
 
@@ -6,9 +7,10 @@ export type PaymentStageSql = ReturnType<typeof postgres> | postgres.Transaction
  * is delivered. Downstream workers never race it or infer delivery from signing. */
 export async function paymentAgreementStageReadiness(sql: PaymentStageSql,
   identity: { marketId: string; reservationId: string; applicationId: string },
+  fieldScope: { pipelineId: string; agreementStatusFieldId: string },
 ): Promise<"ready" | "pending" | "failed"> {
-  const [row] = await sql<{ status: string | null; exact: boolean }[]>`
-    SELECT j.status, COALESCE(
+  const [row] = await sql<{ status: string | null; exact: boolean; delivery_receipt: unknown; location_id: string; contact_id: string; opportunity_id: string }[]>`
+    SELECT j.status, j.delivery_receipt, g.location_id, g.contact_id, g.opportunity_id, COALESCE(
       j.payload->>'marketId' = g.market_id AND j.payload->>'applicationId' = g.application_id
       AND j.payload->>'completionId' = g.id AND j.payload->>'locationId' = g.location_id
       AND j.payload->>'contactId' = g.contact_id AND j.payload->>'opportunityId' = g.opportunity_id
@@ -18,7 +20,10 @@ export async function paymentAgreementStageReadiness(sql: PaymentStageSql,
     LEFT JOIN fame_agreement_stage_outbox j ON j.completion_id = g.id AND j.market_id = g.market_id AND j.application_id = g.application_id
     WHERE f.reservation_id = ${identity.reservationId} AND f.market_id = ${identity.marketId} AND f.application_id = ${identity.applicationId}`;
   if (!row?.exact) return "failed";
-  if (row.status === "delivered") return "ready";
+  if (row.status === "delivered") return verifiedOpportunityFields(row.delivery_receipt, {
+    locationId: row.location_id, contactId: row.contact_id, opportunityId: row.opportunity_id,
+    pipelineId: fieldScope.pipelineId, fields: [{ fieldId: fieldScope.agreementStatusFieldId, fieldValue: "Signed" }],
+  }) ? "ready" : "failed";
   return row.status === "pending" || row.status === "processing" ? "pending" : "failed";
 }
 

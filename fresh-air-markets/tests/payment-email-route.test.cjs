@@ -56,7 +56,8 @@ async function configured(fn, overrides = {}) {
     FAME_MARKET_ACCOUNT_ID: marketId, FAME_VENDOR_PORTAL_ORIGIN: origin, DATABASE_URL: 'postgres://unused-route-test-only',
     GHL_PAYMENT_EMAIL_ENABLED: 'true', GHL_PAYMENT_DELIVERY_MODE: 'qa', GHL_API_TOKEN: 'test-only-no-network-provider-token',
     GHL_LOCATION_ID: 'aooAnUXF0COePorBo7wL', GHL_QA_APPLICATION_PIPELINE_ID: 'qa-pipeline', GHL_APPLICATION_PIPELINE_ID: 'live-pipeline',
-    GHL_PAYMENT_PENDING_STAGE_ID: 'qa-pending-stage', GHL_PAYMENT_EMAIL_FROM: 'nate@autocraftstudios.com',
+    GHL_APPLICATION_APPROVED_STAGE_ID: 'qa-approved', GHL_AGREEMENT_STATUS_FIELD_ID: 'agreement-status',
+    GHL_PAYMENT_STATUS_FIELD_ID: 'payment-status', GHL_PAYMENT_EMAIL_FROM: 'nate@autocraftstudios.com',
     GHL_PAYMENT_QA_ROUTING_VERIFIED: 'true', CRON_SECRET: secret, ...overrides };
   const previous = Object.fromEntries(Object.keys(vars).map(key => [key, process.env[key]]));
   for (const [key, value] of Object.entries(vars)) value === undefined ? delete process.env[key] : process.env[key] = value;

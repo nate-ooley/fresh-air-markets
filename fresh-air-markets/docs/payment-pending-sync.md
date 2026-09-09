@@ -1,13 +1,30 @@
-# Payment Pending stage delivery
+# Checkout readiness in HighLevel
 
-Migration `020-payment-pending-sync-outbox.sql` records the missing checkout lifecycle action: an exact committed Square checkout and its payment-pending reservation enqueue a durable CRM transition. A checkout merely being prepared does not qualify. The immutable finalization, signed agreement, current application identities, exact Square order/revision, amount, currency, and unexpired 48-hour deadline must agree. A bounded repair scan recovers eligible checkouts missed before this migration.
+Migration 020 queues a job for an exact committed, unexpired Square checkout.
+Migration 021 records verified Opportunity custom-field evidence instead of the
+previous Payment Pending pipeline-stage acknowledgement.
 
-The worker shares the existing opt-in `GHL_PAYMENT_SYNC_ENABLED`, selected QA/Production pipeline and notification-routing fences. It additionally requires `GHL_AGREEMENT_COMPLETED_STAGE_ID`, distinct from `GHL_PAYMENT_PENDING_STAGE_ID` and `GHL_PAYMENT_CONFIRMED_STAGE_ID`. It changes only the exact opportunity's stage from Agreement Signed to Payment Pending, then verifies the provider response with a GET. An already-Pending opportunity is a read-only success. Confirmed, closed, foreign, or manually diverged opportunities never regress.
+The worker changes Vendor Payment Status from Not Ready to Ready for Payment,
+while keeping Approved/Open and the selected application pipeline unchanged.
+An already-Ready field is read-only success. Paid, Payment Sent, Payment Issue,
+closed, foreign, or manually diverged state never regresses. It validates exact
+configured field metadata and rereads the opportunity after any field-only PUT.
 
-Both Pending and Paid workers take the same nonblocking advisory transaction lock per market/reservation. They revalidate database eligibility once that lock is held. It does not lock reservation or payment rows, so a Square webhook can commit during bounded provider operations. The Paid worker waits if Pending currently holds the lock. After the Pending operation finishes, Paid moves to Confirmed; no later Pending worker can move it backwards. If payment arrives first, exact reconciled paid evidence allows Agreement Signed directly to Confirmed, and the outdated Pending job cancels.
+Ready and Paid require the finalization's exact Signed field-delivery receipt.
+Queued agreement work defers without spending the normal failure budget. A
+stage-only, wrong-field, wrong-pipeline or missing receipt cannot open the gate.
+A common per-reservation advisory lock orders Ready, Payment Sent and Paid;
+Square webhook database updates can still commit while provider calls run.
+Expired, cancelled, reassigned or paid checkouts cancel obsolete Ready work.
 
-Both workers also require the exact agreement stage outbox receipt bound by the finalization. A pending/processing prerequisite defers without consuming the provider failure budget. Missing, failed, or mismatched agreement-stage evidence requires review. This preserves ordering with agreement delivery instead of guessing whether signing has already updated the CRM.
+Configuration is shared with the Paid adapter: approved stage ID, agreement and
+payment status custom-field IDs, selected pipeline, tenant/season, exact QA
+recipient checks and verified downstream field-trigger routing. Features stay
+disabled until native QA is proven. Apply through migration 021 with old workers
+paused; old operational stages are not valid configuration inputs.
 
-The pending worker processes at most five items, with the protected scheduled route normally requesting one. Provider timeout/rate-limit failures retain a safe delayed retry; retry first reads the current stage before any PUT. Permanently diverged identity/stage requires review. Expired, paid, cancelled, or reassigned checkout evidence cancels the pending job without a provider mutation.
-
-Verification fixtures cover exact stage-only delivery, repeat idempotency, contact/pipeline/closed-stage fences, expired jobs, provider failures, and the fast-paid direct transition. Real PostgreSQL scenarios cover atomic trigger/repair behavior, concurrent workers, rollback, eligibility cancellation, agreement prerequisite ordering, a webhook committing while the advisory lock is held, and both Pending-first and Paid-first races. Provider operations are injected fixtures, not external messages or payments. Hosted migrations and native workflow/inbox verification remain separate acceptance work.
+The authenticated cron attempts one job per invocation. Bounded provider retry
+never infers delivery from a successful PUT alone. Isolated adapter fixtures and
+disposable PostgreSQL scenarios cover identity, field proof, duplicates,
+rollback, legacy receipts, expiry and competing workers. Hosted workflow and
+inbox evidence remain separate acceptance requirements.

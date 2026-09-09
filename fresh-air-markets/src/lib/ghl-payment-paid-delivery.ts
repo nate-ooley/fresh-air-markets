@@ -1,5 +1,9 @@
 import type { PaymentPaidSyncMessage, PaymentPaidSyncScope } from "./payment-paid-sync-pg";
 
+import { AGREEMENT_STATUS_FIELD, PAYMENT_STATUS_FIELD, assertOpportunityStatusFieldMetadata,
+  readOpportunityStatusField, OpportunityStatusFieldError } from "./ghl-opportunity-status-fields";
+import { makeOpportunityFieldProof, type GhlOpportunityFieldProof } from "./ghl-opportunity-field-proof";
+
 const BASE = "https://services.leadconnectorhq.com";
 const LOCATION = "aooAnUXF0COePorBo7wL";
 const ID = /^[A-Za-z0-9_-]{1,192}$/;
@@ -8,9 +12,9 @@ export interface PaymentPaidDeliveryConfig extends PaymentPaidSyncScope {
   apiToken: string;
   mode: "qa" | "production";
   pipelineId: string;
-  pendingStageId: string;
-  confirmedStageId: string;
-  agreementCompletedStageId: string;
+  approvedStageId: string;
+  agreementStatusFieldId: string;
+  paymentStatusFieldId: string;
 }
 export class PaymentPaidDeliveryError extends Error {
   constructor(public readonly code: string, public readonly retryAfterSeconds?: number) {
@@ -25,13 +29,13 @@ export function readPaymentPaidDeliveryConfig(env: Record<string, string | undef
   const marketId = env.FAME_MARKET_ACCOUNT_ID?.trim() ?? "";
   const seasonId = env.FAME_SEASON_ID?.trim() ?? "";
   const locationId = env.GHL_LOCATION_ID?.trim() ?? "";
-  const pendingStageId = env.GHL_PAYMENT_PENDING_STAGE_ID?.trim() ?? "";
-  const confirmedStageId = env.GHL_PAYMENT_CONFIRMED_STAGE_ID?.trim() ?? "";
-  const agreementCompletedStageId = env.GHL_AGREEMENT_COMPLETED_STAGE_ID?.trim() ?? "";
+  const approvedStageId = env.GHL_APPLICATION_APPROVED_STAGE_ID?.trim() ?? "";
+  const agreementStatusFieldId = env.GHL_AGREEMENT_STATUS_FIELD_ID?.trim() ?? "";
+  const paymentStatusFieldId = env.GHL_PAYMENT_STATUS_FIELD_ID?.trim() ?? "";
   const mode = env.GHL_PAYMENT_DELIVERY_MODE;
-  if (apiToken.length < 16 || locationId !== LOCATION || marketId === "demo-market"
-    || ![marketId, seasonId, pendingStageId, confirmedStageId, agreementCompletedStageId].every(id => ID.test(id))
-    || new Set([pendingStageId, confirmedStageId, agreementCompletedStageId]).size !== 3) fail();
+  if (apiToken.length < 16 || /[\r\n\0]/.test(apiToken) || locationId !== LOCATION || marketId === "demo-market"
+    || ![marketId, seasonId, approvedStageId, agreementStatusFieldId, paymentStatusFieldId].every(id => ID.test(id))
+    || agreementStatusFieldId === paymentStatusFieldId) fail();
   let pipelineId: string;
   let squareEnvironment: "sandbox" | "production";
   if (mode === "qa") {
@@ -49,7 +53,7 @@ export function readPaymentPaidDeliveryConfig(env: Record<string, string | undef
         && (key.startsWith("SQUARE_QA_") || key.startsWith("GHL_QA_") || key.startsWith("GHL_PAYMENT_QA_")))) fail();
     squareEnvironment = "production";
   } else return fail();
-  return { apiToken, marketId, seasonId, locationId, pendingStageId, confirmedStageId, agreementCompletedStageId, mode, pipelineId, squareEnvironment };
+  return { apiToken, marketId, seasonId, locationId, approvedStageId, agreementStatusFieldId, paymentStatusFieldId, mode, pipelineId, squareEnvironment };
 }
 const object = (v: unknown): Record<string, unknown> | null => v && typeof v === "object" && !Array.isArray(v) ? v as Record<string, unknown> : null;
 async function body(response: Response): Promise<Record<string, unknown>> {
@@ -86,24 +90,50 @@ export async function readExactPaymentOpportunity(job: Pick<PaymentPaidSyncMessa
     || opportunity.locationId !== config.locationId) throw new PaymentPaidDeliveryError("ghl_identity_mismatch");
   if (opportunity.pipelineId !== config.pipelineId) throw new PaymentPaidDeliveryError("ghl_pipeline_mismatch");
   if (opportunity.status !== "open") throw new PaymentPaidDeliveryError("ghl_status_diverged");
+  if (opportunity.pipelineStageId !== config.approvedStageId) throw new PaymentPaidDeliveryError("ghl_stage_diverged");
   return opportunity;
 }
-/** No searches/upserts or notification calls. A retry verifies the target stage before writing. */
-export async function deliverPaymentPaidToGhl(job: PaymentPaidSyncMessage, config: PaymentPaidDeliveryConfig, transport: typeof fetch = fetch): Promise<void> {
+/** Validate both exact field IDs against the tenant's current opportunity-field definitions. */
+export async function verifyPaymentStatusFieldMetadata(config: PaymentPaidDeliveryConfig, transport: typeof fetch): Promise<void> {
+  for (const [fieldId, descriptor] of [[config.agreementStatusFieldId, AGREEMENT_STATUS_FIELD],
+    [config.paymentStatusFieldId, PAYMENT_STATUS_FIELD]] as const) {
+    const response = await requestPaymentStage(config, transport,
+      `/locations/${encodeURIComponent(config.locationId)}/customFields/${encodeURIComponent(fieldId)}`, { method: "GET" });
+    assertOpportunityStatusFieldMetadata(await body(response), { fieldId, locationId: config.locationId, ...descriptor });
+  }
+}
+export function paymentStatusProof(job: Pick<PaymentPaidSyncMessage, "contactId" | "opportunityId">,
+  config: PaymentPaidDeliveryConfig, value: string): GhlOpportunityFieldProof {
+  return makeOpportunityFieldProof({ locationId: config.locationId, contactId: job.contactId,
+    opportunityId: job.opportunityId, pipelineId: config.pipelineId }, [
+    { fieldId: config.agreementStatusFieldId, fieldValue: "Signed" },
+    { fieldId: config.paymentStatusFieldId, fieldValue: value },
+  ]);
+}
+export function requireSignedPaymentOpportunity(opportunity: Record<string, unknown>, config: PaymentPaidDeliveryConfig): string | null {
+  if (readOpportunityStatusField(opportunity, config.agreementStatusFieldId) !== "Signed") throw new OpportunityStatusFieldError();
+  return readOpportunityStatusField(opportunity, config.paymentStatusFieldId);
+}
+/** The locked worker must supply exact reconciled COMPLETED Square evidence; this adapter never infers payment from CRM state. */
+export async function deliverPaymentPaidToGhl(job: PaymentPaidSyncMessage, config: PaymentPaidDeliveryConfig,
+  transport: typeof fetch = fetch): Promise<GhlOpportunityFieldProof> {
   if (job.marketId !== config.marketId || job.seasonId !== config.seasonId || job.locationId !== config.locationId
     || job.squareEnvironment !== config.squareEnvironment
-    || ![job.contactId, job.opportunityId].every(id => ID.test(id))) throw new PaymentPaidDeliveryError("ghl_identity_mismatch");
+    || ![job.applicationId, job.contactId, job.opportunityId, job.paymentOrderId, job.reservationId,
+      job.squareMerchantId, job.squareLocationId, job.squareOrderId, job.paymentId, job.eventId].every(id => typeof id === "string" && ID.test(id))
+    || !Number.isInteger(job.reservationRevision) || job.reservationRevision < 1) throw new PaymentPaidDeliveryError("ghl_identity_mismatch");
   await readExactPaymentContact(job, config, transport);
   const before = await readExactPaymentOpportunity(job, config, transport);
-  if (before.pipelineStageId === config.confirmedStageId) return;
-  // The paid worker supplies exact reconciled Square evidence under the shared
-  // stage lock. A fast payment need not wait for a Pending-stage worker first.
-  if (before.pipelineStageId !== config.pendingStageId && before.pipelineStageId !== config.agreementCompletedStageId) throw new PaymentPaidDeliveryError("ghl_stage_diverged");
-  // Fetch current contact again immediately before mutation: stale queued email is never a QA permit.
+  await verifyPaymentStatusFieldMetadata(config, transport);
+  const current = requireSignedPaymentOpportunity(before, config);
+  if (current === "Paid") return paymentStatusProof(job, config, "Paid");
+  // Reconciled payment can beat the Ready/Sent workers, but never overwrite an operator's Payment Issue.
+  if (!["Not Ready", "Ready for Payment", "Payment Sent"].includes(current ?? "")) throw new OpportunityStatusFieldError();
   await readExactPaymentContact(job, config, transport);
   await requestPaymentStage(config, transport, `/opportunities/${encodeURIComponent(job.opportunityId)}`, {
-    method: "PUT", body: JSON.stringify({ pipelineStageId: config.confirmedStageId }),
+    method: "PUT", body: JSON.stringify({ customFields: [{ id: config.paymentStatusFieldId, fieldValue: "Paid" }] }),
   });
   const after = await readExactPaymentOpportunity(job, config, transport);
-  if (after.pipelineStageId !== config.confirmedStageId) throw new PaymentPaidDeliveryError("ghl_stage_diverged");
+  if (requireSignedPaymentOpportunity(after, config) !== "Paid") throw new OpportunityStatusFieldError();
+  return paymentStatusProof(job, config, "Paid");
 }

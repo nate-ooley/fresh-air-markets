@@ -41,7 +41,7 @@ export async function POST(request: Request): Promise<Response> {
     await dispatchAgreementStageOutboxById(
       stageOutboxId,
       message => deliverAgreementStageToGhl(message, config),
-      { leaseSeconds: 60 },
+      { fieldScope: config, leaseSeconds: 60 },
     );
   } catch {
     // The durable item remains pending/expired for a later recovery pass.

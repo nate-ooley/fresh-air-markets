@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import postgres from "postgres";
+import { verifiedOpportunityFields, type GhlOpportunityFieldProof } from "./ghl-opportunity-field-proof";
 import { withPaymentStageLock, paymentAgreementStageReadiness, type PaymentStageSql } from "./payment-stage-lock";
 import { paymentPaidSyncFailure, type PaymentPaidSyncScope } from "./payment-paid-sync-pg";
 
@@ -10,7 +11,7 @@ function configuredClient(): Sql {
   return client ??= postgres(process.env.DATABASE_URL, { max: 3, prepare: false, connect_timeout: 5 });
 }
 export type PaymentPendingSyncScope = PaymentPaidSyncScope;
-export interface PaymentPendingSyncMessage extends PaymentPendingSyncScope {
+export interface PaymentPendingSyncMessage extends Omit<PaymentPendingSyncScope, "pipelineId" | "agreementStatusFieldId" | "paymentStatusFieldId"> {
   paymentOrderId: string; applicationId: string; agreementCompletionId: string; contactId: string; opportunityId: string;
   reservationId: string; reservationRevision: number; squareOrderId: string; paymentDueAt: string; attempt: number; leaseToken: string;
 }
@@ -28,7 +29,7 @@ function message(row: Row): PaymentPendingSyncMessage {
     squareOrderId: row.square_order_id, paymentDueAt: row.payment_due_at.toISOString(), attempt: row.attempts, leaseToken: row.lease_token };
 }
 function validate(scope: PaymentPendingSyncScope, limit: number): void {
-  if (scope.marketId === "demo-market" || ![scope.marketId, scope.seasonId, scope.locationId].every(v => /^[A-Za-z0-9_-]{1,192}$/.test(v))
+  if (scope.marketId === "demo-market" || ![scope.marketId, scope.seasonId, scope.locationId, scope.pipelineId, scope.agreementStatusFieldId, scope.paymentStatusFieldId].every(v => typeof v === "string" && /^[A-Za-z0-9_-]{1,192}$/.test(v))
     || !["sandbox", "production"].includes(scope.squareEnvironment) || !Number.isInteger(limit) || limit < 1 || limit > 5) {
     throw new Error("Invalid pending payment sync scope.");
   }
@@ -68,9 +69,10 @@ export async function paymentPendingSyncStillEligible(job: PaymentPendingSyncMes
 }
 type Finish = "delivered" | "deferred" | "cancelled" | "manual_review" | "stale";
 async function finish(job: PaymentPendingSyncMessage, kind: Exclude<Finish, "stale" | "deferred">,
-  sql: PaymentStageSql, code: string | null = null): Promise<Finish> {
+  sql: PaymentStageSql, code: string | null = null, proof: GhlOpportunityFieldProof | null = null): Promise<Finish> {
   const rows = await sql`UPDATE fame_payment_pending_sync_outbox SET status = ${kind},
     delivered_at = ${kind === "delivered" ? sql`statement_timestamp()` : null},
+    delivery_receipt = ${proof ? sql.json(proof as unknown as Parameters<typeof sql.json>[0]) : null},
     locked_until = NULL, lease_token = NULL, last_error_code = ${code}, updated_at = statement_timestamp()
     WHERE payment_order_id = ${job.paymentOrderId} AND lease_token = ${job.leaseToken}
       AND status = 'processing' AND locked_until > statement_timestamp() RETURNING payment_order_id`;
@@ -86,7 +88,7 @@ async function retry(job: PaymentPendingSyncMessage, error: unknown, sql: Paymen
       AND status = 'processing' AND locked_until > statement_timestamp() RETURNING payment_order_id`;
   return rows.length ? failure.terminal ? "manual_review" : "deferred" : "stale";
 }
-export async function dispatchPaymentPendingSync(deliver: (job: PaymentPendingSyncMessage) => Promise<void>, scope: PaymentPendingSyncScope,
+export async function dispatchPaymentPendingSync(deliver: (job: PaymentPendingSyncMessage) => Promise<GhlOpportunityFieldProof>, scope: PaymentPendingSyncScope,
   options: { limit?: number; sql?: Sql } = {}): Promise<{ queued: number; delivered: number; deferred: number; cancelled: number; manual_review: number; stale: number }> {
   const sql = options.sql ?? configuredClient();
   const limit = options.limit ?? 5;
@@ -98,13 +100,18 @@ export async function dispatchPaymentPendingSync(deliver: (job: PaymentPendingSy
     try {
       const locked = await withPaymentStageLock(sql, job, async tx => {
         if (!await paymentPendingSyncStillEligible(job, tx)) return finish(job, "cancelled", tx, "pending_evidence_changed");
-        const prerequisite = await paymentAgreementStageReadiness(tx, job);
+        const prerequisite = await paymentAgreementStageReadiness(tx, job, scope);
         if (prerequisite !== "ready") throw { code: `agreement_prerequisite_${prerequisite}` };
-        await deliver(job);
+        const proof = await deliver(job);
+        if (!verifiedOpportunityFields(proof, { locationId: job.locationId, contactId: job.contactId,
+          opportunityId: job.opportunityId, pipelineId: scope.pipelineId, fields: [
+            { fieldId: scope.agreementStatusFieldId, fieldValue: "Signed" },
+            { fieldId: scope.paymentStatusFieldId, fieldValue: "Ready for Payment" },
+          ] })) throw { code: "ghl_field_proof_invalid" };
         // A paid webhook may commit during provider work. The paid worker shares
         // this lock, so it can only advance to Confirmed after this operation ends.
         return await paymentPendingSyncStillEligible(job, tx)
-          ? finish(job, "delivered", tx) : finish(job, "cancelled", tx, "pending_evidence_changed");
+          ? finish(job, "delivered", tx, null, proof) : finish(job, "cancelled", tx, "pending_evidence_changed");
       });
       if (!locked.acquired) throw { code: "payment_stage_busy" };
       result[locked.value]++;

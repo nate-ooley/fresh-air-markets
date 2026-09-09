@@ -17,7 +17,9 @@ lease, `send_started` record, receipts and recovery decisions.
 | `GHL_PAYMENT_EMAIL_FROM` | Config | One verified sending mailbox, without display-name syntax or a recipient list |
 | `GHL_APPLICATION_PIPELINE_ID` | Config | The actual Production application pipeline ID |
 | `GHL_QA_APPLICATION_PIPELINE_ID` | Config | Preview only: a separate, verified QA pipeline ID |
-| `GHL_PAYMENT_PENDING_STAGE_ID` | Config | Exact payment-pending stage in the selected pipeline |
+| `GHL_APPLICATION_APPROVED_STAGE_ID` | Config | Approved stage in the selected pipeline |
+| `GHL_AGREEMENT_STATUS_FIELD_ID` | Config | Exact Opportunity Vendor Agreement Status field ID |
+| `GHL_PAYMENT_STATUS_FIELD_ID` | Config | Exact Opportunity Vendor Payment Status field ID |
 | `GHL_PAYMENT_QA_ROUTING_VERIFIED` | Config | Preview only: `true` after native downstream test routing is verified |
 | `FAME_VENDOR_PORTAL_ORIGIN` | Config | Exact Preview HTTPS `*.vercel.app` origin; Production must be `https://freshairmarketsandevents.com` |
 
@@ -40,7 +42,7 @@ SMS, scheduled delivery and reply-all are never included by the adapter.
    reservation/revision/invitation generation.
 2. Call `preflightPaymentEmail`. It reads the exact CRM contact and opportunity,
    requiring matching contact, location, current email, selected pipeline,
-   payment-pending stage and open status. No CRM write occurs.
+   Approved/open status, Vendor Agreement Status Signed and Vendor Payment Status Ready for Payment. Configured field metadata and the exact local readiness receipt must also verify. No CRM write occurs.
 3. Recheck eligibility under the dispatcher's reservation lock, then commit
    `send_started` before sending. Erase stored invitation ciphertext at that
    boundary; keep the current process's payload only for the one send attempt.
@@ -52,6 +54,11 @@ SMS, scheduled delivery and reply-all are never included by the adapter.
    outbound direction, the exact subject/reference, singleton To and empty
    CC/BCC. Store pending/sent/delivered/failed evidence without upgrading
    acceptance into delivery.
+6. Persist verified sent/delivered email evidence before synchronizing Vendor
+   Payment Status to Payment Sent. Use the shared reservation lock with Paid,
+   recheck the exact current checkout and never overwrite reconciled Paid.
+   A CRM-only failure retries only that field synchronization (at most five
+   attempts), never the email POST. The manager UI shows this separate status.
 
 The 48-hour deadline comes from the existing payment order. Sending, retrying,
 or reviewing an email never resets it. Invitations must use the exact configured
@@ -95,6 +102,6 @@ The isolated tests use mock transports and send nothing.
   and [Get messages](https://marketplace.gohighlevel.com/docs/ghl/conversations/get-messages/):
   exact contact/location investigation only when a receipt is missing.
 - [Scopes](https://marketplace.gohighlevel.com/docs/Authorization/Scopes/):
-  contacts and opportunities read permissions, conversation read permissions,
+  contacts read, opportunities read/write, locations/customFields.readonly, conversation read permissions,
   message read and message write permissions. This adapter requires no contact
   write/upsert permission.

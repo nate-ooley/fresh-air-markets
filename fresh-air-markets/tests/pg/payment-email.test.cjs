@@ -2,13 +2,15 @@ const { test, before, beforeEach, after } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { randomUUID } = require('node:crypto');
+const { randomUUID, createHash } = require('node:crypto');
 const postgres = require('postgres');
 const { reserveFinalApplication } = require('../../.test-build/final-reservation-pg.js');
 const { createVendorAccessToken, hashVendorAccessToken } = require('../../.test-build/vendor-payment-access.js');
 const { issueVendorPaymentAccess } = require('../../.test-build/vendor-payment-access-pg.js');
 const { queuePaymentEmail, getPaymentEmailStatus, dispatchPaymentEmails } = require('../../.test-build/payment-email-pg.js');
 const { decryptPaymentEmailInvitation } = require('../../.test-build/payment-email.js');
+const { persistSquarePaymentWebhook } = require('../../.test-build/square-webhook-pg.js');
+const { withPaymentStageLock } = require('../../.test-build/payment-stage-lock.js');
 const url = new URL(process.env.DATABASE_TEST_URL || 'postgres://invalid/');
 assert.ok(['localhost', '127.0.0.1'].includes(url.hostname) && url.pathname === '/fresh_air_test', 'Set DATABASE_TEST_URL to local fresh_air_test only');
 const schema = 'qa_payment_email';
@@ -32,9 +34,10 @@ before(async () => {
     for (const file of [
       '001-application-handoff.sql', '004-application-review-outbox.sql',
       '005-agreement-completion-outbox.sql', '006-application-document-ledger.sql',
+      '007-agreement-completion-stage-outbox.sql', '009-agreement-stage-terminal-state.sql',
       '011-square-payment-checkout-ledger.sql', '012-square-webhook-events.sql',
       '013-final-reservation-writer.sql', '014-square-payment-expiry.sql',
-      '017-vendor-payment-access.sql', '018-payment-paid-sync-outbox.sql', '019-payment-email-outbox.sql', '020-payment-pending-sync-outbox.sql',
+      '017-vendor-payment-access.sql', '018-payment-paid-sync-outbox.sql', '019-payment-email-outbox.sql', '020-payment-pending-sync-outbox.sql', '021-opportunity-field-delivery-receipts.sql',
     ]) await migration.unsafe(fs.readFileSync(path.join(__dirname, '../../docs/migrations', file), 'utf8'));
   } finally { await migration.end(); }
 });
@@ -95,6 +98,10 @@ async function seedEligibleApplication(sql = first, patch = {}) {
   return { applicationId, sourceEventId, reviewEventId, agreementId, insuranceId };
 }
 
+function pendingFieldProof(applicationId) { return { deliveryContract: 'ghl_opportunity_fields_v1', locationId, contactId: `contact-${applicationId}`,
+  opportunityId: `opportunity-${applicationId}`, pipelineId: 'qa-payment-pipeline', fields: [{ fieldId: 'qa-agreement-status', fieldValue: 'Signed' },
+    { fieldId: 'qa-payment-status', fieldValue: 'Ready for Payment' }] }; }
+
 async function finalReservation({ nonprofit = false, checkout = true, email, pendingStage = 'delivered' } = {}) {
   const application = await seedEligibleApplication(first, { email });
   const result = await reserveFinalApplication({
@@ -114,7 +121,7 @@ async function finalReservation({ nonprofit = false, checkout = true, email, pen
         'USD', 4000, ${randomUUID()}, 'checkout_created', ${randomUUID()}, ${randomUUID()},
         'https://sandbox.square.link/u/qa-private', ${now}, ${due})`;
     if (pendingStage !== 'pending') await first`UPDATE fame_payment_pending_sync_outbox SET status = ${pendingStage},
-      delivered_at = ${pendingStage === 'delivered' ? now : null} WHERE reservation_id = ${id}`;
+      delivered_at = ${pendingStage === 'delivered' ? now : null}, delivery_receipt = ${pendingStage === 'delivered' ? first.json(pendingFieldProof(application.applicationId)) : null} WHERE reservation_id = ${id}`;
   }
   return id;
 }
@@ -122,7 +129,7 @@ async function finalReservation({ nonprofit = false, checkout = true, email, pen
 const secret = 'local-disposable-email-test-secret-0123456789-ABCD';
 const deliveryConfig = {
   apiToken: 'isolated-no-network-token', locationId, marketId,
-  pipelineId: 'qa-payment-pipeline', pendingStageId: 'qa-payment-pending',
+  pipelineId: 'qa-payment-pipeline', approvedStageId: 'qa-approved', agreementStatusFieldId: 'qa-agreement-status', paymentStatusFieldId: 'qa-payment-status',
   fromEmail: 'nate@autocraftstudios.com', portalOrigin: config.portalOrigin, mode: 'qa',
 };
 const shared = { marketId, accessConfig: config, deliveryConfig, secret, now };
@@ -136,6 +143,7 @@ async function provider(id, overrides = {}) {
   const row = await state(id);
   const calls = [];
   let posted;
+  let paymentStatus = 'Ready for Payment';
   const transport = async (url, init) => {
     calls.push({ url, method: init.method });
     if (overrides.request) {
@@ -145,9 +153,22 @@ async function provider(id, overrides = {}) {
     if (url.includes('/contacts/')) return Response.json({ contact: {
       id: row.contact_id, locationId, email: row.recipient_email, ...overrides.contact,
     } });
+    if (url.includes('/customFields/')) {
+      const agreement = url.endsWith('/qa-agreement-status');
+      return Response.json({ customField: { id: agreement ? 'qa-agreement-status' : 'qa-payment-status', locationId,
+        model: 'opportunity', name: agreement ? 'Vendor Agreement Status' : 'Vendor Payment Status', dataType: 'SINGLE_OPTIONS',
+        fieldKey: agreement ? 'opportunity.vendor_agreement_status' : 'opportunity.vendor_payment_status',
+        picklistOptions: agreement ? ['Not Sent', 'Sent', 'Signed'] : ['Not Ready', 'Ready for Payment', 'Payment Sent', 'Paid', 'Payment Issue'] } });
+    }
+    if (init.method === 'PUT') {
+      if (overrides.put) { const response = await overrides.put(url, init, row); if (response) return response; }
+      paymentStatus = JSON.parse(init.body).customFields[0].fieldValue;
+      return Response.json({});
+    }
     if (url.includes('/opportunities/')) return Response.json({ opportunity: {
       id: row.opportunity_id, contactId: row.contact_id, locationId,
-      pipelineId: deliveryConfig.pipelineId, pipelineStageId: deliveryConfig.pendingStageId, status: 'open', ...overrides.opportunity,
+      pipelineId: deliveryConfig.pipelineId, pipelineStageId: deliveryConfig.approvedStageId, status: 'open',
+      customFields: [{ id: 'qa-agreement-status', fieldValue: 'Signed' }, { id: 'qa-payment-status', fieldValue: paymentStatus }], ...overrides.opportunity,
     } });
     if (init.method === 'POST') {
       posted = JSON.parse(init.body);
@@ -404,7 +425,8 @@ test('email requested immediately after checkout waits for exact Pending-stage r
     assert.equal(row.invitation_hash, original.invitation_hash);
   }
   assert.equal(mock.calls.length, 0, 'no provider preflight before prerequisite receipt');
-  await first`UPDATE fame_payment_pending_sync_outbox SET status = 'delivered', delivered_at = ${now}, locked_until = NULL, lease_token = NULL WHERE reservation_id = ${id}`;
+  await first`UPDATE fame_payment_pending_sync_outbox SET status = 'delivered', delivered_at = ${now}, locked_until = NULL, lease_token = NULL,
+    delivery_receipt = ${first.json(pendingFieldProof(original.application_id))} WHERE reservation_id = ${id}`;
   await dispatch(mock.transport, { now: future(10 * 60_000) });
   assert.equal(mock.posts(), 1); assert.equal((await state(id)).state, 'accepted');
   await dispatch(mock.transport, { now: future(11 * 60_000) });
@@ -437,4 +459,95 @@ test('missing, mismatched or failed Pending-stage prerequisite fails closed with
     assert.equal(row.invitation_ciphertext, null); assert.equal(row.send_started_at, null);
     assert.equal((await publicStatus(id)).canRetryPreflight, true);
   }
+});
+
+async function completePayment(id) {
+  const [order] = await first`SELECT * FROM fame_payment_orders WHERE reservation_id = ${id}`;
+  const at = future(60_000).toISOString();
+  const event = { eventId: randomUUID(), eventType: 'payment.updated', merchantId: order.square_merchant_id, occurredAt: at,
+    payment: { id: 'paid-' + randomUUID(), status: 'COMPLETED', locationId: order.square_location_id, orderId: order.square_order_id,
+      amountCents: Number(order.expected_total_cents), currency: 'USD', createdAt: at, updatedAt: at } };
+  event.rawBodySha256 = createHash('sha256').update(JSON.stringify(event)).digest('hex');
+  assert.equal((await persistSquarePaymentWebhook(event, { environment: 'sandbox', now: future(60_000) }, first)).kind, 'paid');
+}
+
+test('provider Sent proof commits before field PUT; field failure retries only field sync and preserves email facts', async () => {
+  const id = await finalReservation(); await queue(id); let putCount = 0;
+  const mock = await provider(id, { receipt: { status: 'sent' }, put: async (_url, init) => {
+    const recorded = await state(id);
+    assert.equal(recorded.provider_receipt_status, 'sent'); assert.ok(recorded.provider_receipt_verified_at);
+    assert.ok(recorded.sent_at); assert.equal(recorded.invitation_ciphertext, null);
+    assert.deepEqual(JSON.parse(init.body), { customFields: [{ id: 'qa-payment-status', fieldValue: 'Payment Sent' }] });
+    putCount++;
+    if (putCount === 1) return new Response('', { status: 503 });
+  } });
+  await dispatch(mock.transport);
+  await dispatch(mock.transport, { now: future(60_000) });
+  assert.equal((await state(id)).state, 'accepted');
+  assert.equal((await state(id)).payment_sent_sync_status, 'pending');
+  assert.equal((await state(id)).payment_sent_sync_attempts, 1);
+  const receiptReads = mock.calls.filter(c => c.url.includes('/messages/email/')).length;
+  await dispatch(mock.transport, { now: future(180_000) });
+  assert.equal((await state(id)).payment_sent_sync_status, 'delivered');
+  assert.equal((await state(id)).payment_sent_delivery_receipt.fields[1].fieldValue, 'Payment Sent');
+  assert.equal(mock.posts(), 1); assert.equal(putCount, 2);
+  assert.equal(mock.calls.filter(c => c.url.includes('/messages/email/')).length, receiptReads, 'stored provider proof avoids another receipt read during field retry');
+});
+
+test('five field-sync failures park separately without changing delivered email or submitting another POST', async () => {
+  const id = await finalReservation(); await queue(id);
+  const mock = await provider(id, { put: async () => new Response('', { status: 503 }) });
+  await dispatch(mock.transport);
+  for (let i = 1; i <= 5; i++) await dispatch(mock.transport, { now: future(i * 3600_000) });
+  const row = await state(id);
+  assert.equal(row.state, 'delivered'); assert.ok(row.sent_at); assert.ok(row.provider_receipt_verified_at);
+  assert.equal(row.payment_sent_sync_status, 'failed'); assert.equal(row.payment_sent_sync_attempts, 5);
+  const calls = mock.calls.length;
+  await dispatch(mock.transport, { now: future(6 * 3600_000) });
+  assert.equal(mock.calls.length, calls); assert.equal(mock.posts(), 1);
+  assert.equal((await publicStatus(id)).paymentSentSyncStatus, 'failed');
+});
+
+test('Paid serialization defers Sent field without budget loss then skips lower update after exact payment commits', async () => {
+  const id = await finalReservation(); await queue(id);
+  const mock = await provider(id); await dispatch(mock.transport);
+  await withPaymentStageLock(second, { marketId, reservationId: id }, async () => {
+    await dispatch(mock.transport, { now: future(60_000) });
+    const row = await state(id);
+    assert.equal(row.state, 'delivered'); assert.equal(row.payment_sent_sync_status, 'pending');
+    assert.equal(row.payment_sent_sync_attempts, 0);
+    assert.equal(mock.calls.filter(c => c.method === 'PUT').length, 0);
+    await completePayment(id);
+  });
+  await dispatch(mock.transport, { now: future(120_000) });
+  assert.equal((await state(id)).payment_sent_sync_status, 'skipped_paid');
+  assert.equal(mock.calls.filter(c => c.method === 'PUT').length, 0); assert.equal(mock.posts(), 1);
+});
+
+test('a delivered legacy/misconfigured field receipt cannot authorize email from another field ID', async () => {
+  const id = await finalReservation();
+  const [job] = await first`SELECT * FROM fame_payment_pending_sync_outbox WHERE reservation_id = ${id}`;
+  const mismatched = pendingFieldProof(job.application_id); mismatched.fields[1].fieldId = 'different-payment-field';
+  await first`UPDATE fame_payment_pending_sync_outbox SET delivery_receipt = ${first.json(mismatched)} WHERE reservation_id = ${id}`;
+  await queue(id); const mock = await provider(id);
+  await dispatch(mock.transport);
+  assert.equal((await state(id)).state, 'failed'); assert.equal(mock.calls.length, 0);
+  assert.equal((await state(id)).safe_error, 'payment_email_pending_prerequisite_failed');
+});
+
+test('native Paid without exact reconciled Square evidence parks field sync without labeling payment confirmed', async () => {
+  const id = await finalReservation(); await queue(id);
+  const options = {};
+  const mock = await provider(id, options);
+  await dispatch(mock.transport);
+  options.opportunity = { customFields: [{ id: 'qa-agreement-status', fieldValue: 'Signed' }, { id: 'qa-payment-status', fieldValue: 'Paid' }] };
+  await dispatch(mock.transport, { now: future(60_000) });
+  const row = await state(id);
+  assert.equal(row.state, 'delivered'); assert.ok(row.sent_at); assert.ok(row.provider_receipt_verified_at);
+  assert.equal(row.payment_sent_sync_status, 'failed');
+  assert.equal(row.payment_sent_sync_error, 'payment_email_sent_paid_evidence_missing');
+  assert.equal(row.payment_sent_delivery_receipt, null);
+  assert.equal((await publicStatus(id)).paymentSentSyncStatus, 'failed');
+  assert.equal(mock.posts(), 1); assert.equal(mock.calls.filter(c => c.method === 'PUT').length, 0);
+  assert.equal((await first`SELECT 1 FROM fame_payment_paid_sync_eligible WHERE reservation_id = ${id}`).length, 0);
 });
