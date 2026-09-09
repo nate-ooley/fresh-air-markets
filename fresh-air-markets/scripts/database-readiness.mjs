@@ -95,7 +95,8 @@ export function expectedObjects(migrations) {
   for (const { source } of migrations) {
     for (const match of source.matchAll(/CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([a-z_][a-z0-9_]*)/gi)) objects.push({ kind: 'table', name: match[1] });
     for (const match of source.matchAll(/CREATE\s+(?:UNIQUE\s+)?INDEX\s+(?:IF\s+NOT\s+EXISTS\s+)?([a-z_][a-z0-9_]*)/gi)) objects.push({ kind: 'index', name: match[1] });
-    for (const match of source.matchAll(/CREATE\s+TRIGGER\s+([a-z_][a-z0-9_]*)/gi)) objects.push({ kind: 'trigger', name: match[1] });
+    for (const match of source.matchAll(/CREATE\s+(?:CONSTRAINT\s+)?TRIGGER\s+([a-z_][a-z0-9_]*)/gi)) objects.push({ kind: 'trigger', name: match[1] });
+    for (const match of source.matchAll(/CREATE\s+(?:OR\s+REPLACE\s+)?VIEW\s+([a-z_][a-z0-9_]*)/gi)) objects.push({ kind: 'view', name: match[1] });
   }
   return [...new Map(objects.map(object => [`${object.kind}:${object.name}`, object])).values()];
 }
@@ -116,11 +117,11 @@ export function compareHistory(migrations, history) {
 }
 
 async function catalog(sql) {
-  const relations = await sql`SELECT c.relname AS name, CASE WHEN c.relkind = 'i' THEN 'index' ELSE 'table' END AS kind,
+  const relations = await sql`SELECT c.relname AS name, CASE WHEN c.relkind = 'i' THEN 'index' WHEN c.relkind = 'v' THEN 'view' ELSE 'table' END AS kind,
       COALESCE(i.indisvalid, true) AS valid
     FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
     LEFT JOIN pg_index i ON i.indexrelid = c.oid
-    WHERE n.nspname = current_schema() AND c.relkind IN ('r', 'p', 'i')`;
+    WHERE n.nspname = current_schema() AND c.relkind IN ('r', 'p', 'i', 'v')`;
   const triggers = await sql`SELECT t.tgname AS name, 'trigger' AS kind, t.tgenabled IN ('O', 'A') AS valid
     FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid
     JOIN pg_namespace n ON n.oid = c.relnamespace

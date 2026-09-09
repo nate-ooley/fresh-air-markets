@@ -119,26 +119,31 @@ function usableForInvitation(view: VendorPaymentView | null): view is VendorPaym
 export async function issueVendorPaymentAccess(
   input: Parameters<VendorPaymentAccessStore["issue"]>[0], sql: Sql = configuredClient(),
 ): Promise<VendorInvitationIssueResult> {
+  return sql.begin(tx => issueVendorPaymentAccessWithinTransaction(input, tx)) as Promise<VendorInvitationIssueResult>;
+}
+
+/** Shared transaction lets the durable email ledger enqueue and rotate atomically. */
+export async function issueVendorPaymentAccessWithinTransaction(
+  input: Parameters<VendorPaymentAccessStore["issue"]>[0], tx: postgres.TransactionSql,
+): Promise<VendorInvitationIssueResult> {
   if (!/^[a-f0-9]{64}$/.test(input.tokenHash) || !Number.isFinite(input.now.valueOf())) throw new Error("Invalid access issue input");
-  return sql.begin(async tx => {
-    // Every issuance/exchange takes the same reservation lock first. Rotating
-    // a link therefore cannot race a consumed invitation into a live session.
-    const row = await snapshot(tx, input.config, input.reservationId, true);
-    if (!row) return { kind: "not_found" };
-    const view = paymentView(row, input.config, input.now);
-    if (!usableForInvitation(view)) return { kind: "not_eligible" };
-    const expires = view.status === "pending"
-      ? new Date(Math.min(input.now.valueOf() + VENDOR_INVITATION_MS, Date.parse(view.paymentDueAt!)))
-      : new Date(input.now.valueOf() + VENDOR_SESSION_MS);
-    await tx`UPDATE fame_vendor_payment_sessions SET revoked_at = ${input.now}
-      WHERE market_id = ${input.config.marketId} AND reservation_id = ${input.reservationId} AND revoked_at IS NULL`;
-    await tx`UPDATE fame_vendor_payment_invitations SET revoked_at = ${input.now}
-      WHERE market_id = ${input.config.marketId} AND reservation_id = ${input.reservationId} AND revoked_at IS NULL`;
-    await tx`INSERT INTO fame_vendor_payment_invitations
-      (token_hash, market_id, reservation_id, reservation_revision, created_at, expires_at)
-      VALUES (${input.tokenHash}, ${input.config.marketId}, ${input.reservationId}, ${row.revision}, ${input.now}, ${expires})`;
-    return { kind: "issued", expiresAt: expires.toISOString() };
-  }) as Promise<VendorInvitationIssueResult>;
+  // Every issuance/exchange takes the same reservation lock first. Rotating
+  // a link therefore cannot race a consumed invitation into a live session.
+  const row = await snapshot(tx, input.config, input.reservationId, true);
+  if (!row) return { kind: "not_found" };
+  const view = paymentView(row, input.config, input.now);
+  if (!usableForInvitation(view)) return { kind: "not_eligible" };
+  const expires = view.status === "pending"
+    ? new Date(Math.min(input.now.valueOf() + VENDOR_INVITATION_MS, Date.parse(view.paymentDueAt!)))
+    : new Date(input.now.valueOf() + VENDOR_SESSION_MS);
+  await tx`UPDATE fame_vendor_payment_sessions SET revoked_at = ${input.now}
+    WHERE market_id = ${input.config.marketId} AND reservation_id = ${input.reservationId} AND revoked_at IS NULL`;
+  await tx`UPDATE fame_vendor_payment_invitations SET revoked_at = ${input.now}
+    WHERE market_id = ${input.config.marketId} AND reservation_id = ${input.reservationId} AND revoked_at IS NULL`;
+  await tx`INSERT INTO fame_vendor_payment_invitations
+    (token_hash, market_id, reservation_id, reservation_revision, created_at, expires_at)
+    VALUES (${input.tokenHash}, ${input.config.marketId}, ${input.reservationId}, ${row.revision}, ${input.now}, ${expires})`;
+  return { kind: "issued", expiresAt: expires.toISOString() };
 }
 
 export async function exchangeVendorPaymentAccess(

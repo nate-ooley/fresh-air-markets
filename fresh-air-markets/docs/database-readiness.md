@@ -3,7 +3,7 @@
 The Preview portal has connected to Neon successfully: its public booth API,
 manager login and authenticated dashboard were previously verified. Those checks
 initialize only the base portal tables. They do **not** apply the application,
-agreement, document, reservation, or Square ledgers in migrations 001–017.
+agreement, document, reservation, or Square ledgers in migrations 001–019.
 
 The checked-in runner closes that deployment gap without creating a public
 administration endpoint. It sends no email, SMS, HighLevel request or Square

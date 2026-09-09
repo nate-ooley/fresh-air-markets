@@ -36,6 +36,7 @@ const order = {
   id: '22222222-2222-4222-8222-222222222222', checkoutUrl: 'https://sandbox.square.link/u/test',
   paymentDueAt: '2026-10-02T16:00:00Z', status: 'checkout_created',
 };
+const PaymentEmailBoundary = () => null;
 
 test('requested-date suggestions accept exact canonical labels and ISO values without moving historical dates', () => {
   assert.deepEqual(helper.requestedReservationDates([
@@ -111,6 +112,7 @@ function renderPanel(options = {}) {
       useEffect() {},
     },
     'next/navigation': { useRouter: () => router },
+    '@/components/PaymentEmailPanel': { default: PaymentEmailBoundary },
   }).default;
   const element = component({
     applicationId: '33333333-3333-4333-8333-333333333333', sourceEventId: 'qa:current',
@@ -122,6 +124,7 @@ function renderPanel(options = {}) {
   }
   return {
     updates,
+    emailPanels: () => elements(element, node => node.type === PaymentEmailBoundary),
     submit: () => elements(element, node => node.type === 'form')[0].props.onSubmit({ preventDefault() {} }),
     click: async label => {
       const button = elements(element, node => node.type === 'button' && node.props.children === label)[0];
@@ -212,3 +215,13 @@ test('private access requires explicit replacement consent and keeps the returne
   assert.match(panel.updates.find(([index, value]) => index === 8 && value)[1], /No email has been sent/);
   assert.deepEqual(panel.updates.find(([index, value]) => index === 3 && value)[1], { invitationUrl: payload.invitationUrl, expiresAt: payload.expiresAt });
 }));
+
+test('email controls use the exact pending reservation and remain hidden for terminal, held or nonprofit records', () => {
+  const panels = renderPanel({ reservation: { ...reservation, state: 'payment_pending' } }).emailPanels();
+  assert.equal(panels.length, 1);
+  assert.deepEqual(panels[0].props, { reservationId: reservation.id });
+  for (const state of ['held', 'paid', 'expired', 'cancelled', 'declined', 'manual_review']) {
+    assert.equal(renderPanel({ reservation: { ...reservation, state }, order }).emailPanels().length, 0, state);
+  }
+  assert.equal(renderPanel({ reservation: { ...reservation, state: 'confirmed', paymentRequired: false, totalCents: 0 }, order }).emailPanels().length, 0);
+});

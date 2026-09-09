@@ -2,6 +2,7 @@
 
 import { type FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
+import PaymentEmailPanel from "@/components/PaymentEmailPanel";
 import { FRESH_AIR_SEASON_DATES } from "@/lib/fresh-air-season";
 import { FAME_VENDOR_CATEGORIES } from "@/lib/vendor-booking-rules";
 import {
@@ -362,6 +363,8 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
               </div>}
             </section>
           )}
+
+          {reservation.paymentRequired && reservation.state === "payment_pending" && <PaymentEmailPanel reservationId={reservation.id} />}
 
           {canCreateAccess && (
             <section className="rounded-2xl border border-pine/15 p-5">
