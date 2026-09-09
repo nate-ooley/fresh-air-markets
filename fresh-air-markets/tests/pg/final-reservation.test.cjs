@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { randomUUID } = require('node:crypto');
 const postgres = require('postgres');
-const { reserveFinalApplication } = require('../../.test-build/final-reservation-pg.js');
+const { reserveFinalApplication, getFinalApplicationReservation } = require('../../.test-build/final-reservation-pg.js');
 
 // This suite creates and drops only a private schema inside the disposable CI DB.
 const url = new URL(process.env.DATABASE_TEST_URL || 'postgres://invalid/');
@@ -218,4 +218,16 @@ test('a provenance-ledger failure rolls back reservation and allocations before 
     selectedDates: [calendarDates[0]],
     idempotencyKey: '55555555-5555-4555-8555-555555555555',
   }), second)).kind, 'created');
+});
+
+
+test('manager reload returns only committed same-market reservation and no raw evidence', async () => {
+  const app = await seedEligibleApplication();
+  const applicationId = app.applicationId;
+  assert.deepEqual(await getFinalApplicationReservation(marketId, applicationId, first), { reservation: null });
+  const result = await reserveFinalApplication({ marketId, applicationId, actorAccountId: marketId, selection: selection(), config: config(), now }, first);
+  assert.equal(result.kind, 'created');
+  assert.deepEqual(await getFinalApplicationReservation(marketId, applicationId, first), { reservation: result.reservation });
+  assert.equal(await getFinalApplicationReservation('foreign-market', applicationId, first), null);
+  assert.equal(await getFinalApplicationReservation(marketId, randomUUID(), first), null);
 });

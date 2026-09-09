@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSessionAccountId } from "@/lib/auth";
-import { squarePreviewSandboxRuntimeConfig, verifySquareSandboxSetup } from "@/lib/square";
-import { dispatchSquareSandboxCheckout, validSquareReservationId } from "@/lib/square-payment";
+import { squarePaymentRuntimeConfig, squarePortalOrigin, verifySquareIdentity } from "@/lib/square";
+import { dispatchSquareCheckout, validSquareReservationId } from "@/lib/square-payment";
 import { postgresSquarePaymentCheckoutStore } from "@/lib/square-payment-pg";
 import { squareQaCheckoutTransport, squareQaSupportConfig } from "@/lib/square-qa-faults";
 import { DEMO_MARKET_ID } from "@/lib/seed";
@@ -28,15 +28,30 @@ function responseForOrder(status: 200 | 201, order: {
 /**
  * Authenticated manager action. This path accepts no price, quantity, vendor,
  * reservation revision, or redirect URL from the request. It can create only
- * a Sandbox hosted link for an already-committed, market-scoped reservation.
+ * a hosted link in the explicitly configured environment for an already-committed, market-scoped reservation.
  */
-export async function POST(_request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+export async function POST(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const marketId = await getSessionAccountId();
   if (!marketId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   if (marketId === DEMO_MARKET_ID) {
     return NextResponse.json({ error: "Payment checkout requires a private market account." }, {
       status: 403, headers: { "Cache-Control": "no-store" },
     });
+  }
+  // Browser checkout is a state-changing manager action. Reject hostile form
+  // posts before provider or storage work; originless authenticated CLI QA is
+  // retained, but a browser's cross-site Fetch Metadata signal is never ignored.
+  const origin = request.headers.get("origin");
+  if (request.headers.get("sec-fetch-site") === "cross-site") {
+    return NextResponse.json({ error: "Same-origin checkout is required." }, { status: 403 });
+  }
+  if (origin !== null) {
+    let expectedOrigin;
+    try { expectedOrigin = squarePortalOrigin(process.env); }
+    catch { return NextResponse.json({ error: "Square checkout is not configured." }, { status: 503 }); }
+    if (origin !== expectedOrigin) {
+      return NextResponse.json({ error: "Same-origin checkout is required." }, { status: 403 });
+    }
   }
   if (!process.env.DATABASE_URL) {
     return NextResponse.json({ error: "Persistent payment storage is not configured." }, { status: 503 });
@@ -57,23 +72,27 @@ export async function POST(_request: NextRequest, { params }: { params: Promise<
   } catch {
     // A copied QA control in a non-Preview/Sandbox environment is a hard
     // configuration failure. Do not disclose the setting or continue.
-    return NextResponse.json({ error: "Square Sandbox checkout is not configured." }, { status: 503 });
+    return NextResponse.json({ error: "Square checkout is not configured." }, { status: 503 });
   }
 
   let setup;
   try {
-    setup = squarePreviewSandboxRuntimeConfig(process.env);
+    setup = squarePaymentRuntimeConfig(process.env);
   } catch {
-    return NextResponse.json({ error: "Square Sandbox checkout is not configured." }, { status: 503 });
+    return NextResponse.json({ error: "Square checkout is not configured." }, { status: 503 });
+  }
+
+  if (setup.environment === "production" && process.env.FAME_MARKET_ACCOUNT_ID?.trim() !== marketId) {
+    return NextResponse.json({ error: "Payment checkout is not configured for this market." }, { status: 403 });
   }
 
   let identity;
   try {
-    // These are read-only Sandbox identity/location checks. An operator must
+    // These are read-only provider identity/location checks. An operator must
     // not be able to create an order under a stale or foreign location.
-    identity = await verifySquareSandboxSetup(setup);
+    identity = await verifySquareIdentity(setup);
   } catch {
-    return NextResponse.json({ error: "Square Sandbox identity verification is unavailable." }, { status: 503 });
+    return NextResponse.json({ error: "Square identity verification is unavailable." }, { status: 503 });
   }
 
   try {
@@ -82,14 +101,15 @@ export async function POST(_request: NextRequest, { params }: { params: Promise<
       marketId,
       reservationId,
       square: {
-        environment: "sandbox" as const,
+        environment: setup.environment,
         accessToken: setup.accessToken,
         locationId: identity.locationId,
         merchantId: identity.merchantId,
+        ...(setup.checkoutRedirectUrl ? { checkoutRedirectUrl: setup.checkoutRedirectUrl } : {}),
       },
       store: postgresSquarePaymentCheckoutStore,
     };
-    const result = await dispatchSquareSandboxCheckout(transport ? { ...input, transport } : input);
+    const result = await dispatchSquareCheckout(transport ? { ...input, transport } : input);
     if (result.kind === "created") return responseForOrder(201, result.order);
     if (result.kind === "existing") return responseForOrder(200, result.order);
     if (result.kind === "not_found") return NextResponse.json({ error: "Reservation not found." }, { status: 404 });

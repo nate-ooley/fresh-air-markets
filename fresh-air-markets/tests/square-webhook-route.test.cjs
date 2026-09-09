@@ -15,7 +15,7 @@ function loadRoute({ checkout, webhook, handle, persist, qaSupport, qaSigner, qa
   mod.paths = module.paths;
   mod.require = (id) => {
     if (id === '@/lib/square') return {
-      squarePreviewSandboxRuntimeConfig: checkout || (() => ({ environment: 'sandbox', accessToken: 'qa', locationId: 'location' })),
+      squarePaymentRuntimeConfig: checkout || (() => ({ environment: 'sandbox', accessToken: 'qa', locationId: 'location' })),
       squareWebhookConfig: webhook || (() => ({ webhookSignatureKey: 'key', webhookUrl: 'https://unit-test.invalid/webhook' })),
     };
     if (id === '@/lib/square-webhook') return { handleSquarePaymentWebhook: handle || (async (_request, _config, write) => {
@@ -78,11 +78,11 @@ test('Square webhook route passes only the fixed configured identity and persist
   });
 });
 
-test('Square webhook route blocks production, malformed configuration, and persistence diagnostics', async () => {
+test('Square webhook route blocks disabled production, malformed configuration, and persistence diagnostics', async () => {
   await withDatabase(async () => {
     let calls = 0;
     const production = loadRoute({
-      checkout: () => ({ environment: 'production', accessToken: 'qa', locationId: 'location' }),
+      checkout: () => { throw new Error('Live Square payments are disabled.'); },
       handle: async () => { calls++; throw new Error('must not run'); },
     });
     assert.equal((await production.POST(new Request('https://unit-test.invalid/', { method: 'POST' }))).status, 503);
@@ -136,5 +136,20 @@ test('Square webhook rollback is available only to the configured Preview QA sig
     });
     assert.equal((await authorized.POST(new Request('https://unit-test.invalid/webhook', { method: 'POST', body: '{}' }))).status, 200);
     assert.deepEqual(persisted, { environment: 'sandbox', qaRollbackEventId: 'qa-event' });
+  });
+});
+
+
+test('enabled production webhook carries pinned merchant/location and production environment into durable reconciliation', async () => {
+  await withDatabase(async () => {
+    let written;
+    const route = loadRoute({
+      checkout: () => ({ environment: 'production', accessToken: 'never-output', locationId: 'live-location', merchantId: 'live-merchant' }),
+      handle: async (_request, _config, write) => { await write({ eventId: 'event-live' }); return Response.json({ status: 'paid' }); },
+      persist: async (event, config) => { written = { event, config }; return { kind: 'paid' }; },
+    });
+    const result = await route.POST(new Request('https://freshairmarketsandevents.com/api/payments/square/webhook', { method: 'POST' }));
+    assert.equal(result.status, 200);
+    assert.deepEqual(written, { event: { eventId: 'event-live' }, config: { environment: 'production', merchantId: 'live-merchant', locationId: 'live-location' } });
   });
 });

@@ -5,7 +5,7 @@ const path = require('node:path');
 const Module = require('node:module');
 const ts = require('typescript');
 
-function loadRoute({ authorized = true, expiry, configured = true, verified = true, dispatch, qaSupport, expiryTransport } = {}) {
+function loadRoute({ authorized = true, expiry, configured = true, verified = true, dispatch, qaSupport, expiryTransport, environment = 'sandbox' } = {}) {
   const filename = path.resolve(__dirname, '../src/app/api/internal/cron/square-payment-expiry/route.ts');
   const compiled = ts.transpileModule(fs.readFileSync(filename, 'utf8'), {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
@@ -23,11 +23,11 @@ function loadRoute({ authorized = true, expiry, configured = true, verified = tr
       postgresSquarePaymentLinkRetirementStore: { qa: true },
     };
     if (id === '@/lib/square') return {
-      squarePreviewSandboxRuntimeConfig: () => {
+      squarePaymentRuntimeConfig: () => {
         if (!configured) throw new Error('not configured');
-        return { environment: 'sandbox', accessToken: 'private-token', locationId: 'sandbox-location' };
+        return { environment, accessToken: 'private-token', locationId: 'sandbox-location' };
       },
-      verifySquareSandboxSetup: async () => {
+      verifySquareIdentity: async () => {
         if (!verified) throw new Error('unverified');
         return { merchantId: 'sandbox-merchant', locationId: 'sandbox-location' };
       },
@@ -193,5 +193,19 @@ test('an unrelated QA fault fails closed before the scheduler can claim or retir
     assert.deepEqual(await response.json(), { error: 'Square payment expiry QA configuration is not applicable.' });
     assert.equal(expiryCalls, 0);
     assert.equal(dispatchCalls, 0);
+  });
+});
+
+
+test('production expiry is scoped to its provider environment and identity failure happens before database claims', async () => {
+  await withSchedulerEnv(async () => {
+    let claim;
+    const route = loadRoute({ environment: 'production', expiry: async input => { claim = input; return { expiryPending: 0, manualReview: 0 }; } });
+    assert.equal((await route.GET(new Request('https://unit-test.invalid'))).status, 200);
+    assert.equal(claim.environment, 'production');
+    claim = undefined;
+    const failedIdentity = loadRoute({ verified: false, expiry: async input => { claim = input; return { expiryPending: 0, manualReview: 0 }; } });
+    assert.equal((await failedIdentity.GET(new Request('https://unit-test.invalid'))).status, 503);
+    assert.equal(claim, undefined);
   });
 });

@@ -1,4 +1,4 @@
-import { squarePreviewSandboxRuntimeConfig, squareWebhookConfig } from "@/lib/square";
+import { squarePaymentRuntimeConfig, squareWebhookConfig } from "@/lib/square";
 import {
   QA_SIGNER_HEADER,
   squareQaSignerAuthorization,
@@ -25,22 +25,19 @@ export async function POST(request: Request): Promise<Response> {
     const qaSupport = squareQaSupportConfig(process.env);
     const qaSigner = squareQaSignerAuthorization(request.headers.get(QA_SIGNER_HEADER), qaSupport);
     if (qaSigner === "unauthorized") return Response.json({ error: "Unauthorized." }, { status: 401 });
-    const checkout = squarePreviewSandboxRuntimeConfig(process.env);
+    const checkout = squarePaymentRuntimeConfig(process.env);
     const webhook = squareWebhookConfig(process.env);
-    // The only wired payment flow is Sandbox. A production configuration must
-    // receive an explicit launch implementation rather than processing live
-    // events through this test workflow.
     const environment = checkout.environment;
-    if (environment !== "sandbox") {
-      return Response.json({ error: "Square production webhook processing is not enabled." }, { status: 503 });
-    }
+    const identity = environment === "production"
+      ? { merchantId: checkout.merchantId, locationId: checkout.locationId }
+      : {};
     const qaRollbackEventId = squareQaWebhookRollbackEventId(qaSupport, qaSigner);
     return await handleSquarePaymentWebhook(
       request,
       webhook,
       event => persistSquarePaymentWebhook(
         event,
-        qaRollbackEventId ? { environment, qaRollbackEventId } : { environment },
+        qaRollbackEventId ? { environment, ...identity, qaRollbackEventId } : { environment, ...identity },
       ),
     );
   } catch {

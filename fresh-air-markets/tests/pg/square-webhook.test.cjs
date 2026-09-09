@@ -80,7 +80,7 @@ async function seedOrder(patch = {}) {
     VALUES
       (${paymentOrderId}, ${market}, ${reservationId}, 1, 'sandbox', ${merchantId},
        ${locationId}, 'USD', ${totalCents}, ${`idempotency:${reservationId}`}, ${status},
-       ${`link:${reservationId}`}, ${squareOrderId}, 'https://square.link/qa',
+       ${`link:${reservationId}`}, ${squareOrderId}, 'https://sandbox.square.link/qa',
        ${now}, ${deadline}, ${now})`;
   return { reservationId, paymentOrderId, squareOrderId, merchantId, locationId, totalCents, deadline };
 }

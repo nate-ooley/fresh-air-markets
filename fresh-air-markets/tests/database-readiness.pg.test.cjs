@@ -39,17 +39,17 @@ if (!configured) {
   test('read-only check detects unmigrated schema without initializing or writing it', async () => {
     const report = await first.begin('READ ONLY', tx => inspectSchema(tx, migrations, config));
     assert.equal(report.ready, false);
-    assert.equal(report.pending.length, 15);
+    assert.equal(report.pending.length, 17);
     const [row] = await first`SELECT to_regclass('fame_schema_migrations') AS table_name`;
     assert.equal(row.table_name, null);
   });
   test('all migrations apply, preserve existing records, and second run is a no-op', async () => {
     const result = await applyMigrations(first, migrations);
-    assert.equal(result.applied.length, 15);
-    assert.deepEqual(await applyMigrations(first, migrations), { applied: [], alreadyAppliedCount: 15 });
+    assert.equal(result.applied.length, 17);
+    assert.deepEqual(await applyMigrations(first, migrations), { applied: [], alreadyAppliedCount: 17 });
     const report = await first.begin('READ ONLY', tx => inspectSchema(tx, migrations, config));
     assert.equal(report.ready, true);
-    assert.equal(report.appliedCount, 15);
+    assert.equal(report.appliedCount, 17);
     assert.equal((await first`SELECT id FROM bookings`)[0].id, 'existing-applicant-booking');
   });
   test('mid-sequence SQL failure rolls back the full schema upgrade and migration history', async () => {
@@ -63,8 +63,8 @@ if (!configured) {
   });
   test('concurrent runners serialize and record every migration once', async () => {
     const results = await Promise.all([applyMigrations(first, migrations), applyMigrations(second, migrations)]);
-    assert.deepEqual(results.map(r => r.applied.length).sort((a, b) => a - b), [0, 15]);
-    assert.equal((await first`SELECT count(*)::int AS count FROM fame_schema_migrations`)[0].count, 15);
+    assert.deepEqual(results.map(r => r.applied.length).sort((a, b) => a - b), [0, 17]);
+    assert.equal((await first`SELECT count(*)::int AS count FROM fame_schema_migrations`)[0].count, 17);
   });
   test('readiness rejects disabled identity guard, wrong tenant and wrong season despite applied history', async () => {
     await applyMigrations(first, migrations);

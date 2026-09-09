@@ -1,4 +1,5 @@
 import postgres from "postgres";
+import type { SquareEnvironment } from "./square";
 import {
   getSquarePaymentOrderForWebhook,
   type SquarePaymentWebhookTarget,
@@ -16,8 +17,10 @@ function configuredClient(): Sql {
 }
 
 export interface SquareWebhookPersistenceConfig {
-  /** Live processing is intentionally unsupported until a separate launch review. */
-  environment: "sandbox";
+  environment: SquareEnvironment;
+  /** Required production identity; obtained from deployment settings and checkout verification. */
+  merchantId?: string;
+  locationId?: string;
   now?: Date;
   /** A route can supply this only from the Preview-only QA support gate. */
   qaRollbackEventId?: string | null;
@@ -114,7 +117,7 @@ type ReceiptClaim = "new" | Extract<SquareWebhookPersistResult, { kind: "duplica
 async function claimReceipt(
   tx: QuerySql,
   event: SquarePaymentWebhookEvent,
-  environment: "sandbox",
+  environment: SquareEnvironment,
   now: Date,
 ): Promise<ReceiptClaim> {
   const inserted = await tx`
@@ -156,7 +159,7 @@ async function claimReceipt(
 async function writeReceiptOutcome(
   tx: QuerySql,
   event: SquarePaymentWebhookEvent,
-  environment: "sandbox",
+  environment: SquareEnvironment,
   input: { paymentOrderId: string | null; disposition: "paid" | "ignored" | "manual_review"; reason: string | null; now: Date },
 ): Promise<void> {
   await tx`
@@ -288,12 +291,23 @@ export async function persistSquarePaymentWebhook(
   config: SquareWebhookPersistenceConfig,
   sql: Sql = configuredClient(),
 ): Promise<SquareWebhookPersistResult> {
+  if (!["sandbox", "production"].includes(config.environment)) throw new Error("Invalid Square environment.");
+  if (config.environment === "production" && (!config.merchantId || !config.locationId || config.qaRollbackEventId)) {
+    throw new Error("Production webhook requires a pinned identity and forbids QA rollback.");
+  }
   const now = config.now ?? new Date();
   if (!Number.isFinite(now.valueOf())) throw new Error("A valid server time is required.");
   return sql.begin(async tx => {
     const claim = await claimReceipt(tx, event, config.environment, now);
     if (claim !== "new") return claim;
 
+    if ((config.merchantId && event.merchantId !== config.merchantId)
+      || (config.locationId && event.payment.locationId !== config.locationId)) {
+      await writeReceiptOutcome(tx, event, config.environment, {
+        paymentOrderId: null, disposition: "manual_review", reason: "configured_square_identity_mismatch", now,
+      });
+      return { kind: "manual_review" };
+    }
     const target = await getSquarePaymentOrderForWebhook({
       environment: config.environment,
       merchantId: event.merchantId,

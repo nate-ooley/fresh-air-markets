@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import postgres from "postgres";
-import { PAYMENT_WINDOW_MS, type ApprovedCheckout } from "./square";
+import { PAYMENT_WINDOW_MS, type ApprovedCheckout, type SquareEnvironment } from "./square";
 import {
   type SquareCheckoutClaim,
   type SquareCheckoutFinalizeResult,
@@ -11,7 +11,7 @@ import {
   type SquarePaymentLinkRetirementStore,
   type SquarePaymentOrder,
   type SquarePaymentOrderStatus,
-  type VerifiedSquareSandbox,
+  type VerifiedSquareIdentity,
 } from "./square-payment";
 
 type Sql = ReturnType<typeof postgres>;
@@ -42,7 +42,7 @@ interface PaymentOrderRow {
   market_id: string;
   reservation_id: string;
   reservation_revision: number;
-  square_environment: "sandbox";
+  square_environment: SquareEnvironment;
   square_merchant_id: string;
   square_location_id: string;
   expected_currency: "USD";
@@ -65,7 +65,7 @@ interface PaymentOrderRow {
 interface PaymentLinkRetirementRow {
   payment_order_id: string;
   market_id: string;
-  square_environment: "sandbox";
+  square_environment: SquareEnvironment;
   square_merchant_id: string;
   square_location_id: string;
   square_payment_link_id: string;
@@ -78,7 +78,7 @@ interface PaymentLinkRetirementRow {
 
 interface PaymentLinkRetirementCandidateRow extends PaymentLinkRetirementRow {
   parent_market_id: string;
-  parent_square_environment: "sandbox";
+  parent_square_environment: SquareEnvironment;
   parent_square_merchant_id: string;
   parent_square_location_id: string;
   parent_square_payment_link_id: string | null;
@@ -91,7 +91,7 @@ interface ExpiringPaymentRow {
   market_id: string;
   payment_due_at: Date | null;
   reservation_due_at: Date | null;
-  square_environment: "sandbox";
+  square_environment: SquareEnvironment;
   square_merchant_id: string;
   square_location_id: string;
   square_payment_link_id: string | null;
@@ -158,7 +158,7 @@ export function squarePaymentDeadlineFromProviderLink(createdAt: Date): Date | n
 
 /** Must remain byte-for-byte compatible with createSquareCheckout(). */
 export function squarePaymentOrderIdempotencyKey(input: {
-  environment: "sandbox";
+  environment: SquareEnvironment;
   locationId: string;
   reservationId: string;
   reservationRevision: number;
@@ -221,7 +221,7 @@ function claimResultForExisting(
 export async function claimSquarePaymentCheckout(input: {
   marketId: string;
   reservationId: string;
-  square: Pick<VerifiedSquareSandbox, "environment" | "merchantId" | "locationId">;
+  square: Pick<VerifiedSquareIdentity, "environment" | "merchantId" | "locationId">;
   now: Date;
   leaseSeconds: number;
 }, sql: Sql = configuredClient()): Promise<SquareCheckoutClaim> {
@@ -494,6 +494,8 @@ function retirementRetryAt(attemptedAt: Date, attemptCount: number): Date {
  */
 export async function expireDueSquarePaymentHolds(input: {
   marketId: string;
+  /** Older QA callers default to Sandbox; every deployed route supplies this. */
+  environment?: SquareEnvironment;
   /** QA fault runs can fence exactly one durable payment order. */
   paymentOrderId?: string;
   now: Date;
@@ -503,6 +505,8 @@ export async function expireDueSquarePaymentHolds(input: {
     || !Number.isFinite(input.now.valueOf()) || !validSchedulerLimit(input.limit)) {
     throw new Error("Square payment expiry input is invalid.");
   }
+  const environment = input.environment ?? "sandbox";
+  if (!["sandbox", "production"].includes(environment)) throw new Error("Invalid Square environment.");
   const paymentOrderId = input.paymentOrderId ?? null;
   return sql.begin(async tx => {
     // Lock in the same payment-order/reservation relationship that webhook
@@ -519,6 +523,7 @@ export async function expireDueSquarePaymentHolds(input: {
       JOIN fame_reservations r
         ON r.id = p.reservation_id AND r.market_id = p.market_id
       WHERE p.status = 'checkout_created'
+        AND p.square_environment = ${environment}
         AND p.market_id = ${input.marketId}
         AND (${paymentOrderId}::text IS NULL OR p.id = ${paymentOrderId})
         AND r.state = 'payment_pending'
@@ -612,12 +617,12 @@ function retirementFromRow(row: PaymentLinkRetirementRow): SquarePaymentLinkReti
   };
 }
 
-/** Claim one due Sandbox link retirement while its allocation remains held. */
+/** Claim one due link retirement only in the configured provider environment. */
 export async function claimSquarePaymentLinkRetirement(input: {
   marketId: string;
   /** QA fault runs can claim only this known durable payment order. */
   paymentOrderId?: string;
-  square: Pick<VerifiedSquareSandbox, "environment" | "merchantId" | "locationId">;
+  square: Pick<VerifiedSquareIdentity, "environment" | "merchantId" | "locationId">;
   now: Date;
   leaseSeconds: number;
 }, sql: Sql = configuredClient()): Promise<SquarePaymentLinkRetirementClaim> {
@@ -642,6 +647,7 @@ export async function claimSquarePaymentLinkRetirement(input: {
       JOIN fame_payment_orders p ON p.id = q.payment_order_id
       JOIN fame_reservations r ON r.id = p.reservation_id AND r.market_id = p.market_id
       WHERE q.status IN ('pending', 'processing')
+        AND p.square_environment = ${input.square.environment}
         AND p.market_id = ${input.marketId}
         AND (${paymentOrderId}::text IS NULL OR q.payment_order_id = ${paymentOrderId})
         AND (
@@ -917,7 +923,7 @@ export async function failSquarePaymentLinkRetirement(input: {
  * and transition this row without a contact/name/search fallback.
  */
 export async function getSquarePaymentOrderForWebhook(input: {
-  environment: "sandbox";
+  environment: SquareEnvironment;
   merchantId: string;
   locationId: string;
   orderId: string;

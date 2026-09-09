@@ -126,6 +126,28 @@ export type FinalReservationResult =
   | { kind: "not_eligible"; reason: FinalReservationIneligibility }
   | { kind: "unavailable"; availability: { date: string; available: boolean; reasons: string[] }[] };
 
+/** Read a committed quote after a manager reloads; never allocate or create checkout. */
+export async function getFinalApplicationReservation(
+  marketId: string,
+  applicationId: string,
+  sql: Sql = configuredClient(),
+): Promise<{ reservation: FinalReservationRecord | null } | null> {
+  if (!marketId || marketId === DEMO_MARKET_ID || !validFinalReservationApplicationId(applicationId)) return null;
+  const [application] = await sql`SELECT id FROM fame_applications
+    WHERE id = ${applicationId} AND market_id = ${marketId}`;
+  if (!application) return null;
+  const [row] = await sql<ExistingFinalizationRow[]>`
+    SELECT f.reservation_id, f.selection_fingerprint, f.idempotency_key,
+      r.state, r.payment_required, r.total_cents, r.final_booth_quantity, r.final_dates, r.quote_version
+    FROM fame_reservation_finalizations f
+    JOIN fame_reservations r ON r.id = f.reservation_id AND r.market_id = f.market_id
+      AND r.application_id = f.application_id
+    WHERE f.market_id = ${marketId} AND f.application_id = ${applicationId}`;
+  const reservation = row ? recordFromExisting(row) : null;
+  if (row && !reservation) throw new Error("Stored final reservation is invalid.");
+  return { reservation };
+}
+
 export interface FinalReservationWriteInput {
   marketId: string;
   applicationId: string;

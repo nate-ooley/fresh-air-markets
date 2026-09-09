@@ -115,7 +115,7 @@ test("durable checkout sends the committed reservation amount and persists only 
     } }),
     transport: (async (url, init) => {
       calls.push({ url: String(url), body: JSON.parse(String(init?.body)) });
-      return Response.json({ payment_link: { id: "link-1", order_id: "square-order-1", url: "https://square.link/checkout", created_at: "2026-10-01T12:00:00.000Z" } });
+      return Response.json({ payment_link: { id: "link-1", order_id: "square-order-1", url: "https://sandbox.square.link/checkout", created_at: "2026-10-01T12:00:00.000Z" } });
     }) as typeof fetch,
   });
   assert.equal(result.kind, "created");
@@ -126,7 +126,7 @@ test("durable checkout sends the committed reservation amount and persists only 
   assert.deepEqual(completed, {
     paymentOrderId: "payment-order", leaseToken: "lease-1",
     checkout: {
-      paymentLinkId: "link-1", orderId: "square-order-1", checkoutUrl: "https://square.link/checkout",
+      paymentLinkId: "link-1", orderId: "square-order-1", checkoutUrl: "https://sandbox.square.link/checkout",
       createdAt: "2026-10-01T12:00:00.000Z",
       idempotencyKey: squarePaymentOrderIdempotencyKey({
         environment: "sandbox", locationId: "sandbox-location", reservationId: "reservation-1", reservationRevision: 3,
@@ -141,7 +141,7 @@ test("an existing hosted checkout is returned without another Square request", a
   const result = await dispatchSquareSandboxCheckout({
     marketId: "market-1", reservationId: "reservation-1", square, now,
     store: store({ claimCheckout: async () => ({ kind: "checkout_created", order: order({
-      status: "checkout_created", paymentLinkId: "link-1", squareOrderId: "square-order-1", checkoutUrl: "https://square.link/checkout",
+      status: "checkout_created", paymentLinkId: "link-1", squareOrderId: "square-order-1", checkoutUrl: "https://sandbox.square.link/checkout",
     }) }) }),
     transport: (async () => { calls++; throw new Error("must not call Square"); }) as typeof fetch,
   });
@@ -161,7 +161,7 @@ test("transient failure releases the same durable order for a stable-key retry",
     attempt++;
     return attempt === 1
       ? new Response("provider-detail-is-not-exposed", { status: 503 })
-      : Response.json({ payment_link: { id: "link-1", order_id: "square-order-1", url: "https://square.link/checkout", created_at: "2026-10-01T12:00:00.000Z" } });
+      : Response.json({ payment_link: { id: "link-1", order_id: "square-order-1", url: "https://sandbox.square.link/checkout", created_at: "2026-10-01T12:00:00.000Z" } });
   }) as typeof fetch;
   const first = await dispatchSquareSandboxCheckout({ marketId: "market-1", reservationId: "reservation-1", square, now, store: durableStore, transport });
   const second = await dispatchSquareSandboxCheckout({ marketId: "market-1", reservationId: "reservation-1", square, now, store: durableStore, transport });
@@ -193,7 +193,7 @@ test("an invalid provider checkout timestamp is permanently quarantined instead 
     marketId: "market-1", reservationId: "reservation-1", square, now,
     store: store({ failCheckout: async value => { failure = value; } }),
     transport: (async () => Response.json({ payment_link: {
-      id: "link-1", order_id: "square-order-1", url: "https://square.link/checkout",
+      id: "link-1", order_id: "square-order-1", url: "https://sandbox.square.link/checkout",
       created_at: "2026-02-30T12:00:00Z",
     } })) as typeof fetch,
   });
@@ -250,7 +250,7 @@ test("an idempotent recovery never reopens an already-expired provider link afte
       failCheckout: async value => { failed = value; },
     }),
     transport: (async () => Response.json({ payment_link: {
-      id: "link-1", order_id: "square-order-1", url: "https://square.link/checkout",
+      id: "link-1", order_id: "square-order-1", url: "https://sandbox.square.link/checkout",
       created_at: "2026-10-01T12:00:00.000Z",
     } })) as typeof fetch,
   });

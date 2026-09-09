@@ -4,7 +4,7 @@ import {
   postgresSquarePaymentLinkRetirementStore,
 } from "@/lib/square-payment-pg";
 import { dispatchSquarePaymentLinkRetirement } from "@/lib/square-payment";
-import { squarePreviewSandboxRuntimeConfig, verifySquareSandboxSetup } from "@/lib/square";
+import { squarePaymentRuntimeConfig, verifySquareIdentity } from "@/lib/square";
 import { squareQaExpiryTransport, squareQaSupportConfig } from "@/lib/square-qa-faults";
 
 export const runtime = "nodejs";
@@ -14,7 +14,7 @@ const EXPIRY_LIMIT = 25;
 const RETIREMENT_LIMIT = 10;
 
 /**
- * Authenticated recovery endpoint for the 48-hour Sandbox payment window.
+ * Authenticated recovery endpoint for the 48-hour payment window.
  *
  * It first claims due holds for retirement while preserving their capacity. It
  * then retires up to ten matching hosted links using separately leased work
@@ -57,36 +57,33 @@ export async function GET(request: Request): Promise<Response> {
 
   let setup;
   try {
-    // Check the local Preview/Sandbox gate before claiming anything. A copied
-    // Sandbox setting in Production must not mutate payment holds.
-    setup = squarePreviewSandboxRuntimeConfig(process.env);
-  } catch {
-    return Response.json({ error: "Square payment expiry is unavailable." }, { status: 503 });
-  }
-
-  let expiry;
-  try {
-    expiry = await expireDueSquarePaymentHolds({
-      marketId, paymentOrderId: qaPaymentOrderId, now: new Date(), limit: EXPIRY_LIMIT,
-    });
+    // Check the exact deployment/provider pairing before claiming any hold.
+    setup = squarePaymentRuntimeConfig(process.env);
   } catch {
     return Response.json({ error: "Square payment expiry is unavailable." }, { status: 503 });
   }
 
   let square;
   try {
-    const identity = await verifySquareSandboxSetup(setup);
+    const identity = await verifySquareIdentity(setup);
     square = {
-      environment: "sandbox" as const,
+      environment: setup.environment,
       accessToken: setup.accessToken,
       merchantId: identity.merchantId,
       locationId: identity.locationId,
     };
   } catch {
-    // The durable expiry claim remains committed and can safely be rerun.
-    // Returning a retryable response tells the trusted scheduler that provider
-    // retirement is pending, while the associated allocation stays held.
+    // Identity failure precedes any mutation of holds or retirement work.
     return Response.json({ error: "Square payment-link retirement is unavailable." }, { status: 503 });
+  }
+
+  let expiry;
+  try {
+    expiry = await expireDueSquarePaymentHolds({
+      marketId, environment: setup.environment, paymentOrderId: qaPaymentOrderId, now: new Date(), limit: EXPIRY_LIMIT,
+    });
+  } catch {
+    return Response.json({ error: "Square payment expiry is unavailable." }, { status: 503 });
   }
 
   let expired = 0;

@@ -6,7 +6,7 @@ const Module = require('node:module');
 const ts = require('typescript');
 const { NextRequest } = require('next/server');
 
-function loadRoute({ authenticated = true, configured = true, verifiedIdentity, dispatch, qaSupport, qaTransport } = {}) {
+function loadRoute({ authenticated = true, configured = true, verifiedIdentity, dispatch, qaSupport, qaTransport, setup, identityCheck, portalOrigin } = {}) {
   const filename = path.resolve(__dirname, '../src/app/api/admin/reservations/[id]/checkout/route.ts');
   const compiled = ts.transpileModule(fs.readFileSync(filename, 'utf8'), {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
@@ -18,15 +18,16 @@ function loadRoute({ authenticated = true, configured = true, verifiedIdentity, 
     if (id === '@/lib/seed') return require('../.test-build/seed.js');
     if (id === '@/lib/auth') return { getSessionAccountId: async () => authenticated ? 'qa-market' : null };
     if (id === '@/lib/square') return {
-      squarePreviewSandboxRuntimeConfig: () => {
+      squarePaymentRuntimeConfig: () => {
         if (!configured) throw new Error('not configured');
-        return { environment: 'sandbox', accessToken: 'private-token', locationId: 'configured-location' };
+        return setup || { environment: 'sandbox', accessToken: 'private-token', locationId: 'configured-location' };
       },
-      verifySquareSandboxSetup: async () => verifiedIdentity || { merchantId: 'verified-merchant', locationId: 'verified-location' },
+      squarePortalOrigin: portalOrigin || (() => "https://freshairmarketsandevents.com"),
+      verifySquareIdentity: identityCheck || (async () => verifiedIdentity || { merchantId: 'verified-merchant', locationId: 'verified-location' }),
     };
     if (id === '@/lib/square-payment') return {
       validSquareReservationId: value => typeof value === 'string' && /^[A-Za-z0-9:_-]{1,192}$/.test(value),
-      dispatchSquareSandboxCheckout: dispatch || (async () => ({ kind: 'not_found' })),
+      dispatchSquareCheckout: dispatch || (async () => ({ kind: 'not_found' })),
     };
     if (id === '@/lib/square-payment-pg') return { postgresSquarePaymentCheckoutStore: { qa: true } };
     if (id === '@/lib/square-qa-faults') return {
@@ -97,7 +98,7 @@ test('checkout route binds the session market/path reservation and ignores price
     const route = loadRoute({ dispatch: async value => {
       input = value;
       return { kind: 'created', order: {
-        id: 'payment-order', status: 'checkout_created', checkoutUrl: 'https://square.link/qa', paymentDueAt: '2026-10-03T12:00:00.000Z',
+        id: 'payment-order', status: 'checkout_created', checkoutUrl: 'https://sandbox.square.link/qa', paymentDueAt: '2026-10-03T12:00:00.000Z',
       } };
     } });
     const response = await route.POST(request({ totalCents: 1, vendorId: 'attacker', reservationId: 'other', checkoutUrl: 'https://attacker.invalid' }), {
@@ -110,7 +111,7 @@ test('checkout route binds the session market/path reservation and ignores price
       store: { qa: true },
     });
     assert.deepEqual(await response.json(), { paymentOrder: {
-      id: 'payment-order', status: 'checkout_created', checkoutUrl: 'https://square.link/qa', paymentDueAt: '2026-10-03T12:00:00.000Z',
+      id: 'payment-order', status: 'checkout_created', checkoutUrl: 'https://sandbox.square.link/qa', paymentDueAt: '2026-10-03T12:00:00.000Z',
     } });
   });
 });
@@ -118,7 +119,7 @@ test('checkout route binds the session market/path reservation and ignores price
 test('checkout route maps safe retry, terminal, and nonprofit outcomes without claiming payment success', async () => {
   await withDatabase(async () => {
     const cases = [
-      [{ kind: 'existing', order: { id: 'order', status: 'checkout_created', checkoutUrl: 'https://square.link/qa', paymentDueAt: null } }, 200],
+      [{ kind: 'existing', order: { id: 'order', status: 'checkout_created', checkoutUrl: 'https://sandbox.square.link/qa', paymentDueAt: null } }, 200],
       [{ kind: 'in_progress', paymentOrderId: 'order' }, 202],
       [{ kind: 'retry_scheduled', paymentOrderId: 'order' }, 503],
       [{ kind: 'failed', paymentOrderId: 'order' }, 409],
@@ -151,5 +152,60 @@ test('a scoped Preview QA checkout fault passes only its in-process transport an
     input = undefined;
     assert.equal((await route.POST(request(), { params: Promise.resolve({ id: 'different-reservation' }) })).status, 503);
     assert.equal(input, undefined);
+  });
+});
+
+
+test('production checkout refuses another private market and uses only the configured website return URL', async () => {
+  await withDatabase(async () => {
+    const old = process.env.FAME_MARKET_ACCOUNT_ID;
+    try {
+      let written;
+      const setup = { environment: 'production', accessToken: 'private-token', locationId: 'configured-location', merchantId: 'configured-merchant', checkoutRedirectUrl: 'https://freshairmarketsandevents.com/vendor/payment?returned=1' };
+      const route = loadRoute({ setup, dispatch: async input => { written = input; return { kind: 'not_found' }; } });
+      process.env.FAME_MARKET_ACCOUNT_ID = 'another-market';
+      assert.equal((await route.POST(request(), { params: Promise.resolve({ id: 'reservation-1' }) })).status, 403);
+      assert.equal(written, undefined);
+      process.env.FAME_MARKET_ACCOUNT_ID = 'qa-market';
+      assert.equal((await route.POST(request({ redirect_url: 'https://attacker.invalid/' }), { params: Promise.resolve({ id: 'reservation-1' }) })).status, 404);
+      assert.equal(written.square.environment, 'production');
+      assert.equal(written.square.checkoutRedirectUrl, setup.checkoutRedirectUrl);
+      assert.equal(written.square.merchantId, 'verified-merchant');
+    } finally { if (old === undefined) delete process.env.FAME_MARKET_ACCOUNT_ID; else process.env.FAME_MARKET_ACCOUNT_ID = old; }
+  });
+});
+
+
+test('browser checkout rejects foreign origins and cross-site metadata before identity or payment writes', async () => {
+  await withDatabase(async () => {
+    let providerCalls = 0;
+    let writes = 0;
+    const route = loadRoute({ identityCheck: async () => { providerCalls++; return { merchantId: 'merchant', locationId: 'location' }; }, dispatch: async () => { writes++; return { kind: 'not_found' }; } });
+    for (const headers of [
+      { origin: 'https://attacker.invalid' },
+      { origin: 'null' },
+      { 'sec-fetch-site': 'cross-site' },
+      { origin: 'https://freshairmarketsandevents.com', 'sec-fetch-site': 'cross-site' },
+      { origin: 'https://freshairmarketsandevents.com.attacker.invalid', 'sec-fetch-site': 'same-site' },
+    ]) {
+      const response = await route.POST(new NextRequest('https://freshairmarketsandevents.com/api/admin/reservations/reservation-1/checkout', { method: 'POST', headers }), { params: Promise.resolve({ id: 'reservation-1' }) });
+      assert.equal(response.status, 403);
+    }
+    assert.equal(providerCalls, 0);
+    assert.equal(writes, 0);
+    const good = await route.POST(new NextRequest('https://freshairmarketsandevents.com/api/admin/reservations/reservation-1/checkout', { method: 'POST', headers: { origin: 'https://freshairmarketsandevents.com', 'sec-fetch-site': 'same-origin' } }), { params: Promise.resolve({ id: 'reservation-1' }) });
+    assert.equal(good.status, 404);
+    assert.equal(providerCalls, 1);
+    assert.equal(writes, 1);
+  });
+});
+
+test('browser checkout fails closed when the configured public origin cannot be validated', async () => {
+  await withDatabase(async () => {
+    let providerCalls = 0;
+    const route = loadRoute({ portalOrigin: () => { throw new Error('invalid config'); }, identityCheck: async () => { providerCalls++; throw new Error('must not run'); } });
+    const response = await route.POST(new NextRequest('https://unit-test.invalid/', { method: 'POST', headers: { origin: 'https://freshairmarketsandevents.com' } }), { params: Promise.resolve({ id: 'reservation-1' }) });
+    assert.equal(response.status, 503);
+    assert.equal(providerCalls, 0);
   });
 });

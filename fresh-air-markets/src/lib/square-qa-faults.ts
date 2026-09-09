@@ -165,7 +165,7 @@ export function squareQaCheckoutTransport(
         payment_link: {
           id: "qa-fault-expired-link",
           order_id: "qa-fault-expired-order",
-          url: "https://square.link/qa-fault-expired",
+          url: "https://sandbox.square.link/qa-fault-expired",
           created_at: createdAt,
         },
       }), { status: 200, headers: { "content-type": "application/json" } });

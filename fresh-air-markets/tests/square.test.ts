@@ -134,7 +134,7 @@ test("checkout contract sends exact cents, correct location, stable retry key, a
   const calls: { url: string; body: Record<string, any>; headers: Record<string, string> }[] = [];
   const transport = (async (url, init) => {
     calls.push({ url: String(url), body: JSON.parse(String(init?.body)), headers: init?.headers as Record<string, string> });
-    return Response.json({ payment_link: { id: "link", order_id: "order", url: "https://square.link/qa", created_at: "2026-10-01T12:00:00.000Z" } });
+    return Response.json({ payment_link: { id: "link", order_id: "order", url: "https://sandbox.square.link/qa", created_at: "2026-10-01T12:00:00.000Z" } });
   }) as typeof fetch;
   const first = await createSquareCheckout(config, approved, transport, now);
   const retry = await createSquareCheckout(config, approved, transport, now);
@@ -177,7 +177,7 @@ test("malformed, timezone-less, impossible, and future Square timestamps permane
   for (const createdAt of invalidTimestamps) {
     await assert.rejects(
       createSquareCheckout(config, approved, (async () => Response.json({ payment_link: {
-        id: "link", order_id: "order", url: "https://square.link/qa", created_at: createdAt,
+        id: "link", order_id: "order", url: "https://sandbox.square.link/qa", created_at: createdAt,
       } })) as typeof fetch, now),
       error => (error as { code?: string; retryable?: boolean }).code === "square_provider_created_at_invalid"
         && (error as { retryable?: boolean }).retryable === false,

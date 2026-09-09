@@ -1,0 +1,62 @@
+# Vendor reservation and payment journey
+
+This implementation is staged in the draft PR. Production payments and hosted
+acceptance remain unverified until the release checks below are completed.
+
+## Manager path
+
+1. Open the exact application from `/applications` and review it.
+2. On the approved application, choose the final applicant category, Thomas's
+   food-license decision, dates and booth quantity. Historical May 27 selections
+   require explicit confirmation of Saturday May 29.
+3. Save the final reservation. The server rechecks approval, signed agreement,
+   current approved documents and capacity, then saves an immutable quote.
+   Reloading reads that committed reservation without reserving again.
+4. Create its Square payment request. Retrying retrieves the same provider order
+   and deadline. Nonprofits skip payment. Creating this request does not send email.
+5. Create the private vendor access link. Replacing it revokes the previous link
+   and its browser sessions. The link is shown for deliberate copying; automated
+   delivery through the correct HighLevel contact is still required.
+
+## Vendor path
+
+The invitation uses `/vendor/payment#token=...`. Its secret is removed from the
+address bar before any request. Opening the page does not consume it: the vendor
+clicks **Open my reservation**, which exchanges the one-time token for a separate
+HttpOnly cookie. Only hashes are stored. The cookie grants access to that exact
+reservation and cannot authorize a manager action.
+
+The page shows approved dates, booth quantity, price and the server-recorded
+48-hour deadline. Checkout is offered only while the matching reservation and
+payment order remain payable, and only to a Square-owned URL for the configured
+environment. Sandbox is visibly labeled. Expired, stopped, cancelled or paid
+records never show a checkout action. The session lasts up to seven days so a
+receipt or expired status remains readable after the deadline.
+
+Square returns to `/vendor/payment?returned=1`. That parameter shows a pending
+confirmation message only. A verified webhook must confirm the exact provider
+merchant, location, order, amount and reservation before the page says paid.
+
+## Required release work
+
+- Apply and verify migrations 001–017 on the reviewed Preview database, including
+  the private Fresh Air account and confirmed overall booth capacity.
+- Set `FAME_VENDOR_PORTAL_ORIGIN` as **Config** to the exact Preview HTTPS origin
+  used for testing. Production must use `https://freshairmarketsandevents.com`.
+- Route `/vendor/payment`, `/api/vendor/*`, the Square webhook and the portal's
+  required assets to this application under the marketing domain. This code
+  does not change domain ownership, DNS or the HighLevel-hosted site.
+- Privately verify Sandbox merchant/location and webhook credentials, then run
+  real Sandbox success, decline, return, replay, expiry and recovery scenarios.
+- Complete the correct HighLevel application/document handoff, automated private
+  link delivery, paid-state synchronization and the authorized inbox checks.
+- Verify Production settings and the website routing; review and authorize the
+  final release. Adding production code does not enable live payments.
+
+## Verification boundaries
+
+Unit and PostgreSQL tests cover authentication, one-time token exchange,
+rotation, expiry, tenant/revision isolation, immutable quotes, provider environment
+separation and webhook reconciliation. Browser interaction, real Sandbox delivery
+and production-domain routing require separate evidence. Green code tests must not
+be used to mark the full hosted workflow green.

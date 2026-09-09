@@ -36,11 +36,11 @@ test('SQL wrapper removal preserves function bodies and quoted semicolons while 
   }
 });
 
-test('all 15 checked-in migrations can run inside one transaction and contribute readiness checks', async () => {
+test('all 17 checked-in migrations can run inside one transaction and contribute readiness checks', async () => {
   const { loadMigrations, expectedObjects } = await modulePromise;
   const migrations = await loadMigrations();
-  assert.equal(migrations.length, 15);
-  assert.match(migrations[14].name, /^015-/);
+  assert.equal(migrations.length, 17);
+  assert.match(migrations[16].name, /^017-/);
   assert.ok(migrations.every(m => /^[a-f0-9]{64}$/.test(m.checksum)));
   const objects = expectedObjects(migrations);
   for (const name of ['fame_applications', 'fame_reservation_allocations', 'fame_square_payment_link_retirements']) {
@@ -53,7 +53,7 @@ test('all 15 checked-in migrations can run inside one transaction and contribute
 test('history rejects changed SQL, unknown migrations and gaps rather than silently skipping them', async () => {
   const { loadMigrations, compareHistory } = await modulePromise;
   const migrations = await loadMigrations();
-  assert.equal(compareHistory(migrations, []).length, 15);
+  assert.equal(compareHistory(migrations, []).length, 17);
   assert.equal(compareHistory(migrations, migrations).length, 0);
   assert.throws(() => compareHistory(migrations, [{ ...migrations[0], checksum: 'changed' }]), /migration_checksum_mismatch/);
   assert.throws(() => compareHistory(migrations, [{ name: '999-unreviewed.sql', checksum: 'changed' }]), /migration_history_unknown_version/);

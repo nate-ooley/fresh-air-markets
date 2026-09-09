@@ -13,7 +13,7 @@ const parsedSelection = {
   fullSeason: false, boothsPerMarket: 1, foodLicenseRequired: false, idempotencyKey,
 };
 
-function loadRoute({ authenticated = true, configured = true, parser, reserve, bodyReader } = {}) {
+function loadRoute({ authenticated = true, configured = true, parser, reserve, bodyReader, read } = {}) {
   const filename = path.resolve(__dirname, '../src/app/api/admin/applications/[id]/reserve/route.ts');
   const compiled = ts.transpileModule(fs.readFileSync(filename, 'utf8'), {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
@@ -32,6 +32,7 @@ function loadRoute({ authenticated = true, configured = true, parser, reserve, b
         if (!configured) throw new Error('not configured');
         return { marketId: 'qa-market', seasonId: '2026-2027', boothCapacity: 12, calendarDates: [], quoteVersion: 'qa-v1' };
       },
+      getFinalApplicationReservation: read || (async () => ({ reservation: null })),
       reserveFinalApplication: reserve || (async () => ({ kind: 'not_found' })),
     };
     if (id === '@/lib/inquiry-body') return {
@@ -141,5 +142,30 @@ test('reserve route maps immutable replay, eligibility, capacity and persistence
       assert.equal(response.status, status);
       assert.equal((await response.json()).paymentOrder, undefined);
     }
+  });
+});
+
+
+test('reservation reload reads only the session market and exact application without creating a hold', async () => {
+  await withDatabase(async () => {
+    let captured;
+    const route = loadRoute({ read: async (...args) => { captured = args; return { reservation: null }; }, reserve: async () => { throw new Error('must not mutate'); } });
+    const response = await route.GET(request(), { params: Promise.resolve({ id: applicationId }) });
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get('cache-control'), 'private, no-store');
+    assert.deepEqual(captured, ['qa-market', applicationId]);
+    assert.deepEqual(await response.json(), { reservation: null });
+  });
+});
+
+test('reservation reload rejects anonymous, invalid, foreign and unavailable storage safely', async () => {
+  await withDatabase(async () => {
+    const ctx = { params: Promise.resolve({ id: applicationId }) };
+    assert.equal((await loadRoute({ authenticated: false }).GET(request(), ctx)).status, 401);
+    assert.equal((await loadRoute().GET(request(), { params: Promise.resolve({ id: '../bad' }) })).status, 400);
+    assert.equal((await loadRoute({ read: async () => null }).GET(request(), ctx)).status, 404);
+    const failure = await loadRoute({ read: async () => { throw new Error('private connection secret'); } }).GET(request(), ctx);
+    assert.equal(failure.status, 503);
+    assert.doesNotMatch(await failure.text(), /private connection/);
   });
 });

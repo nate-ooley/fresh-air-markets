@@ -4,19 +4,25 @@ import {
   PAYMENT_WINDOW_MS,
   retrieveSquareOrderForRetirement,
   type ApprovedCheckout,
+  type SquareEnvironment,
+  validSquareCheckoutUrl,
 } from "./square";
 
 /**
- * The checkout route receives this only after the server verifies the Sandbox
+ * The checkout route receives this only after the server verifies the provider
  * token and location with Square. `merchantId` is provider-returned identity,
  * never a value selected by a browser or copied from a URL.
  */
-export interface VerifiedSquareSandbox {
-  environment: "sandbox";
+export interface VerifiedSquareIdentity {
+  environment: SquareEnvironment;
   accessToken: string;
   locationId: string;
   merchantId: string;
+  checkoutRedirectUrl?: string;
 }
+
+/** Legacy Sandbox callers keep their narrow type and fail-closed wrapper. */
+export type VerifiedSquareSandbox = VerifiedSquareIdentity & { environment: "sandbox" };
 
 export type SquarePaymentOrderStatus =
   | "pending_checkout"
@@ -40,7 +46,7 @@ export interface SquarePaymentOrder {
   marketId: string;
   reservationId: string;
   reservationRevision: number;
-  environment: "sandbox";
+  environment: SquareEnvironment;
   merchantId: string;
   locationId: string;
   expectedCurrency: "USD";
@@ -79,7 +85,7 @@ export interface SquarePaymentCheckoutStore {
   claimCheckout(input: {
     marketId: string;
     reservationId: string;
-    square: Pick<VerifiedSquareSandbox, "environment" | "merchantId" | "locationId">;
+    square: Pick<VerifiedSquareIdentity, "environment" | "merchantId" | "locationId">;
     now: Date;
     leaseSeconds: number;
   }): Promise<SquareCheckoutClaim>;
@@ -113,7 +119,7 @@ export interface SquarePaymentCheckoutStore {
 export interface SquarePaymentLinkRetirement {
   paymentOrderId: string;
   marketId: string;
-  environment: "sandbox";
+  environment: SquareEnvironment;
   merchantId: string;
   locationId: string;
   paymentLinkId: string;
@@ -138,7 +144,7 @@ export interface SquarePaymentLinkRetirementStore {
     marketId: string;
     /** Preview QA may scope one synthetic fault to this durable work item. */
     paymentOrderId?: string;
-    square: Pick<VerifiedSquareSandbox, "environment" | "merchantId" | "locationId">;
+    square: Pick<VerifiedSquareIdentity, "environment" | "merchantId" | "locationId">;
     now: Date;
     leaseSeconds: number;
   }): Promise<SquarePaymentLinkRetirementClaim>;
@@ -210,10 +216,10 @@ function providerLinkExpiredBeforePersistence(createdAt: string, now: Date): boo
  * revision. A successful browser redirect never reaches this code and cannot
  * mark a reservation paid; webhook processing owns that separate transition.
  */
-export async function dispatchSquareSandboxCheckout(input: {
+export async function dispatchSquareCheckout(input: {
   marketId: string;
   reservationId: string;
-  square: VerifiedSquareSandbox;
+  square: VerifiedSquareIdentity;
   store: SquarePaymentCheckoutStore;
   transport?: typeof fetch;
   now?: Date;
@@ -221,7 +227,7 @@ export async function dispatchSquareSandboxCheckout(input: {
 }): Promise<SquareCheckoutDispatchResult> {
   if (!validSquareReservationId(input.reservationId)) throw new Error("Invalid reservation ID.");
   if (!validSquareReservationId(input.marketId)) throw new Error("Invalid market ID.");
-  if (input.square.environment !== "sandbox") throw new Error("Only Square Sandbox checkout is enabled.");
+  if (!["sandbox", "production"].includes(input.square.environment)) throw new Error("Invalid Square environment.");
   const now = input.now ?? new Date();
   if (!Number.isFinite(now.valueOf())) throw new Error("A valid server time is required.");
   const leaseSeconds = input.leaseSeconds ?? 60;
@@ -235,7 +241,13 @@ export async function dispatchSquareSandboxCheckout(input: {
     now,
     leaseSeconds,
   });
-  if (claim.kind === "checkout_created") return { kind: "existing", order: claim.order };
+  if (claim.kind === "checkout_created") {
+    if (claim.order.environment !== input.square.environment
+      || !validSquareCheckoutUrl(claim.order.checkoutUrl, input.square.environment)) {
+      throw new Error("Stored Square checkout identity or URL is invalid.");
+    }
+    return { kind: "existing", order: claim.order };
+  }
   if (claim.kind === "in_progress") return claim;
   if (claim.kind === "not_found") return claim;
   if (claim.kind === "not_payable") return claim;
@@ -287,8 +299,14 @@ export async function dispatchSquareSandboxCheckout(input: {
   }
 }
 
+/** Compatibility entry point never permits live checkout. */
+export async function dispatchSquareSandboxCheckout(input: Parameters<typeof dispatchSquareCheckout>[0] & { square: VerifiedSquareSandbox }): Promise<SquareCheckoutDispatchResult> {
+  if (input.square.environment !== "sandbox") throw new Error("Only Square Sandbox checkout is enabled.");
+  return dispatchSquareCheckout(input);
+}
+
 /**
- * Retire one already-expired Square Sandbox hosted link. The database lease
+ * Retire one already-expired Square hosted link. The database lease
  * and the provider's DELETE endpoint are deliberately separate: an outage
  * leaves a durable pending retirement that a later scheduler run can retry.
  * The reservation stays payment-pending and keeps its capacity until the
@@ -298,7 +316,7 @@ export async function dispatchSquareSandboxCheckout(input: {
 export async function dispatchSquarePaymentLinkRetirement(input: {
   /** The one configured portal market this scheduler is permitted to touch. */
   marketId: string;
-  square: VerifiedSquareSandbox;
+  square: VerifiedSquareIdentity;
   store: SquarePaymentLinkRetirementStore;
   transport?: typeof fetch;
   /** Optional QA transport chosen only after the exact durable row is claimed. */
@@ -310,7 +328,10 @@ export async function dispatchSquarePaymentLinkRetirement(input: {
   clock?: () => Date;
   leaseSeconds?: number;
 }): Promise<SquarePaymentLinkRetirementDispatchResult> {
-  if (input.square.environment !== "sandbox") throw new Error("Only Square Sandbox payment-link retirement is enabled.");
+  if (!["sandbox", "production"].includes(input.square.environment)) throw new Error("Invalid Square environment.");
+  if (input.square.environment === "production" && input.transportForRetirement) {
+    throw new Error("QA retirement transport is forbidden in Production.");
+  }
   if (!validSquareReservationId(input.marketId)) throw new Error("Invalid market ID.");
   const clock = input.clock ?? (() => new Date());
   const now = input.now ?? clock();

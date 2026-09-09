@@ -6,12 +6,30 @@ import {
 } from "@/lib/final-reservation";
 import {
   freshAirFinalReservationConfig,
+  getFinalApplicationReservation,
   reserveFinalApplication,
 } from "@/lib/final-reservation-pg";
 import { readInquiryBody } from "@/lib/inquiry-body";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+
+export async function GET(_request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+  const headers = { "Cache-Control": "private, no-store" };
+  const marketId = await getSessionAccountId();
+  if (!marketId) return NextResponse.json({ error: "Unauthorized" }, { status: 401, headers });
+  const { id } = await params;
+  if (!validFinalReservationApplicationId(id)) return NextResponse.json({ error: "Invalid application ID." }, { status: 400, headers });
+  try {
+    const config = freshAirFinalReservationConfig(process.env);
+    if (config.marketId !== marketId || !process.env.DATABASE_URL) throw new Error("Unavailable");
+    const result = await getFinalApplicationReservation(marketId, id);
+    return result ? NextResponse.json(result, { headers })
+      : NextResponse.json({ error: "Application not found." }, { status: 404, headers });
+  } catch {
+    return NextResponse.json({ error: "Final reservation is unavailable." }, { status: 503, headers });
+  }
+}
 
 function reservationResponse(status: 200 | 201, reservation: {
   id: string;

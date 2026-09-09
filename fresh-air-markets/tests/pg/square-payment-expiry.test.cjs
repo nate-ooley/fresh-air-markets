@@ -76,6 +76,7 @@ before(async () => {
       '013-final-reservation-writer.sql',
       '014-square-payment-expiry.sql',
       '015-square-payment-expiry-retry-schedule.sql',
+      '016-square-production-environment-fences.sql',
     ]) await migration.unsafe(fs.readFileSync(path.join(__dirname, '../../docs/migrations', file), 'utf8'));
   } finally {
     await migration.end();
@@ -144,21 +145,21 @@ async function seedEligibleApplication(sql = first, patch = {}) {
   return { applicationId };
 }
 
-async function checkoutForApplication(sql = first) {
+async function checkoutForApplication(sql = first, environment = 'sandbox', boothCapacity = 1) {
   const application = await seedEligibleApplication(sql);
   const final = await reserveFinalApplication({
     marketId,
     applicationId: application.applicationId,
     actorAccountId: marketId,
     selection: selection(),
-    config: config(),
+    config: config(boothCapacity),
     now: createdAt,
   }, sql);
   assert.equal(final.kind, 'created');
   const claim = await claimSquarePaymentCheckout({
     marketId,
     reservationId: final.reservation.id,
-    square: { environment: 'sandbox', merchantId, locationId: squareLocationId },
+    square: { environment, merchantId, locationId: squareLocationId },
     now: createdAt,
     leaseSeconds: 60,
   }, sql);
@@ -169,7 +170,7 @@ async function checkoutForApplication(sql = first) {
     checkout: {
       paymentLinkId: `link-${claim.order.id}`,
       orderId: `square-order-${claim.order.id}`,
-      checkoutUrl: 'https://square.link/qa-expiry',
+      checkoutUrl: environment === 'production' ? 'https://square.link/u/qa-expiry' : 'https://sandbox.square.link/u/qa-expiry',
       createdAt: createdAt.toISOString(),
       idempotencyKey: claim.order.idempotencyKey,
     },
@@ -544,4 +545,77 @@ test('the 014-to-015 upgrade chain quarantines proofless legacy retirements befo
     await legacy.end();
     await admin.unsafe(`DROP SCHEMA IF EXISTS ${legacySchema} CASCADE`);
   }
+});
+
+
+test('production checkout persists its environment, retries the same order, and refuses a Sandbox replay of the reservation', async () => {
+  const order = await checkoutForApplication(first, 'production');
+  const claim = async environment => claimSquarePaymentCheckout({
+    marketId, reservationId: order.reservationId, square: { environment, merchantId, locationId: squareLocationId },
+    now: createdAt, leaseSeconds: 60,
+  }, first);
+  const replay = await claim('production');
+  assert.equal(replay.kind, 'checkout_created');
+  assert.equal(replay.order.id, order.paymentOrderId);
+  assert.equal(replay.order.environment, 'production');
+  assert.deepEqual(await claim('sandbox'), { kind: 'not_payable', reason: 'invalid_reservation' });
+  assert.equal((await first`SELECT id FROM fame_payment_orders`).length, 1);
+});
+
+test('identical provider event/order/payment IDs in separate environments reconcile only their own durable reservation', async () => {
+  const production = await checkoutForApplication(first, 'production', 2);
+  const sandbox = await checkoutForApplication(first, 'sandbox', 2);
+  await first`UPDATE fame_payment_orders SET square_order_id = 'same-provider-order'`;
+  const event = paymentEvent({ squareOrderId: 'same-provider-order' }, { eventId: 'same-event', payment: { id: 'same-payment' } });
+  const config = { environment: 'production', merchantId, locationId: squareLocationId, now: dueAt };
+  const results = await Promise.all(Array.from({ length: 30 }, (_, i) => persistSquarePaymentWebhook(event, config, i % 2 ? first : second)));
+  assert.equal(results.filter(value => value.kind === 'paid').length, 1);
+  assert.equal(results.filter(value => value.kind === 'duplicate').length, 29);
+  assert.equal((await first`SELECT state FROM fame_reservations WHERE id = ${production.reservationId}`)[0].state, 'paid');
+  assert.equal((await first`SELECT state FROM fame_reservations WHERE id = ${sandbox.reservationId}`)[0].state, 'payment_pending');
+  assert.deepEqual(await persistSquarePaymentWebhook(event, { environment: 'sandbox', now: dueAt }, first), { kind: 'paid' });
+  assert.deepEqual(rows(await first`SELECT square_environment, disposition FROM fame_square_webhook_events ORDER BY square_environment`),
+    [{ square_environment: 'production', disposition: 'paid' }, { square_environment: 'sandbox', disposition: 'paid' }]);
+});
+
+test('production scheduler cannot claim, quarantine or retire a Sandbox hold in the same market', async () => {
+  const production = await checkoutForApplication(first, 'production', 2);
+  const sandbox = await checkoutForApplication(first, 'sandbox', 2);
+  assert.deepEqual(await expireDueSquarePaymentHolds({ marketId, environment: 'production', now: dueAt, limit: 25 }, first), { expiryPending: 1, manualReview: 0 });
+  assert.equal((await first`SELECT status FROM fame_payment_orders WHERE id = ${sandbox.paymentOrderId}`)[0].status, 'checkout_created');
+  assert.equal((await first`SELECT state FROM fame_reservations WHERE id = ${sandbox.reservationId}`)[0].state, 'payment_pending');
+  const sandboxClaim = await claimSquarePaymentLinkRetirement({ marketId, square: { environment: 'sandbox', merchantId, locationId: squareLocationId }, now: dueAt, leaseSeconds: 60 }, first);
+  assert.deepEqual(sandboxClaim, { kind: 'no_work' });
+  const liveClaim = await claimSquarePaymentLinkRetirement({ marketId, square: { environment: 'production', merchantId, locationId: squareLocationId }, now: dueAt, leaseSeconds: 60 }, first);
+  assert.equal(liveClaim.kind, 'retirement_required');
+  assert.equal(liveClaim.retirement.paymentOrderId, production.paymentOrderId);
+  assert.deepEqual(await completeSquarePaymentLinkRetirement({ paymentOrderId: production.paymentOrderId, leaseToken: liveClaim.leaseToken, cancelledOrderId: production.squareOrderId, retiredAt: dueAt }, first), { kind: 'retired' });
+  assert.equal((await first`SELECT state FROM fame_reservations WHERE id = ${production.reservationId}`)[0].state, 'expired');
+  assert.equal((await first`SELECT state FROM fame_reservations WHERE id = ${sandbox.reservationId}`)[0].state, 'payment_pending');
+});
+
+test('database freezes Square environment/identity/amount and forbids cross-environment receipt/retirement links', async () => {
+  const order = await checkoutForApplication(first, 'production');
+  for (const change of [
+    first`UPDATE fame_payment_orders SET square_environment = 'sandbox' WHERE id = ${order.paymentOrderId}`,
+    first`UPDATE fame_payment_orders SET square_merchant_id = 'other' WHERE id = ${order.paymentOrderId}`,
+    first`UPDATE fame_payment_orders SET expected_total_cents = 1 WHERE id = ${order.paymentOrderId}`,
+  ]) await assert.rejects(change, /immutable/);
+  await expireDueSquarePaymentHolds({ marketId, environment: 'production', now: dueAt, limit: 25 }, first);
+  await assert.rejects(first`UPDATE fame_square_payment_link_retirements SET square_environment = 'sandbox' WHERE payment_order_id = ${order.paymentOrderId}`, error => error.code === '23503');
+  const event = paymentEvent(order);
+  assert.deepEqual(await persistSquarePaymentWebhook(event, { environment: 'production', merchantId, locationId: squareLocationId, now: dueAt }, first), { kind: 'manual_review' });
+  await assert.rejects(first`UPDATE fame_square_webhook_events SET square_environment = 'sandbox' WHERE event_id = ${event.eventId}`, error => error.code === '23503');
+});
+
+test('production receipts reject QA rollback and missing merchant; wrong configured identity records review without changing payment', async () => {
+  const order = await checkoutForApplication(first, 'production');
+  const event = paymentEvent(order);
+  await assert.rejects(persistSquarePaymentWebhook(event, { environment: 'production', locationId: squareLocationId, now: dueAt }, first), /pinned identity/);
+  await assert.rejects(persistSquarePaymentWebhook(event, { environment: 'production', merchantId, locationId: squareLocationId, qaRollbackEventId: event.eventId, now: dueAt }, first), /QA rollback/);
+  assert.equal((await first`SELECT event_id FROM fame_square_webhook_events`).length, 0);
+  assert.deepEqual(await persistSquarePaymentWebhook(event, { environment: 'production', merchantId: 'wrong', locationId: squareLocationId, now: dueAt }, first), { kind: 'manual_review' });
+  assert.equal((await first`SELECT status FROM fame_payment_orders WHERE id = ${order.paymentOrderId}`)[0].status, 'checkout_created');
+  assert.equal((await first`SELECT state FROM fame_reservations WHERE id = ${order.reservationId}`)[0].state, 'payment_pending');
+  assert.equal((await first`SELECT manual_review_reason FROM fame_square_webhook_events WHERE event_id = ${event.eventId}`)[0].manual_review_reason, 'configured_square_identity_mismatch');
 });
