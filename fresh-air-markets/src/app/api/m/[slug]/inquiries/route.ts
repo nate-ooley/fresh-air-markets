@@ -34,6 +34,14 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ slu
   const store = await getStore();
   const account = await store.getAccountBySlug(slug);
   if (!account) return NextResponse.json({ error: "Market not found." }, { status: 404 });
+  // Keep the existing market application as the single Fresh Air intake path.
+  // This legacy inquiry route neither runs its review gates nor uses its quote.
+  if (account.id === process.env.FAME_MARKET_ACCOUNT_ID?.trim()) {
+    return NextResponse.json({
+      error: "Use the Fresh Air Markets vendor application form.",
+      applicationUrl: "https://freshairmarketsandevents.com/vendors",
+    }, { status: 410, headers: { "Cache-Control": "no-store" } });
+  }
 
   const parsed = await readInquiryBody(req);
   if ("status" in parsed) return NextResponse.json({ error: parsed.error }, { status: parsed.status });

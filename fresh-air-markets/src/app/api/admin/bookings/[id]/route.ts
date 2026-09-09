@@ -17,6 +17,14 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
   const body = await readObjectBody(req);
   if (!body) return NextResponse.json({ error: "A JSON object body is required." }, { status: 400 });
   const { action } = body;
+  // Fresh Air approvals must use the application/document gates and durable
+  // reservation writer. The legacy booking table is not that inventory ledger.
+  if (action === "approve" && marketId === process.env.FAME_MARKET_ACCOUNT_ID?.trim()) {
+    return NextResponse.json({
+      error: "Use the application review and final reservation workflow for this market.",
+      code: "APPLICATION_REVIEW_REQUIRED",
+    }, { status: 409, headers: { "Cache-Control": "no-store" } });
+  }
   const store = await getStore();
 
   if (action === "approve") {

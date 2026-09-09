@@ -11,7 +11,10 @@
     "square:verify-sandbox": "node --experimental-strip-types scripts/verify-square-sandbox.mjs",
     "square:qa-webhook": "node --experimental-strip-types scripts/square-qa-webhook.mjs",
     "square:qa-webhook-fixture": "node scripts/generate-square-qa-webhook-fixture.mjs",
-    "test:pg": "node --test --test-concurrency=1 tests/pg/*.test.cjs"
+    "test:pg": "node --test --test-concurrency=1 tests/pg/*.test.cjs tests/database-readiness.pg.test.cjs",
+    "database:plan": "node scripts/database-readiness.mjs plan",
+    "database:check": "node scripts/database-readiness.mjs check",
+    "database:migrate:qa": "node scripts/database-readiness.mjs apply"
   },
   "dependencies": {
     "next": "^15.3.4",

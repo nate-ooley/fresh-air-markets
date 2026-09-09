@@ -89,7 +89,7 @@ export default function AdminDashboard({ weekends, demoMode, account }: AdminDas
       if (!res.ok) {
         flash("err", data.error ?? "Action failed.");
       } else {
-        flash("ok", action === "approve" ? "Vendor approved — booth locked in and GHL notified." : `Booking ${action}ed.`);
+        flash("ok", action === "approve" ? "Booking approval saved." : `Booking ${action}ed.`);
       }
       await refresh();
     } finally {

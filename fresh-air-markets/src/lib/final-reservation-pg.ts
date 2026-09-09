@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import postgres from "postgres";
 import { FRESH_AIR_SEASON_DATES } from "./fresh-air-season";
+import { DEMO_MARKET_ID } from "./seed";
 import {
   FRESH_AIR_FINAL_RESERVATION_QUOTE_VERSION,
   finalReservationCheckoutDescription,
@@ -44,6 +45,11 @@ export function freshAirFinalReservationConfig(
 ): FreshAirFinalReservationConfig {
   const marketId = env.FAME_MARKET_ACCOUNT_ID?.trim() ?? "";
   const capacityValue = env.FAME_BOOTH_CAPACITY?.trim() ?? "";
+  // The demo manager password is public. It must never own real applications
+  // or become a payable market through a copied environment setting.
+  if (marketId === DEMO_MARKET_ID) {
+    throw new Error("Final reservations require a private market account.");
+  }
   if (!marketId || env.FAME_SEASON_ID !== "2026-2027" || !/^[1-9]\d{0,3}$/.test(capacityValue)) {
     throw new Error("Final reservation configuration is incomplete.");
   }

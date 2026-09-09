@@ -4,6 +4,7 @@ import { squarePreviewSandboxRuntimeConfig, verifySquareSandboxSetup } from "@/l
 import { dispatchSquareSandboxCheckout, validSquareReservationId } from "@/lib/square-payment";
 import { postgresSquarePaymentCheckoutStore } from "@/lib/square-payment-pg";
 import { squareQaCheckoutTransport, squareQaSupportConfig } from "@/lib/square-qa-faults";
+import { DEMO_MARKET_ID } from "@/lib/seed";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -32,6 +33,11 @@ function responseForOrder(status: 200 | 201, order: {
 export async function POST(_request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const marketId = await getSessionAccountId();
   if (!marketId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  if (marketId === DEMO_MARKET_ID) {
+    return NextResponse.json({ error: "Payment checkout requires a private market account." }, {
+      status: 403, headers: { "Cache-Control": "no-store" },
+    });
+  }
   if (!process.env.DATABASE_URL) {
     return NextResponse.json({ error: "Persistent payment storage is not configured." }, { status: 503 });
   }

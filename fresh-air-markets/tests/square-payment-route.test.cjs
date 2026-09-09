@@ -15,6 +15,7 @@ function loadRoute({ authenticated = true, configured = true, verifiedIdentity, 
   mod.filename = filename;
   mod.paths = module.paths;
   mod.require = (id) => {
+    if (id === '@/lib/seed') return require('../.test-build/seed.js');
     if (id === '@/lib/auth') return { getSessionAccountId: async () => authenticated ? 'qa-market' : null };
     if (id === '@/lib/square') return {
       squarePreviewSandboxRuntimeConfig: () => {

@@ -287,3 +287,21 @@ test('inquiry blocks oversized bodies even with false or absent content length',
     assert.equal(mutations(), 0);
   }
 });
+
+test('legacy subscription signup cannot create accounts, sessions, or CRM events', async () => {
+  let effects = 0;
+  const { route } = loadRoute('auth/signup', false, {
+    getAccountByEmail: async () => { effects++; throw new Error('unexpected database access'); },
+    createAccount: async () => { effects++; throw new Error('unexpected account creation'); },
+  });
+  for (const plan of ['starter', 'pro', 'season', '', 'unexpected']) {
+    const response = await route.POST(new NextRequest('https://unit-test.invalid/api/auth/signup', {
+      method: 'POST', headers: submissionHeaders,
+      body: JSON.stringify({ ownerName: 'QA', email: 'nate@autocraftstudios.com', password: 'qa-placeholder', marketName: 'QA', plan }),
+    }));
+    assert.equal(response.status, 410);
+    assert.equal(response.headers.get('set-cookie'), null);
+    assert.equal((await response.json()).applicationUrl, 'https://freshairmarketsandevents.com/vendors');
+  }
+  assert.equal(effects, 0);
+});
