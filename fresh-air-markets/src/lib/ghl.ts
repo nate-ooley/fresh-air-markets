@@ -18,8 +18,17 @@ import { prettyDate } from "./dates";
 
 const GHL_BASE = "https://services.leadconnectorhq.com";
 const GHL_VERSION = "2021-07-28";
+const FRESH_AIR_LOCATION_ID = "aooAnUXF0COePorBo7wL";
 
 export type GhlEvent = "booth-inquiry" | "booth-approved" | "booth-rejected";
+
+// Fresh Air uses exact-identity workflow adapters, never legacy contact upserts
+// or lifecycle tags. Guard the deployment rather than a caller-supplied account
+// so demo/other-market paths cannot borrow the dedicated integration token.
+function legacySyncDisabled(): boolean {
+  return process.env.GHL_LOCATION_ID?.trim() === FRESH_AIR_LOCATION_ID
+    || process.env.FAME_MARKET_ACCOUNT_ID !== undefined;
+}
 
 function configured(): boolean {
   return Boolean(process.env.GHL_API_TOKEN && process.env.GHL_LOCATION_ID);
@@ -44,6 +53,7 @@ async function ghlFetch(path: string, body: unknown): Promise<Response> {
  *   bhq-signup, bhq-plan-<starter|pro|season>
  */
 export async function syncOperatorToGhl(account: Account): Promise<boolean> {
+  if (legacySyncDisabled()) return false;
   if (!configured()) {
     console.log(`[ghl] not configured — skipped operator signup for ${account.email}`);
     return false;
@@ -79,6 +89,7 @@ export async function syncBookingToGhl(
   event: GhlEvent,
   boothLabel: string,
 ): Promise<boolean> {
+  if (legacySyncDisabled()) return false;
   if (!configured()) {
     console.log(`[ghl] not configured — skipped '${event}' for ${booking.vendor.email}`);
     return false;

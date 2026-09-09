@@ -46,7 +46,7 @@ code, URLs, tickets, or this repository.
 | --- | --- |
 | `DATABASE_URL`; optional `DATABASE_URL_UNPOOLED` | Secret: verified QA Neon connection. Both must identify the same endpoint/database/user. |
 | `AUTH_SECRET` | Secret: strong manager-session signing secret. |
-| `GHL_API_TOKEN` | Secret: Fresh Air sub-account token with `contacts.readonly`, `opportunities.readonly`, `opportunities.write`, and `locations/customFields.readonly`. |
+| `GHL_API_TOKEN` | Secret: Fresh Air subaccount Private Integration token. L06/L07 and payment-field workers need `contacts.readonly`, `opportunities.readonly`, `opportunities.write`, and `locations/customFields.readonly`. Payment email also needs `conversations/message.write` and `conversations/message.readonly`. |
 | `GHL_LOCATION_ID=aooAnUXF0COePorBo7wL` | Config: exact Fresh Air sub-account. |
 | `FAME_MARKET_ACCOUNT_ID`; `FAME_SEASON_ID=2026-2027`; `FAME_BOOTH_CAPACITY` | Config: existing private portal account, confirmed season, and reviewed positive capacity. The account ID is not the HighLevel location ID or demo tenant. |
 | `GHL_APPLICATION_PIPELINE_ID` | Config: actual Production pipeline ID, retained in Preview to prove it differs from QA. |
@@ -59,6 +59,13 @@ code, URLs, tickets, or this repository.
 | `GHL_AGREEMENT_NOTIFICATION_EMAIL=nate@autocraftstudios.com` | Config: internal QA notification destination. Queuing an item does not prove a sender is connected. |
 | `CRON_SECRET` | Secret: 32+ character authenticated recovery credential. |
 | `DOCUMENT_INGRESS_WEBHOOK_SECRET`; `DOCUMENT_SCANNER_WEBHOOK_SECRET` | Secrets used by the current portal document implementation only. They do not establish that the native document bridge exists. |
+
+Follow [Private Integration setup](highlevel-private-integration-setup.md) for
+the exact permissions and owner handoff. Add `forms.readonly` for the planned
+native document-submission reader; granting it alone does not connect that
+reader or establish a document test pass. The implemented adapters send
+`Version: v3`, matching the current official endpoint documentation. Do not
+replace it with an old dated header copied from a generic token example.
 
 `GHL_AGREEMENT_PIPELINE_ID` is an optional legacy alias only. If present, it
 must equal the selected application pipeline. Do not configure agreement-sent,

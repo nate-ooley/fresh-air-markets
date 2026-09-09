@@ -35,6 +35,17 @@ itself. Verify all native downstream recipients first. Only
 recipient mailboxes. Test administrators must be routed to Nate. CC, BCC,
 SMS, scheduled delivery and reply-all are never included by the adapter.
 
+The exact implemented token scopes are `contacts.readonly`,
+`opportunities.readonly`, `opportunities.write`,
+`locations/customFields.readonly`, `conversations/message.write` and
+`conversations/message.readonly`. The last two authorize the email POST and
+receipt GET respectively. The message-write scope covers multiple channels;
+the adapter's fixed Email type and recipient guards enforce this project's
+email-only behavior. Ordinary `conversations.readonly` and
+`conversations.write` are not used by the current dispatcher. See the
+[Private Integration setup](highlevel-private-integration-setup.md) for the
+scope-to-endpoint mapping and separate planned `forms.readonly` access.
+
 ## Dispatch contract
 
 1. Load the committed reservation and exact application identity. Create one
@@ -100,8 +111,11 @@ The isolated tests use mock transports and send nothing.
   `GET /conversations/messages/email/:id` exposes actual recipients and status.
 - [Search conversations](https://marketplace.gohighlevel.com/docs/ghl/conversations/search-conversation/)
   and [Get messages](https://marketplace.gohighlevel.com/docs/ghl/conversations/get-messages/):
-  exact contact/location investigation only when a receipt is missing.
+  optional operator investigation when a receipt is missing. The current
+  dispatcher does not call these endpoints; conversation search would require
+  the additional `conversations.readonly` scope if later implemented.
 - [Scopes](https://marketplace.gohighlevel.com/docs/Authorization/Scopes/):
-  contacts read, opportunities read/write, locations/customFields.readonly, conversation read permissions,
-  message read and message write permissions. This adapter requires no contact
-  write/upsert permission.
+  exact scope names are listed above. This adapter requires no contact
+  write/upsert permission. The [official v3 Conversations OpenAPI](https://github.com/GoHighLevel/highlevel-api-docs/blob/main/apps/v3/conversations-v3.json)
+  explicitly assigns `conversations/message.readonly` to the email receipt GET;
+  the summary scopes table does not list every message-read endpoint.
