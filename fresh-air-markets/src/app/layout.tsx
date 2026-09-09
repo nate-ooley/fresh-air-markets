@@ -6,9 +6,9 @@ const fraunces = Fraunces({ subsets: ["latin"], variable: "--font-fraunces" });
 const inter = Inter({ subsets: ["latin"], variable: "--font-inter" });
 
 export const metadata: Metadata = {
-  title: "Fresh Air Markets & Events — Booth Rental Software for Farmers Markets",
+  title: "Fresh Air Markets & Events — Vendor Portal",
   description:
-    "A drag-and-drop visual map, vendor inquiry-and-approval workflow, and public booking page for farmers market operators. Start a free 14-day trial.",
+    "Apply to join the North Port Farmer’s Market and access market staff tools.",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
