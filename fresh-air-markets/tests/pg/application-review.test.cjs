@@ -9,6 +9,7 @@ const {
   dispatchApplicationReviewOutboxById,
   dispatchApplicationReviewOutbox,
   getApplicationReviewDetail,
+  getApplicationReviewOutboxStatus,
   listApplicationReviewDetails,
   markApplicationReviewOutboxDelivered,
   recordApplicationReview,
@@ -159,6 +160,21 @@ test('a correction requires a newer captured source event before a later approva
   assert.equal((await recordApplicationReview(decision(application, {
     idempotencyKey: '77777777-7777-4777-8777-777777777777', action: 'request_changes', reason: 'Upload the current certificate.',
   }), first)).kind, 'applied');
+  const repeatedCorrection = await recordApplicationReview(decision(application, {
+    idempotencyKey: '77777777-7777-4777-8777-777777777777', action: 'request_changes', reason: 'Upload the current certificate.',
+  }), second);
+  assert.equal(repeatedCorrection.kind, 'duplicate');
+  const corrections = await first`SELECT reason, to_state, source_event_id, outbox_id FROM fame_application_review_events`;
+  assert.equal(corrections.length, 1);
+  assert.equal(corrections[0].reason, 'Upload the current certificate.');
+  assert.equal(corrections[0].to_state, 'changes_requested');
+  assert.equal(corrections[0].source_event_id, application.eventId);
+  assert.equal(corrections[0].outbox_id, repeatedCorrection.outboxId);
+  const correctionJobs = await first`SELECT topic, payload FROM fame_application_outbox`;
+  assert.equal(correctionJobs.length, 1);
+  assert.equal(correctionJobs[0].topic, 'application-review');
+  assert.equal(correctionJobs[0].payload.reason, 'Upload the current certificate.');
+  assert.equal(correctionJobs[0].payload.reviewState, 'changes_requested');
   assert.equal((await recordApplicationReview(decision(application, {
     idempotencyKey: '88888888-8888-4888-8888-888888888888', action: 'approve',
   }), second)).kind, 'awaiting_resubmission');
@@ -381,4 +397,25 @@ test('an immediate exact-job delivery and a concurrent scheduler sweep claim one
   assert.equal(delivered[0].endsWith(result.outboxId), true);
   const [stored] = await first`SELECT status FROM fame_application_outbox WHERE id = ${result.outboxId}`;
   assert.equal(stored.status, 'delivered');
+});
+
+
+test('stored review delivery status belongs to the exact application, market, review event and outbox on replay', async () => {
+  const application = await seedApplication();
+  const saved = await recordApplicationReview(decision(application, { action: 'request_changes', reason: 'Correct the business name.' }), first);
+  const scope = { outboxId: saved.outboxId, reviewEventId: saved.reviewEventId, applicationId: application.applicationId, marketId: market };
+  assert.equal(await getApplicationReviewOutboxStatus(scope, first), 'pending');
+  await first`UPDATE fame_application_outbox SET status='failed', failed_at=statement_timestamp(), last_error_code='ghl_stage_diverged' WHERE id=${saved.outboxId}`;
+  assert.equal(await getApplicationReviewOutboxStatus(scope, second), 'failed');
+  await first`UPDATE fame_application_outbox SET status='delivered', delivered_at=statement_timestamp() WHERE id=${saved.outboxId}`;
+  assert.equal(await getApplicationReviewOutboxStatus(scope, second), 'delivered');
+  const sibling = await seedApplication();
+  const siblingReview = await recordApplicationReview(decision(sibling), first);
+  for (const patch of [{ marketId: otherMarket }, { applicationId: sibling.applicationId },
+    { reviewEventId: siblingReview.reviewEventId }, { outboxId: siblingReview.outboxId }]) {
+    assert.equal(await getApplicationReviewOutboxStatus({ ...scope, ...patch }, first), null);
+  }
+  // A malformed job payload must not be exposed merely because its IDs join the audit row.
+  await first`UPDATE fame_application_outbox SET payload=jsonb_set(payload, '{applicationId}', to_jsonb(${sibling.applicationId}::text)) WHERE id=${saved.outboxId}`;
+  assert.equal(await getApplicationReviewOutboxStatus(scope, first), null);
 });

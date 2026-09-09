@@ -9,7 +9,7 @@ const env = {
   GHL_LOCATION_ID: 'aooAnUXF0COePorBo7wL', GHL_APPLICATION_PIPELINE_ID: 'production-pipeline',
   GHL_QA_APPLICATION_PIPELINE_ID: 'qa-pipeline', GHL_PAYMENT_QA_ROUTING_VERIFIED: 'true',
   GHL_APPLICATION_REVIEW_STAGE_ID: 'qa-review', GHL_APPLICATION_APPROVED_STAGE_ID: 'qa-approved',
-  GHL_APPLICATION_CHANGES_REQUESTED_STAGE_ID: 'qa-changes', GHL_APPLICATION_DECLINED_STAGE_ID: 'qa-declined',
+  GHL_APPLICATION_DECLINED_STAGE_ID: 'qa-declined',
   GHL_PAYMENT_SYNC_ENABLED: 'true', GHL_PAYMENT_EMAIL_ENABLED: 'true', GHL_PAYMENT_DELIVERY_MODE: 'qa',
   GHL_AGREEMENT_STATUS_FIELD_ID: 'agreement-field', GHL_PAYMENT_STATUS_FIELD_ID: 'payment-field',
   GHL_PAYMENT_EMAIL_FROM: 'nate@autocraftstudios.com', FAME_VENDOR_PORTAL_ORIGIN: 'https://qa-farmers-market.vercel.app',
@@ -144,5 +144,18 @@ test('Production review keeps its configured production pipeline and refuses lef
   assert.deepEqual(mock.calls.map(call => call.method), ['GET', 'PUT', 'GET']);
   for (const patch of [{ GHL_QA_APPLICATION_PIPELINE_ID: 'qa-pipeline' }, { GHL_PAYMENT_QA_ROUTING_VERIFIED: 'true' }]) {
     assert.throws(() => readApplicationReviewDeliveryConfig({ ...prodEnv, ...patch }), error => error.code === 'ghl_config_missing');
+  }
+});
+
+
+test('Preview correction verifies only the exact allowed QA contact and Needs Review opportunity without any write', async () => {
+  const correction = { ...review, payload: { ...review.payload, reviewState: 'changes_requested', reason: 'Correct the business name.' } };
+  const mock = provider(); await deliverApplicationReviewToGhl(correction, reviewConfig, mock.transport);
+  assert.deepEqual(mock.calls.map(call => call.method), ['GET', 'GET']);
+  assert.equal(mock.opportunity.pipelineStageId, env.GHL_APPLICATION_REVIEW_STAGE_ID);
+  for (const options of [{ contactPatch: { email: 'laura@autocraftstudios.com' } }, { contactPatch: { id: 'other' } },
+    { opportunityPatch: { pipelineId: 'production-pipeline' } }, { opportunityPatch: { contactId: 'other' } }]) {
+    const wrong = provider(options); await assert.rejects(deliverApplicationReviewToGhl(correction, reviewConfig, wrong.transport));
+    assert.ok(wrong.calls.every(call => call.method === 'GET'));
   }
 });

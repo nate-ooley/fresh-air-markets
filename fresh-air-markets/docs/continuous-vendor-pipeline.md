@@ -5,8 +5,11 @@
 The original Asana reference (task 1218142524078858, sections 4, 11, 23 and 26)
 keeps the application pipeline simple and records agreement/payment progress in
 Opportunity custom fields. Earlier adapters incorrectly used extra operational
-stages. The repaired adapters preserve the exact opportunity in Approved with
-lifecycle status open and update only the corresponding custom field.
+stages. The repaired agreement/payment adapters preserve the exact opportunity
+in Approved with lifecycle status open and update only the corresponding custom
+field. An application correction preserves its portal reason and requires a
+newer submission; its native opportunity remains in Needs Review/Open. That
+reconciliation performs no PUT and does not send or queue a correction email.
 
 | Event with verified evidence | HighLevel field | Value |
 | --- | --- | --- |
@@ -43,13 +46,26 @@ Correct subaccount: `aooAnUXF0COePorBo7wL`.
 - Earlier work added Agreement Signed, Payment Pending, Payment Confirmed and
   Changes Requested stages. Those additions are not proof of the original
   workflow working. The three agreement/payment stages are no longer used by
-  the repaired adapters. They have not been deleted while references remain
-  unaudited. Changes Requested still needs a separate review-workflow correction.
+  the repaired adapters. Changes Requested is also no longer required: review
+  delivery uses the existing Needs Review stage. The extra stages have not been
+  deleted while references remain unaudited. General application-correction
+  communication still needs an exact application-bound notification route;
+  the manager UI explicitly says that notification has not been sent.
 - September 9: created and read back Contact file field Food License / Permit,
   key `contact.food_license__permit`, in Additional Info. It accepts one PDF,
-  JPG/JPEG, or PNG. No contact was changed and no message was sent. The field
-  must still be placed on a tested upload form and bound to exact application
-  review evidence.
+  JPG/JPEG, or PNG. No contact was changed and no message was sent.
+- September 9: created and reopened QA form
+  `kaqOCi9OUO6a1225zkK5`, "QA ONLY - Fresh Air Food License Upload - No Live Sends".
+  Replaced the copied COI element with the existing Food License / Permit field;
+  the field's unique-key readback matches `contact.food_license__permit`.
+  Email and file are required; upload settings show PDF, JPG/JPEG and PNG only,
+  multiple files off. Form-level email notification and auto-responder are off.
+  This is configuration evidence only: no submission or workflow was executed.
+  The copied form's Submit control is still above the upload because native
+  drag/reorder attempts did not persist, and placeholder policy links remain.
+  Correct those before use. Exact application binding and downstream workflow
+  containment are still unverified. The field uses HighLevel public-file mode;
+  it is not evidence of the portal's private-transfer or scanner path.
 - AI Studio project `1779802876495102326` lists default domain
   `https://fresh-air-landing.vibepreview.com` and live apex/www domains. UI
   configuration alone does not prove the default domain serves independently.

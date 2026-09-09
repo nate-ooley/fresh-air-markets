@@ -9,7 +9,7 @@ const { NextRequest } = require('next/server');
 const appId = '11111111-1111-4111-8111-111111111111';
 const key = '22222222-2222-4222-8222-222222222222';
 
-function loadRoute({ authenticated = true, detail, record, deliveryConfigured = false, dispatch, deliver } = {}) {
+function loadRoute({ authenticated = true, detail, record, deliveryConfigured = false, dispatch, deliver, outboxStatus } = {}) {
   const filename = path.resolve(__dirname, '../src/app/api/admin/applications/[id]/review/route.ts');
   const compiled = ts.transpileModule(fs.readFileSync(filename, 'utf8'), {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
@@ -27,6 +27,7 @@ function loadRoute({ authenticated = true, detail, record, deliveryConfigured = 
           dates: ['2027-05-29'], fullSeason: false, requiresFinalDateConfirmation: false, category: 'Produce', details: null,
         },
       })),
+      getApplicationReviewOutboxStatus: outboxStatus || (async () => deliveryConfigured ? 'delivered' : 'pending'),
       recordApplicationReview: record || (async () => ({ kind: 'applied', applicationId: appId, reviewState: 'approved', reviewEventId: 'event', outboxId: 'outbox' })),
       dispatchApplicationReviewOutboxById: dispatch || (async () => ({ delivered: 1, deferred: 0, failed: 0, stale: 0 })),
     };
@@ -139,4 +140,67 @@ test('an idempotent replay immediately retries only its original exact outbox jo
   assert.deepEqual(dispatched, { id: 'outbox', options: undefined });
   assert.equal(delivered, 1);
   assert.deepEqual(await response.json(), { application: { id: appId, reviewState: 'approved' }, reviewEventId: 'event', duplicate: true, delivery: 'delivered' });
+});
+
+
+test('correction API distinguishes unsent vendor notice from delivered, queued or failed CRM reconciliation', async () => {
+  for (const [kind, delivered, failed] of [['applied', 1, 0], ['applied', 0, 0], ['applied', 0, 1], ['duplicate', 1, 0]]) {
+    let saved;
+    const route = loadRoute({ deliveryConfigured: true,
+      record: async input => { saved = input; return { kind, applicationId: appId, reviewState: 'changes_requested', reviewEventId: 'review-correction', outboxId: 'correction-outbox' }; },
+      dispatch: async id => { assert.equal(id, 'correction-outbox'); return { delivered, failed, deferred: 0, stale: 0 }; },
+      outboxStatus: async () => delivered ? 'delivered' : failed ? 'failed' : 'pending',
+    });
+    const response = await route.PATCH(request({ action: 'request_changes', sourceEventId: 'application:qa:current',
+      reason: '  Please correct the business name.  ' }, { 'Idempotency-Key': key }), { params: Promise.resolve({ id: appId }) });
+    assert.equal(response.status, 200); assert.equal(saved.reason, 'Please correct the business name.');
+    assert.deepEqual(await response.json(), { application: { id: appId, reviewState: 'changes_requested' },
+      reviewEventId: 'review-correction', duplicate: kind === 'duplicate', delivery: delivered ? 'delivered' : failed ? 'failed' : 'queued', vendorNotification: 'not_sent' });
+  }
+});
+
+test('correction API reports not_sent when CRM is not configured and does not attempt a notification', async () => {
+  let dispatched = 0;
+  const route = loadRoute({ record: async () => ({ kind: 'applied', applicationId: appId, reviewState: 'changes_requested', reviewEventId: 'correction', outboxId: 'outbox' }),
+    dispatch: async () => { dispatched++; throw new Error('not configured'); } });
+  const response = await route.PATCH(request({ action: 'request_changes', sourceEventId: 'application:qa:current', reason: 'Correct this name.' },
+    { 'Idempotency-Key': key }), { params: Promise.resolve({ id: appId }) });
+  const body = await response.json(); assert.equal(body.vendorNotification, 'not_sent'); assert.equal(body.delivery, 'queued');
+  assert.equal(dispatched, 0);
+});
+
+
+test('duplicate review with no claimed work preserves authoritative delivered or failed status in its exact scope', async () => {
+  for (const status of ['failed', 'delivered', 'pending', 'processing']) {
+    for (const deliveryConfigured of [true, false]) {
+      const events = [];
+      const route = loadRoute({ deliveryConfigured,
+        record: async () => ({ kind: 'duplicate', applicationId: appId, reviewState: 'changes_requested', reviewEventId: 'original-review', outboxId: 'original-outbox' }),
+        dispatch: async id => { events.push(['dispatch', id]); return { delivered: 0, failed: 0, deferred: 0, stale: 0 }; },
+        outboxStatus: async scope => { events.push(['status', scope]); return status; },
+      });
+      const response = await route.PATCH(request({ action: 'request_changes', sourceEventId: 'application:qa:current', reason: 'Correct the business name.',
+        marketId: 'foreign-market', applicationId: 'foreign-application', outboxId: 'foreign-job' }, { 'Idempotency-Key': key }), { params: Promise.resolve({ id: appId }) });
+      assert.equal(response.status, 200);
+      assert.deepEqual(events, [ ...(deliveryConfigured ? [['dispatch', 'original-outbox']] : []), ['status', {
+        outboxId: 'original-outbox', reviewEventId: 'original-review', applicationId: appId, marketId: 'qa-market',
+      }] ]);
+      const body = await response.json(); assert.equal(body.delivery, ['pending', 'processing'].includes(status) ? 'queued' : status);
+      assert.equal(body.vendorNotification, 'not_sent'); assert.equal(body.duplicate, true);
+    }
+  }
+});
+
+test('missing, foreign or unavailable stored review status stays unknown rather than falsely queued or delivered', async () => {
+  for (const outboxStatus of [async () => null, async () => { throw new Error('private-vendor-and-token'); }]) {
+    const route = loadRoute({ deliveryConfigured: true, outboxStatus,
+      // Even a successful dispatch count is not a replacement for the exact stored result.
+      dispatch: async () => ({ delivered: 1, failed: 0, deferred: 0, stale: 0 }),
+      record: async () => ({ kind: 'duplicate', applicationId: appId, reviewState: 'changes_requested', reviewEventId: 'review', outboxId: 'outbox' }),
+    });
+    const response = await route.PATCH(request({ action: 'request_changes', sourceEventId: 'application:qa:current', reason: 'Correct the business name.' },
+      { 'Idempotency-Key': key }), { params: Promise.resolve({ id: appId }) });
+    assert.equal(response.status, 200); const body = await response.json();
+    assert.equal(body.delivery, 'unknown'); assert.equal(body.vendorNotification, 'not_sent'); assert.doesNotMatch(JSON.stringify(body), /private-vendor-and-token/);
+  }
 });

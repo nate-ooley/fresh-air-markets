@@ -4,6 +4,7 @@ import { parseApplicationReview, validApplicationId } from "@/lib/application-re
 import {
   dispatchApplicationReviewOutboxById,
   getApplicationReviewDetail,
+  getApplicationReviewOutboxStatus,
   recordApplicationReview,
 } from "@/lib/application-review-pg";
 import {
@@ -63,20 +64,33 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
     // A saved decision must remain visible even if HighLevel is unavailable.
     // When delivery is configured, try only this committed outbox item right
     // away; the authenticated worker route owns later retry/recovery.
-    let delivery: "delivered" | "queued" = "queued";
+    let delivery: "delivered" | "queued" | "failed" | "unknown" = "unknown";
     if ((result.kind === "applied" || result.kind === "duplicate")
       && result.outboxId
       && applicationReviewDeliveryConfigured(process.env)) {
       try {
         const config = readApplicationReviewDeliveryConfig(process.env);
-        const dispatched = await dispatchApplicationReviewOutboxById(
+        await dispatchApplicationReviewOutboxById(
           result.outboxId,
           message => deliverApplicationReviewToGhl(message, config),
         );
-        if (dispatched.delivered === 1) delivery = "delivered";
       } catch {
         // The outbox transaction has already committed. Keep the decision and
         // let the authenticated retry worker recover without leaking details.
+      }
+    }
+    // A failed/delivered replay is not claimable and has zero dispatch counts.
+    // Read the authoritative result even if delivery is currently disabled.
+    if (result.outboxId) {
+      try {
+        const status = await getApplicationReviewOutboxStatus({
+          outboxId: result.outboxId, reviewEventId: result.reviewEventId,
+          applicationId: id, marketId,
+        });
+        if (status === "delivered" || status === "failed") delivery = status;
+        else if (status === "pending" || status === "processing") delivery = "queued";
+      } catch {
+        // The decision is already saved; a failed read cannot prove queued work.
       }
     }
     return NextResponse.json({
@@ -84,6 +98,9 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
       reviewEventId: result.reviewEventId,
       duplicate: result.kind === "duplicate",
       delivery,
+      // The review outbox reconciles CRM state only. No application-correction
+      // email sender exists here, so never imply that one is queued or sent.
+      ...(decision.action === "request_changes" ? { vendorNotification: "not_sent" as const } : {}),
     });
   } catch {
     return NextResponse.json({ error: "Application review is unavailable." }, { status: 503 });

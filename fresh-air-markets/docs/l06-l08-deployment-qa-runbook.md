@@ -1,185 +1,217 @@
 # L06–L08 deployment and QA runbook
 
-This runbook turns the exact-record code in PR #1 into a controlled QA
-integration. It covers application approval (L06), agreement completion (L07)
-and insurance upload/review (L08). Square, reservations, SMS, and production
-contacts are outside this run.
+Use this runbook for application review (L06), agreement completion (L07), and
+insurance/food-license evidence (L08). It describes the current implementation,
+including migration 021. It does not establish a hosted workflow pass or
+production readiness. The five scenario groups for each workflow are in
+[the QA matrix](l06-l08-qa-matrix.md).
 
-## 1. Prepare a QA deployment
+## 1. Pin the QA environment and native mapping
 
-Use the Farmers Market Vercel project and a database that is safe for the two
-approved QA vendors only:
+Use the Farmers Market Vercel project, its protected Preview deployment, and a
+verified separate QA Neon database. A Preview label alone does not prove that
+the underlying database is isolated. Record the deployment commit and reviewed
+database endpoint; preserve existing applicants and history.
 
-- `lnooley@gmail.com`
-- `nate@autocraftstudios.com`
+Every test vendor and administrator message must go only to
+`lnooley@gmail.com` or `nate@autocraftstudios.com`. Use Nate for the internal QA
+recipient. No SMS, live-contact messages, or live-admin messages are permitted.
+Inspect all downstream native triggers and recipients before setting the QA
+routing flag or enabling workers. User-confirmed earlier form-email receipt is
+partial evidence; it does not prove the current deployed integration.
 
-Set the following server-side variables in the QA deployment. Keep every
-secret out of HighLevel form fields, AI Studio browser code, links, and this
-repository.
+The original application pipeline stays intact. L06 uses its existing Needs
+Review, Approved, and Declined stages. `request_changes` remains Needs
+Review/Open and makes no opportunity update or vendor-email call. Agreement and
+payment progress use Opportunity custom fields on the same Approved/Open
+opportunity; they do not use extra operational stages or a separate agreement
+pipeline.
 
-| Variable | Required for |
+| Verified event | Exact native field | Expected value |
+| --- | --- | --- |
+| Bound agreement completed | Vendor Agreement Status | Signed |
+| Eligible checkout committed | Vendor Payment Status | Ready for Payment |
+| Exact provider email receipt proves sent/delivered | Vendor Payment Status | Payment Sent |
+| Exact signed Square COMPLETED event reconciled | Vendor Payment Status | Paid |
+
+Only the agreement row is a mutation tested by L07. The payment rows explain
+the shared mapping and downstream boundary; payment acceptance needs its own
+Sandbox tests. Production payment entry must start at
+`https://freshairmarketsandevents.com`.
+
+Use these server-side variables. Never put secrets in public forms, browser
+code, URLs, tickets, or this repository.
+
+| Variable | Type and purpose |
 | --- | --- |
-| `DATABASE_URL` | L06, L07, L08 persistent state |
-| `AUTH_SECRET` | signed manager sessions |
-| `GHL_LOCATION_ID` | all HighLevel source validation |
-| `FAME_MARKET_ACCOUNT_ID` | portal `accounts.id` for Fresh Air, not the HighLevel location ID |
-| `FAME_SEASON_ID=2026-2027` | all exact-record mappings |
-| `GHL_APPLICATION_WEBHOOK_SECRET` | L06 application intake event |
-| `GHL_API_TOKEN` with `contacts.readonly`, `opportunities.readonly` + `opportunities.write` | exact current QA contact checks and HighLevel opportunity updates |
-| `GHL_APPLICATION_PIPELINE_ID` | actual Production pipeline ID, retained in Preview only to verify the QA pipeline is different |
-| `GHL_QA_APPLICATION_PIPELINE_ID` | separate Preview QA pipeline shared by review and payment delivery |
-| Four `GHL_APPLICATION_*_STAGE_ID` values | Review, Approved, Changes Requested and Declined stages in that QA pipeline |
-| `GHL_PAYMENT_QA_ROUTING_VERIFIED=true` | set only after downstream review/payment workflows are verified to use QA recipients exclusively, with no SMS |
-| `CRON_SECRET` | L06 authenticated retry scheduler |
-| `GHL_AGREEMENT_WEBHOOK_SECRET` | L07 agreement issued/completed events |
-| `GHL_AGREEMENT_TEMPLATE_ID` | L07 approved template gate |
-| `GHL_AGREEMENT_NOTIFICATION_EMAIL=nate@autocraftstudios.com` | QA-only L07 notice destination |
-| `GHL_AGREEMENT_PIPELINE_ID`, sent and completed stage IDs | L07 exact signed-agreement stage mapping |
-| `DOCUMENT_INGRESS_WEBHOOK_SECRET` | L08 private-transfer intake |
-| `DOCUMENT_SCANNER_WEBHOOK_SECRET` | L08 scanner callback |
+| `DATABASE_URL`; optional `DATABASE_URL_UNPOOLED` | Secret: verified QA Neon connection. Both must identify the same endpoint/database/user. |
+| `AUTH_SECRET` | Secret: strong manager-session signing secret. |
+| `GHL_API_TOKEN` | Secret: Fresh Air sub-account token with `contacts.readonly`, `opportunities.readonly`, `opportunities.write`, and `locations/customFields.readonly`. |
+| `GHL_LOCATION_ID=aooAnUXF0COePorBo7wL` | Config: exact Fresh Air sub-account. |
+| `FAME_MARKET_ACCOUNT_ID`; `FAME_SEASON_ID=2026-2027`; `FAME_BOOTH_CAPACITY` | Config: existing private portal account, confirmed season, and reviewed positive capacity. The account ID is not the HighLevel location ID or demo tenant. |
+| `GHL_APPLICATION_PIPELINE_ID` | Config: actual Production pipeline ID, retained in Preview to prove it differs from QA. |
+| `GHL_QA_APPLICATION_PIPELINE_ID` | Config, Preview only: one separate QA application pipeline shared by review, agreement, and payment delivery. |
+| `GHL_APPLICATION_REVIEW_STAGE_ID`; `GHL_APPLICATION_APPROVED_STAGE_ID`; `GHL_APPLICATION_DECLINED_STAGE_ID` | Config: three distinct IDs from the selected pipeline's existing stages. No Changes Requested stage ID is required. |
+| `GHL_AGREEMENT_STATUS_FIELD_ID`; `GHL_PAYMENT_STATUS_FIELD_ID` | Config: exact distinct Opportunity custom-field IDs. Workers verify location, model, name, options, and values; field labels are not IDs. |
+| `GHL_PAYMENT_QA_ROUTING_VERIFIED=true` | Config, Preview only: set after native routing and recipient isolation are verified. A pipeline name alone is not proof. |
+| `GHL_APPLICATION_WEBHOOK_SECRET` | Secret: authenticated L06 application capture. |
+| `GHL_AGREEMENT_WEBHOOK_SECRET`; `GHL_AGREEMENT_TEMPLATE_ID` | Secret and Config respectively: authenticated issued/completed events and the one approved template. |
+| `GHL_AGREEMENT_NOTIFICATION_EMAIL=nate@autocraftstudios.com` | Config: internal QA notification destination. Queuing an item does not prove a sender is connected. |
+| `CRON_SECRET` | Secret: 32+ character authenticated recovery credential. |
+| `DOCUMENT_INGRESS_WEBHOOK_SECRET`; `DOCUMENT_SCANNER_WEBHOOK_SECRET` | Secrets used by the current portal document implementation only. They do not establish that the native document bridge exists. |
 
-The preview is a build check only until these variables and the migrations
-exist. A route returning `503` for missing persistent storage is expected in
-an unconfigured preview and is not a QA pass.
+`GHL_AGREEMENT_PIPELINE_ID` is an optional legacy alias only. If present, it
+must equal the selected application pipeline. Do not configure agreement-sent,
+agreement-completed, payment-pending, or payment-confirmed stage IDs for the
+repaired field workers. Existing obsolete stages must not be deleted without
+checking remaining native references.
 
-Review delivery requires the Vercel Preview runtime. Never replace
-`GHL_APPLICATION_PIPELINE_ID` with the QA ID: the distinct QA variable is selected
-automatically, matching payment email and paid-status delivery. Review also
-checks the exact current contact email against the two approved addresses before
-any stage update. Production uses the Production pipeline and its stage IDs and
-must not contain nonempty `GHL_QA_*` or `GHL_PAYMENT_QA_*` variables.
+Use Vercel's actual `VERCEL=1` and `VERCEL_ENV=preview` runtime. Production
+configuration rejects nonempty `GHL_QA_*` and `GHL_PAYMENT_QA_*` controls.
+Keep payment delivery flags disabled during this L06–L08-only run. Review and
+agreement processing do not require Square credentials. A `503` from missing
+configuration is a blocked test, not a pass.
 
-## 2. Apply the portal migrations
+## 2. Apply and verify the full QA schema
 
-The portal store bootstraps its original booking tables, but it does **not**
-apply L06–L08 migrations automatically. Apply these files in order to the
-reviewed QA database:
+Follow [database readiness](database-readiness.md) for private injection of the
+Preview variables. Pause old workers and QA writers during upgrade, especially
+old stage-writing workers. Use the checked-in runner rather than applying only
+the former L06–L08 subset:
 
-1. `docs/migrations/001-application-handoff.sql`
-2. `docs/migrations/004-application-review-outbox.sql`
-3. `docs/migrations/005-agreement-completion-outbox.sql`
-4. `docs/migrations/006-application-document-ledger.sql`
-5. `docs/migrations/007-agreement-completion-stage-outbox.sql`
-6. `docs/migrations/008-application-opportunity-identity.sql`
-7. `docs/migrations/009-agreement-stage-terminal-state.sql`
-8. `docs/migrations/010-application-review-terminal-state.sql`
-
-For a PostgreSQL command-line session pointed at the reviewed QA database:
-
-```bash
-psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f docs/migrations/001-application-handoff.sql
-psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f docs/migrations/004-application-review-outbox.sql
-psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f docs/migrations/005-agreement-completion-outbox.sql
-psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f docs/migrations/006-application-document-ledger.sql
-psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f docs/migrations/007-agreement-completion-stage-outbox.sql
-psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f docs/migrations/008-application-opportunity-identity.sql
-psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f docs/migrations/009-agreement-stage-terminal-state.sql
-psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f docs/migrations/010-application-review-terminal-state.sql
+```sh
+node scripts/database-readiness.mjs plan
+node scripts/database-readiness.mjs check --qa --expected-host=YOUR_QA_NEON_HOST
+node scripts/database-readiness.mjs apply --qa --expected-host=YOUR_QA_NEON_HOST
+node scripts/database-readiness.mjs check --qa --expected-host=YOUR_QA_NEON_HOST
 ```
 
-Record the database target, migration timestamp and commit SHA in the Asana
-launch grid. The successful CI PostgreSQL suite proves the migration sequence
-on a disposable database; it does not prove the deployed database.
+Replace the host placeholder with the verified QA endpoint hostname; keep the
+connection string private. The reviewed sequence is **all 21 numbered
+migrations, 001–021**, including the inquiry, reservation, payment, and field
+receipt migrations. Base portal tables and the actual private account must
+already exist. The runner does not create a customer account or repair a
+placeholder database URL.
 
-## 3. Configure HighLevel server-side events
+Migration 021 requires `ghl_opportunity_fields_v1` receipts with exact native
+identity and configured field/value evidence. It preserves legacy stage-receipt
+history and fences/requeues eligible legacy work for verification. It does not
+call HighLevel, fabricate successful field receipts, or silently revive failed
+manual-review work. Never resume an old stage-writing worker after this upgrade.
 
-Keep every workflow draft until its endpoint returns a successful QA response.
-Never place the bearer secret in a public form or browser action.
+Save the runner result and commit in the Linear evidence task. Asana receives
+the top-level status only. A successful disposable PostgreSQL test or migration
+check does not prove that a hosted workflow, email, or payment succeeded.
 
-### L06: application intake and exact manager review
+## 3. Wire and test L06 exact application review
 
-After a QA form creates/updates a contact and exact opportunity, make a
-server-side call to:
+After a QA form has captured its contact and exact opportunity, the native
+server-side integration calls `POST /api/integrations/highlevel/applications`
+with `Authorization: Bearer <GHL_APPLICATION_WEBHOOK_SECRET>`. Use a stable
+event ID, exact contact/opportunity/location/season identities and a complete
+source snapshot. This route captures or replays an application; it does not
+create the contact, notify a vendor, or approve an application. Existing form
+entrants need the same exact capture mapping without duplicate imports.
 
-`POST /api/integrations/highlevel/applications`
+The signed-in manager reads and submits
+`GET` / `PATCH /api/admin/applications/:applicationId/review`. The session,
+application path, newest source event and idempotency key select the decision.
+The durable review event/outbox commits before delivery is attempted.
 
-Use `Authorization: Bearer <GHL_APPLICATION_WEBHOOK_SECRET>` and include a
-stable source event ID, existing contact ID, exact opportunity ID, configured
-location ID, season and source snapshot. The endpoint creates or replays one
-portal application; it does not create a HighLevel contact, send mail, or make
-an approval decision.
+- Approval and decline reconcile only the stored opportunity from Needs Review
+  to the configured target. Exact contact/location/pipeline and Open status are
+  verified; a retry already at the correct target is a read-only success.
+- Correction preserves `changes_requested` and the manager reason in the portal.
+  Native Needs Review/Open is verified without a `PUT`. A moved or closed
+  opportunity fails rather than being pulled backward. Another review requires
+  a newer captured submission.
+- Correction returns `vendorNotification: "not_sent"`, separately from CRM
+  delivery. Contact the vendor separately with the corrections. There is no
+  automatic application-correction email sender or queued correction email.
+  Native insurance-correction emails do not establish such a route.
 
-The manager must load and submit the exact portal review route:
+`GET /api/internal/cron/application-review-outbox` is the authenticated recovery
+path. Permanent mapping/identity failures need operator review; they must not
+be treated as automatically queued recovery. Retrying a saved decision retains
+the persisted delivered/failed status even if no job is claimable. An unreadable
+status is unknown, not proof of delivery or queued recovery.
 
-`GET` / `PATCH /api/admin/applications/:applicationId/review`
+## 4. Wire and test L07 exact agreement completion
 
-The session, path application ID, newest source event and idempotency key bind
-the decision. After it commits, the portal immediately attempts only that new
-outbox item. The worker reads the immutable opportunity and verifies its
-contact, pipeline and stage before it updates the configured stage; it reads
-the opportunity again before recording delivery. This prevents a retry from
-triggering a second workflow. Configure an authenticated scheduler to call
-`GET /api/internal/cron/application-review-outbox` with
-`Authorization: Bearer <CRON_SECRET>` for recovery of transient provider
-failures. Do not configure a cron cadence until the Vercel plan supports it.
+Follow [agreement completion integration](agreement-completion-integration.md).
+The native issuance process must create the actual document, bind its IDs via
+`POST /api/integrations/highlevel/agreements/issued`, then send a genuine
+completed event to `POST /api/integrations/highlevel/agreements/completed`.
+Both calls use `Authorization: Bearer <GHL_AGREEMENT_WEBHOOK_SECRET>` and the
+same real document/template/contact/opportunity/location/season identities.
+An unbound, superseded, mismatched, or incomplete document must not complete.
 
-### L07: agreement issued and completed
+A completion atomically records the receipt, one notification item, and one
+agreement field-delivery item. The historical stage-outbox table/route names
+remain for compatibility, but the worker now verifies Approved/Open and changes
+only Vendor Agreement Status from Sent to Signed. Already Signed is a verified
+read-only result. It never changes the pipeline, stage, or lifecycle status.
 
-After HighLevel issues the approved QA agreement, call:
+The webhook immediately attempts its exact field-delivery item. Recovery uses
+`GET /api/internal/cron/agreement-completion-stage-outbox`. A final exact GET
+and field receipt prove CRM reconciliation only. The independent internal
+notification queue is not proof of an email send; a connected sender, exact
+provider receipt, and QA inbox evidence are required to accept notification.
+Use an authorized test signer and QA-only native alerts for any genuine signing.
 
-`POST /api/integrations/highlevel/agreements/issued`
+## 5. Resolve the L08 native-document bridge before claiming acceptance
 
-After a genuine completed signing event, call:
+The business requirement is insurance/document submission, Thomas's review,
+correction/resubmission history, and a food-license gate when Thomas decides a
+license is required. The original specification does **not** mandate buying a
+separate malware-scanning product. A field on a native form, an email reply, or
+a native Submitted/Approved value does not by itself provide the exact portal
+document/version evidence used by final reservation.
 
-`POST /api/integrations/highlevel/agreements/completed`
+The current portal implementation has a private-transfer primitive, bounded
+file validation, protected ingress, a `pending_scan` gate, versioned manager
+review, and a durable document outbox. It accepts PDF, PNG, and JPEG up to
+10 MiB under its existing byte/type checks. These are current implementation
+requirements, not newly inferred business requirements.
 
-Both calls use `Authorization: Bearer <GHL_AGREEMENT_WEBHOOK_SECRET>` and
-must contain the real event, document, template, contact and opportunity IDs.
-The completed route accepts only a document that was first bound through the
-issued route. On a captured completion, it immediately attempts an exact
-opportunity-stage update using the completed document's immutable opportunity
-ID. The worker verifies contact, pipeline, location and the configured
-agreement-sent stage before moving it to the configured completed stage; a
-retry already at the completed stage is a no-op. Use
-`GET /api/internal/cron/agreement-completion-stage-outbox` with
-`Authorization: Bearer <CRON_SECRET>` for recovery. Configure the QA-only
-notification recipient before any genuine signature. Do not conduct a real
-signing while the global signed-document alert can notify a live admin.
+**Still missing:** the integrated bridge from real HighLevel uploads and
+Thomas's native review decisions to this exact application/document/version
+ledger, and its downstream delivery mapping. The existing primitive does not
+provide a deployed storage adapter, scanner, native decision bridge, or email
+sender. Resolve how the native process will satisfy or replace the current
+unconnected gates before implementing and testing the bridge. Do not fabricate
+scan or approval events to make it pass.
 
-### L08: private document transfer and scanning
+If the current private-transfer path is retained, its server-side worker must
+stream actual bytes to private storage, derive size/digest/bounded samples, and
+call `POST /api/integrations/highlevel/documents`. This source-bound route
+resolves an existing application by exact contact/opportunity/location/season;
+it does not accept a caller-selected application ID or make native storage
+private by itself. The alternative internal ingress is
+`POST /api/integrations/documents`. Both require the trusted ingress credential.
+The current scan route is `POST /api/integrations/documents/:documentId/scan`;
+manager review is `PATCH /api/admin/documents/:documentId/review` with a signed
+session, version and idempotency key. These endpoints are not a completed
+native integration.
 
-The public HighLevel form is not the document ledger. A private transfer
-worker must stream a submitted file to private object storage, calculate its
-actual byte count and SHA-256, inspect bounded first/last samples, and call:
+## 6. Execute the matrix and record only demonstrated results
 
-`POST /api/integrations/documents`
+Run all five scenario groups for each workflow. Capture the deployment commit,
+run timestamp, exact identities, before/after stage and fields, ledger/outbox
+state, and duplicate count. For an actual native workflow or email action, add
+its execution/message ID and recipient evidence. For an intentional no-op or
+rejection, record zero calls/messages rather than requiring a fictional receipt.
+Keep detailed identity evidence in restricted Linear tasks; use only top-level
+headlines/status in Asana.
 
-with `Authorization: Bearer <DOCUMENT_INGRESS_WEBHOOK_SECRET>`. It must pass
-the exact internal portal application ID and never submit a public file URL.
-Only PDF, PNG and JPEG files up to 10 MiB are accepted when extension, MIME,
-signature, byte count and samples agree.
+For QA recovery, invoke the authenticated exact-item or bounded worker after
+the recorded state is eligible, without waiting for the normal schedule.
+Record the normal production timing separately. Do not change live delays,
+backdate business evidence, or let a recovery request process unrelated vendors.
+The paused scheduler state is not evidence of automatic recovery.
 
-The scanner reports the exact stored version through:
-
-`POST /api/integrations/documents/:documentId/scan`
-
-with `Authorization: Bearer <DOCUMENT_SCANNER_WEBHOOK_SECRET>`. A manager can
-then use `PATCH /api/admin/documents/:documentId/review` with a session and
-idempotency key. The worker, scanner and downstream delivery mapping must be
-configured before publishing the QA form. The existing production form's
-public file access is not a replacement for private storage.
-
-## 4. Run the green-evidence cases
-
-Capture the QA record/application/document IDs, before-and-after state,
-workflow log, exact message/document ID, recipient evidence, and duplicate
-count for every case. Keep all sends limited to the two QA addresses.
-
-| L06 approval | L07 agreement | L08 insurance |
-| --- | --- | --- |
-| Exact current application approves once | Correct issued document completes once | Valid PDF, PNG and JPEG capture as Submitted only |
-| Simultaneous/retry decision recovers once | Incomplete/declined never completes | Unsupported, corrupt, empty and size-boundary files reject |
-| Invalid/expired/unknown identity stops | Duplicate/concurrent completion yields one receipt | Second QA vendor maps to its own application |
-| Older/current/declined/cancelled record isolation | Wrong/superseded template/contact/document stops | Correction and resubmission retain version history |
-| Signed-out/tampered approval has no mutation | Before/after insurance yields at most one next action | Replay/cross-record/stale version cannot approve wrong file |
-
-An actual document signature needs fresh confirmation at the signature action.
-The public browser policy must be restored before public signing or upload
-evidence is claimed; it must not be bypassed.
-
-## 5. Change task status only with proof
-
-Keep L06, L07 and L08 red until all five cases in their column are recorded in
-the correct Asana grid. CI green, workflow test mode, a provider-accepted
-email, or a simulated document event can support a case but cannot replace the
-listed end-to-end proof.
+Keep hosted cases RED until their listed evidence is attached. Existing
+automated tests and limited native/email history remain useful scoped evidence;
+they do not close missing issuance, document bridge, provider, or inbox checks.
+If browser access is blocked by policy, record that blocker rather than bypassing
+it. No hosted status changes to GREEN are made by this documentation update.

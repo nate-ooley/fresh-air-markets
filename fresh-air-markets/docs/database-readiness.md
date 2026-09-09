@@ -52,7 +52,7 @@ pooled/unpooled host variants. No new secret has to be created for the runner.
 
 ## What the runner verifies
 
-- All twenty numbered migrations are present in order.
+- All twenty-one numbered migrations are present in order.
 - The portal's base `accounts`, `booths`, `bookings` and `booking_dates` tables
   exist before migration. Missing base tables stop the migration; the runner
   will not fabricate an account or seed production-like application records.
@@ -123,7 +123,7 @@ routing or authorize live collection.
 ## Regression coverage
 
 `tests/database-readiness.test.cjs` verifies target validation, transaction
-wrapper handling, all twenty migration files, checksum/order enforcement and
+wrapper handling, all twenty-one migration files, checksum/order enforcement and
 redaction of invalid connection values. These five tests pass locally.
 
 `tests/database-readiness.pg.test.cjs` runs only with `DATABASE_TEST_URL` pointing

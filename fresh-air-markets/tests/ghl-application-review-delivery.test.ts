@@ -15,7 +15,6 @@ const env = {
   GHL_APPLICATION_PIPELINE_ID: "qa_pipeline_1",
   GHL_APPLICATION_REVIEW_STAGE_ID: "qa_review_1",
   GHL_APPLICATION_APPROVED_STAGE_ID: "qa_approved_1",
-  GHL_APPLICATION_CHANGES_REQUESTED_STAGE_ID: "qa_changes_1",
   GHL_APPLICATION_DECLINED_STAGE_ID: "qa_declined_1",
 };
 const config = readApplicationReviewDeliveryConfig(env);
@@ -85,8 +84,8 @@ test("approval PUT moves only the immutable opportunity from review to its confi
   assert.equal(headers.get("authorization"), `Bearer ${env.GHL_API_TOKEN}`);
 });
 
-test("each review result maps only to its configured HighLevel stage", async () => {
-  for (const [state, expectedStage] of Object.entries(config.stageForOutcome) as Array<["approved" | "changes_requested" | "declined", string]>) {
+test("approval and decline map to their configured HighLevel stage", async () => {
+  for (const [state, expectedStage] of Object.entries(config.stageForOutcome).filter(([state]) => state !== "changes_requested") as Array<["approved" | "declined", string]>) {
     const script = scripted([opportunity(env.GHL_APPLICATION_REVIEW_STAGE_ID), opportunity(expectedStage), opportunity(expectedStage)]);
     await deliverApplicationReviewToGhl(message(state), config, script.transport);
     assert.equal(JSON.parse(String(script.calls[1].init?.body)).pipelineStageId, expectedStage);
@@ -183,4 +182,26 @@ test("rate limits and bad configuration remain safe and report bounded retry sig
       && error.retryAfterSeconds === 17,
   );
   assert.throws(() => readApplicationReviewDeliveryConfig({ ...env, GHL_APPLICATION_DECLINED_STAGE_ID: env.GHL_APPLICATION_APPROVED_STAGE_ID }), /not configured/);
+});
+
+
+test("correction uses existing Needs Review without an extra stage, PUT, or notification call", async () => {
+  const selected = readApplicationReviewDeliveryConfig({ ...env, GHL_APPLICATION_CHANGES_REQUESTED_STAGE_ID: "obsolete_changes_stage" });
+  assert.equal(selected.stageForOutcome.changes_requested, selected.reviewStageId);
+  const script = scripted([opportunity(selected.reviewStageId)]);
+  const correction = message("changes_requested"); correction.payload.reason = "Please correct the business name.";
+  await deliverApplicationReviewToGhl(correction, selected, script.transport);
+  assert.equal(correction.payload.reason, "Please correct the business name.");
+  assert.equal(script.calls.length, 1); assert.equal(script.calls[0].init?.method, "GET");
+});
+
+test("correction never returns an Approved, Waitlist, Declined, obsolete or closed opportunity to review", async () => {
+  for (const source of [opportunity(config.stageForOutcome.approved), opportunity(config.stageForOutcome.declined),
+    opportunity("waitlist"), opportunity("obsolete_changes_stage"), opportunity(config.reviewStageId, { status: "won" }),
+    opportunity(config.reviewStageId, { status: "lost" }), opportunity(config.reviewStageId, { status: "abandoned" })]) {
+    const script = scripted([source]);
+    await assert.rejects(deliverApplicationReviewToGhl(message("changes_requested"), config, script.transport), error =>
+      error instanceof ApplicationReviewDeliveryError && ["ghl_stage_diverged", "ghl_status_diverged"].includes(error.code));
+    assert.equal(script.calls.length, 1); assert.equal(script.calls[0].init?.method, "GET");
+  }
 });

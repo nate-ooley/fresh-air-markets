@@ -58,11 +58,12 @@ export function readApplicationReviewDeliveryConfig(
   const reviewStageId = env.GHL_APPLICATION_REVIEW_STAGE_ID?.trim() ?? "";
   const stageForOutcome = {
     approved: env.GHL_APPLICATION_APPROVED_STAGE_ID?.trim() ?? "",
-    changes_requested: env.GHL_APPLICATION_CHANGES_REQUESTED_STAGE_ID?.trim() ?? "",
+    // A portal correction is still awaiting review in the five-stage native pipeline.
+    changes_requested: reviewStageId,
     declined: env.GHL_APPLICATION_DECLINED_STAGE_ID?.trim() ?? "",
   };
   const ids = [locationId, pipelineId, reviewStageId, ...Object.values(stageForOutcome)];
-  const stages = [reviewStageId, ...Object.values(stageForOutcome)];
+  const stages = [reviewStageId, stageForOutcome.approved, stageForOutcome.declined];
   if (env.VERCEL !== "1" || !["preview", "production"].includes(env.VERCEL_ENV ?? "")
     || apiToken.length < 16 || /[\r\n\0]/.test(apiToken) || locationId !== LOCATION
     || ids.some(id => !validIdentifier(id)) || new Set(stages).size !== stages.length
@@ -214,8 +215,9 @@ async function verifyQaContact(
 }
 
 /**
- * Move only the outbox record's immutable opportunity. A GET before and after
- * the PUT turns a crash-after-success retry into a harmless no-op.
+ * Reconcile only the outbox record's immutable opportunity. A correction
+ * verifies Needs Review/Open without a PUT or vendor notification. For an
+ * approval/decline, GET/PUT/GET permits a harmless crash-after-success retry.
  */
 export async function deliverApplicationReviewToGhl(
   message: ApplicationReviewOutboxMessage,

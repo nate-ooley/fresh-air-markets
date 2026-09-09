@@ -474,6 +474,28 @@ export async function recordApplicationReview(
   });
 }
 
+export type ApplicationReviewOutboxStatus = "pending" | "processing" | "delivered" | "failed";
+
+/** A replay reads its original decision's result, never an unrelated current job. */
+export async function getApplicationReviewOutboxStatus(
+  input: { outboxId: string; reviewEventId: string; applicationId: string; marketId: string },
+  sql: Sql = configuredClient(),
+): Promise<ApplicationReviewOutboxStatus | null> {
+  if (![input.outboxId, input.reviewEventId, input.applicationId].every(validApplicationId)) return null;
+  const [row] = await sql<{ status: string }[]>`
+    SELECT j.status
+    FROM fame_application_outbox j
+    JOIN fame_application_review_events e ON e.outbox_id = j.id AND e.market_id = j.market_id
+    JOIN fame_applications a ON a.id = e.application_id AND a.market_id = e.market_id
+    WHERE j.id = ${input.outboxId} AND j.market_id = ${input.marketId}
+      AND e.id = ${input.reviewEventId} AND e.application_id = ${input.applicationId}
+      AND j.topic = 'application-review'
+      AND j.payload->>'applicationId' = e.application_id
+      AND j.payload->>'reviewEventId' = e.id`;
+  return row && (row.status === "pending" || row.status === "processing" || row.status === "delivered" || row.status === "failed")
+    ? row.status : null;
+}
+
 /** Claim due jobs without touching HighLevel. A worker supplies the delivery
  * function below, allowing retry/recovery to be tested without external UI.
  */

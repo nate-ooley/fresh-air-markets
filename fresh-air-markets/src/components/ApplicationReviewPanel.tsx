@@ -32,20 +32,33 @@ interface SavedReview {
   application: { id: string; reviewState: ReviewState };
   reviewEventId: string;
   duplicate: boolean;
-  delivery: "delivered" | "queued";
+  delivery: "delivered" | "queued" | "failed" | "unknown";
+  vendorNotification?: "not_sent";
 }
 
 interface ReviewNotice {
   duplicate: boolean;
-  delivery: "delivered" | "queued";
+  delivery: "delivered" | "queued" | "failed" | "unknown";
+  vendorNotification?: "not_sent";
   reviewState: ReviewState;
 }
+
+const REVIEW_DELIVERY_LABEL = {
+  delivered: "The matching CRM stage update was delivered.",
+  failed: "The decision was saved, but its matching CRM stage update needs attention. It will not retry automatically.",
+  queued: "The decision was saved and its matching CRM stage update is queued for recovery.",
+};
+const CORRECTION_DELIVERY_LABEL = {
+  delivered: "The matching Needs Review state was verified for this correction.",
+  failed: "The decision was saved, but its Needs Review state could not be verified. Review the matching CRM record before retrying.",
+  queued: "The decision was saved. Its Needs Review state is queued for verification.",
+};
 
 const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 const ACTIONS: Array<{ value: ReviewAction; title: string; description: string }> = [
   { value: "approve", title: "Approve", description: "Mark this exact application approved." },
-  { value: "request_changes", title: "Request changes", description: "Ask the vendor to submit a newer application." },
+  { value: "request_changes", title: "Request changes", description: "Record corrections; contact the vendor separately." },
   { value: "decline", title: "Decline", description: "Mark this exact application declined." },
 ];
 
@@ -99,7 +112,9 @@ function isSavedReview(value: unknown, applicationId: string): value is SavedRev
     && isReviewState(application.reviewState)
     && typeof saved?.reviewEventId === "string"
     && typeof saved?.duplicate === "boolean"
-    && (saved?.delivery === "delivered" || saved?.delivery === "queued");
+    && (saved?.delivery === "delivered" || saved?.delivery === "queued" || saved?.delivery === "failed" || saved?.delivery === "unknown")
+    && (saved.vendorNotification === undefined || saved.vendorNotification === "not_sent")
+    && (application.reviewState !== "changes_requested" || saved.vendorNotification === "not_sent");
 }
 
 async function readJson(response: Response): Promise<unknown> {
@@ -255,6 +270,7 @@ export default function ApplicationReviewPanel({ applicationId }: { applicationI
       setNotice({
         duplicate: saved.duplicate,
         delivery: saved.delivery,
+        vendorNotification: saved.vendorNotification,
         reviewState: saved.application.reviewState,
       });
       setAwaitingResubmission(saved.application.reviewState === "changes_requested");
@@ -398,9 +414,9 @@ export default function ApplicationReviewPanel({ applicationId }: { applicationI
                   This application is already {STATE_LABEL[application.reviewState].toLowerCase()}. Terminal decisions cannot be changed here.
                 </p>
               )}
-              {awaitingResubmission && (
+              {application.reviewState === "changes_requested" && (
                 <p role="status" className="mt-5 rounded-2xl bg-amber/15 p-4 text-sm text-clay">
-                  Changes were requested. Wait for a newer vendor submission, then choose Reload review before making another decision.
+                  Changes were recorded. This action does not send a vendor email. Contact the vendor with the corrections and review a newer submission before making another decision.
                 </p>
               )}
 
@@ -410,10 +426,15 @@ export default function ApplicationReviewPanel({ applicationId }: { applicationI
                     {notice.duplicate ? "This exact decision was already saved." : `Application marked ${STATE_LABEL[notice.reviewState].toLowerCase()}.`}
                   </p>
                   <p className="mt-1 text-cream/75">
-                    {notice.delivery === "delivered"
-                      ? "The matching CRM stage update was delivered."
-                      : "The decision was saved and its matching CRM stage update is queued for recovery."}
+                    {notice.delivery === "unknown"
+                      ? "The decision was saved, but its CRM delivery status could not be checked. Reload before taking further action."
+                      : notice.vendorNotification === "not_sent"
+                        ? CORRECTION_DELIVERY_LABEL[notice.delivery]
+                        : REVIEW_DELIVERY_LABEL[notice.delivery]}
                   </p>
+                  {notice.vendorNotification === "not_sent" && (
+                    <p className="mt-2 font-semibold">Vendor notification has not been sent. Contact the vendor separately with the corrections; no automatic correction email is queued.</p>
+                  )}
                 </div>
               )}
 

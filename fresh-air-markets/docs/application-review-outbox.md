@@ -65,10 +65,11 @@ these private deployment variables:
 - `GHL_QA_APPLICATION_PIPELINE_ID` (Config, Preview only), the separate QA
   pipeline ID. Review, payment email and paid-status delivery all select this
   same pipeline in Preview;
-- `GHL_APPLICATION_REVIEW_STAGE_ID`, `GHL_APPLICATION_APPROVED_STAGE_ID`,
-  `GHL_APPLICATION_CHANGES_REQUESTED_STAGE_ID`, and
-  `GHL_APPLICATION_DECLINED_STAGE_ID` (Config): four distinct stage IDs belonging
-  to the selected environment's pipeline;
+- `GHL_APPLICATION_REVIEW_STAGE_ID`, `GHL_APPLICATION_APPROVED_STAGE_ID`, and
+  `GHL_APPLICATION_DECLINED_STAGE_ID` (Config): three distinct IDs for the existing
+  Needs Review, Approved and Declined stages in the selected pipeline.
+  `request_changes` maps to Needs Review; the obsolete
+  `GHL_APPLICATION_CHANGES_REQUESTED_STAGE_ID` is not read or required;
 - `GHL_PAYMENT_QA_ROUTING_VERIFIED=true` (Config, Preview only), set only after
   every downstream native workflow triggered by review or payment stages is
   checked to prevent live vendor/admin notifications and SMS;
@@ -89,11 +90,34 @@ allowing only `lnooley@gmail.com` or `nate@autocraftstudios.com`, and repeats th
 check immediately before the stage update. A changed identity or unapproved
 email fails with a terminal identity error before any PUT. These checks cannot
 replace verification of downstream native admin recipients; that is what the
-routing verification flag records. It accepts only the configured Review stage on an open opportunity,
-moves it to the stage for the saved decision without changing lifecycle status,
-then reads it again to verify the destination and status. If a retry starts
-after a successful provider update, finding the target stage is a successful
-no-op rather than a second workflow trigger.
+routing verification flag records. Approval and decline accept only the configured
+Needs Review stage on an open opportunity, move it to the saved decision's stage
+without changing lifecycle status, then verify the destination and status. A
+retry finding that target is a successful no-op instead of a second trigger.
+
+A correction keeps the portal state `changes_requested` and its exact manager
+reason/source-event history, while the matching native opportunity stays in
+Needs Review/Open. Delivery verifies this state without a PUT. It never pulls an
+Approved, Waitlist, Declined, obsolete Changes Requested, closed, or otherwise
+manually moved opportunity back into review. Such divergence is a terminal
+failure requiring scoped operator review.
+
+The `request_changes` API response includes `vendorNotification: "not_sent"`,
+separate from CRM `delivery: "delivered" | "queued" | "failed" | "unknown"`. The portal
+explicitly instructs the manager to contact the vendor separately. No automatic
+application-correction email is sent or queued; a successful reconciliation
+proves CRM state only. A known terminal CRM failure is shown as needing attention,
+not as queued recovery. After any immediate attempt, the route reads the stored
+outbox status joined to the exact review event, application and signed-in market.
+Already delivered or failed jobs retain that result on idempotent replay even
+when no job can be claimed or provider delivery is currently disabled. A missing
+or unavailable authoritative status is `unknown`, never inferred as queued from
+zero dispatch counters. Existing native insurance-correction email workflows
+are not general application-correction routes and must not be reused blindly.
+The original five stages and Opportunity Application Status options do not
+include Changes Requested. A future exact-application correction notification
+needs its own approved route and delivery evidence before this can claim a
+complete vendor communication journey.
 
 HighLevel does not expose an atomic compare-and-swap across the contact read
 and opportunity update. An operator changing the contact after the last read
@@ -112,7 +136,11 @@ per-decision attempt does not wait for that scheduler.
 ## Verification scope
 
 The isolated suite covers route authentication, path/session identity binding,
-malformed input, stale source handling, and replay behavior. The PostgreSQL
+malformed input, stale source handling, correction notification disclosure, and replay behavior.
+The correction adapter tests require no extra native stage, verify Needs Review
+without mutation, and reject live QA recipients, foreign identities, closed
+records and diverged stages. Component tests exercise the saved correction
+notice and explicitly reject missing notification evidence. The PostgreSQL
 suite defines five disposable-database scenarios: 100 competing approvals,
 changed-key conflict/terminal safety, wrong-market/missing-opportunity/stale
 stops, corrected re-submission versus a separate season application, and lease
