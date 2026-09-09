@@ -20,7 +20,13 @@ function loadRoute({ authenticated = true, detail, record, deliveryConfigured = 
   mod.require = (id) => {
     if (id === '@/lib/auth') return { getSessionAccountId: async () => authenticated ? 'qa-market' : null };
     if (id === '@/lib/application-review-pg') return {
-      getApplicationReviewDetail: detail || (async () => ({ id: appId, sourceEventId: 'application:qa:current', reviewState: 'unreviewed', reviewRevision: 0, hasOpportunity: true })),
+      getApplicationReviewDetail: detail || (async () => ({
+        id: appId, sourceEventId: 'application:qa:current', reviewState: 'unreviewed', reviewRevision: 0, hasOpportunity: true,
+        identitySnapshot: {
+          vendorName: 'QA Vendor', businessName: 'QA Booth', email: 'nate@autocraftstudios.com', applicantType: 'Vendor',
+          dates: ['2027-05-29'], fullSeason: false, requiresFinalDateConfirmation: false, category: 'Produce', details: null,
+        },
+      })),
       recordApplicationReview: record || (async () => ({ kind: 'applied', applicationId: appId, reviewState: 'approved', reviewEventId: 'event', outboxId: 'outbox' })),
       dispatchApplicationReviewOutboxById: dispatch || (async () => ({ delivered: 1, deferred: 0, failed: 0, stale: 0 })),
     };
@@ -85,7 +91,13 @@ test('application review route rejects malformed identities/replay keys before p
 test('application review route exposes only scoped detail and maps non-mutating replay failures safely', async () => {
   const route = loadRoute({
     detail: async (id, market) => id === appId && market === 'qa-market'
-      ? { id: appId, sourceEventId: 'application:qa:current', reviewState: 'unreviewed', reviewRevision: 0, hasOpportunity: true }
+      ? {
+        id: appId, sourceEventId: 'application:qa:current', reviewState: 'unreviewed', reviewRevision: 0, hasOpportunity: true,
+        identitySnapshot: {
+          vendorName: 'QA Vendor', businessName: 'QA Booth', email: 'nate@autocraftstudios.com', applicantType: 'Vendor',
+          dates: ['2027-05-29'], fullSeason: false, requiresFinalDateConfirmation: false, category: 'Produce', details: null,
+        },
+      }
       : null,
     record: async () => ({ kind: 'stale_source', sourceEventId: 'application:qa:new' }),
   });
@@ -95,6 +107,18 @@ test('application review route exposes only scoped detail and maps non-mutating 
   const patch = await route.PATCH(request({ action: 'approve', sourceEventId: 'application:qa:current' }, { 'Idempotency-Key': key }), { params: Promise.resolve({ id: appId }) });
   assert.equal(patch.status, 409);
   assert.deepEqual(await patch.json(), { error: 'Application changed; reload before reviewing.' });
+});
+
+test('application review route keeps incomplete identity snapshot failures non-mutating', async () => {
+  const route = loadRoute({ record: async () => ({ kind: 'missing_identity_snapshot' }) });
+  const response = await route.PATCH(
+    request({ action: 'approve', sourceEventId: 'application:qa:current' }, { 'Idempotency-Key': key }),
+    { params: Promise.resolve({ id: appId }) },
+  );
+  assert.equal(response.status, 409);
+  assert.deepEqual(await response.json(), {
+    error: 'The latest application snapshot is incomplete. Reload after a complete vendor submission is captured.',
+  });
 });
 
 test('an idempotent replay immediately retries only its original exact outbox job when delivery becomes available', async () => {

@@ -172,6 +172,7 @@ export default function AdminDashboard({ weekends, demoMode, account }: AdminDas
             )}
           </div>
           <div className="flex items-center gap-2">
+            <a href="/applications" className="rounded-full px-4 py-2 text-sm font-semibold text-pine hover:bg-pine/10">Review applications</a>
             <a
               href={publicUrl}
               target="_blank"

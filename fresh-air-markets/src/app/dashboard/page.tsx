@@ -13,6 +13,7 @@ export default async function DashboardPage() {
   const store = await getStore();
   const account = await store.getAccountById(accountId);
   if (!account) redirect("/login");
+  if (account.id === process.env.FAME_MARKET_ACCOUNT_ID?.trim()) redirect("/applications");
   return (
     <AdminDashboard
       weekends={marketWeekends(account.id, process.env, new Date(), true)}

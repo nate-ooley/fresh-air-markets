@@ -9,6 +9,7 @@ import {
   validReviewIdempotencyKey,
   validSourceEventId,
 } from "./application-review";
+import { FRESH_AIR_SEASON_DATES } from "./fresh-air-season";
 
 type Sql = ReturnType<typeof postgres>;
 let client: Sql | undefined;
@@ -29,7 +30,27 @@ export interface ApplicationReviewDetail {
   reviewState: ApplicationReviewState;
   reviewRevision: number;
   hasOpportunity: boolean;
+  /**
+   * A deliberately small projection of the snapshot on the exact current
+   * source event. Internal CRM identifiers, tokens, unknown form answers and
+   * prior snapshots never leave this module.
+   */
+  identitySnapshot: ApplicationReviewIdentitySnapshot | null;
 }
+
+export interface ApplicationReviewIdentitySnapshot {
+  vendorName: string;
+  businessName: string;
+  email: string;
+  applicantType: string;
+  dates: string[];
+  fullSeason: boolean;
+  requiresFinalDateConfirmation: boolean;
+  category: string;
+  details: string | null;
+}
+
+export interface ApplicationReviewListItem extends ApplicationReviewDetail {}
 
 export type ApplicationReviewResult =
   | { kind: "applied"; applicationId: string; reviewState: ApplicationReviewState; reviewEventId: string; outboxId: string }
@@ -37,6 +58,7 @@ export type ApplicationReviewResult =
   | { kind: "conflict" }
   | { kind: "not_found" }
   | { kind: "missing_opportunity" }
+  | { kind: "missing_identity_snapshot" }
   | { kind: "stale_source"; sourceEventId: string | null }
   | { kind: "terminal"; reviewState: ApplicationReviewState }
   | { kind: "awaiting_resubmission" };
@@ -88,6 +110,145 @@ interface ReviewEventRow {
   source_event_id: string;
 }
 
+interface SourceEventRow {
+  event_id: string;
+  snapshot: unknown;
+}
+
+interface ApplicationListRow extends ApplicationRow {
+  event_id: string | null;
+  snapshot: unknown | null;
+}
+
+const MAX_SNAPSHOT_FIELD_LENGTH = 200;
+const MAX_SNAPSHOT_DETAILS_LENGTH = 2000;
+const MAX_SNAPSHOT_DATES = 64;
+const SIMPLE_EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const ISO_DATE = /^(\d{4})-(\d{2})-(\d{2})$/;
+const NAMED_MARKET_DATES = new Set(FRESH_AIR_SEASON_DATES.map(date => new Date(`${date}T12:00:00Z`).toLocaleDateString("en-US", {
+  weekday: "short", month: "short", day: "numeric", year: "numeric", timeZone: "UTC",
+})));
+// This exact legacy AI Studio value remains display-only. It must not be
+// converted into a billable May 29 selection without a later final reservation.
+const FULL_SEASON_LABELS = new Set(["Full Season (Oct 3 - May 27)", "Full Season (Oct 3 - May 29)"]);
+
+function objectValue(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function safeText(value: unknown, maximumLength: number): string | null {
+  if (typeof value !== "string") return null;
+  const text = value.trim();
+  return text && text.length <= maximumLength ? text : null;
+}
+
+function firstSafeText(source: Record<string, unknown>, keys: readonly string[], maximumLength: number): string | null {
+  for (const key of keys) {
+    const text = safeText(source[key], maximumLength);
+    if (text) return text;
+  }
+  return null;
+}
+
+function validSnapshotDate(value: string): boolean {
+  const match = ISO_DATE.exec(value);
+  if (!match) return false;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day;
+}
+
+function sourceDateSelection(value: unknown): { dates: string[]; fullSeason: boolean; requiresFinalDateConfirmation: boolean } | null {
+  if (!Array.isArray(value) || value.length > MAX_SNAPSHOT_DATES) return null;
+  const dates = value.map(entry => typeof entry === "string" ? entry.trim() : "");
+  if (!dates.length) return { dates: [], fullSeason: false, requiresFinalDateConfirmation: false };
+  if (dates.length === 1 && FULL_SEASON_LABELS.has(dates[0])) {
+    return { dates, fullSeason: true, requiresFinalDateConfirmation: dates[0] === "Full Season (Oct 3 - May 27)" };
+  }
+  if (!dates.every(date => validSnapshotDate(date) || NAMED_MARKET_DATES.has(date))
+    || new Set(dates).size !== dates.length) return null;
+  return {
+    dates: [...dates].sort(),
+    fullSeason: false,
+    // A normalized historical May 27 date is still preliminary. Do not let a
+    // sender bypass the final-date confirmation merely by changing its label.
+    requiresFinalDateConfirmation: dates.includes("2027-05-27"),
+  };
+}
+
+function sourceApplicantType(source: Record<string, unknown>): "Vendor" | "Non-Profit Organization" | null {
+  const value = firstSafeText(source, ["registrationType", "applicantType"], MAX_SNAPSHOT_FIELD_LENGTH);
+  if (value === "Vendor") return "Vendor";
+  if (value === "Non-Profit" || value === "Non-Profit Organization") return "Non-Profit Organization";
+  return null;
+}
+
+function sourceName(source: Record<string, unknown>): string | null {
+  const firstName = firstSafeText(source, ["firstName", "first_name"], 100);
+  const lastName = firstSafeText(source, ["lastName", "last_name"], 100);
+  const fromParts = [firstName, lastName].filter((part): part is string => Boolean(part)).join(" ");
+  return fromParts || firstSafeText(source, ["vendorName", "name"], MAX_SNAPSHOT_FIELD_LENGTH);
+}
+
+function sourceVendorCategory(source: Record<string, unknown>): string | null {
+  const category = firstSafeText(source, ["vendorCategory", "category"], MAX_SNAPSHOT_FIELD_LENGTH);
+  if (category !== "Other") return category;
+  const other = firstSafeText(source, ["otherCategory"], MAX_SNAPSHOT_FIELD_LENGTH);
+  return other ? `Other — ${other}` : null;
+}
+
+/**
+ * Project only the staff-facing fields from the immutable handoff envelope.
+ * The envelope itself is written by persistApplicationHandoff as
+ * { contactId, opportunityId, seasonId, snapshot }; read nothing except the
+ * nested source snapshot, even when an event row has other JSON properties.
+ * The accepted keys mirror the AI Studio form: firstName/lastName,
+ * registrationType, businessName or orgName, vendorDatesRequested,
+ * vendorCategory, and message or mission. HighLevel custom-field IDs must be
+ * normalized into those explicit names by the handoff sender.
+ */
+function reviewIdentitySnapshot(value: unknown): ApplicationReviewIdentitySnapshot | null {
+  const envelope = objectValue(value);
+  const source = objectValue(envelope?.snapshot);
+  if (!source) return null;
+
+  const applicantType = sourceApplicantType(source);
+  const vendorName = sourceName(source);
+  const businessName = applicantType === "Vendor"
+    ? firstSafeText(source, ["businessName", "vendorBusinessName"], MAX_SNAPSHOT_FIELD_LENGTH)
+    : firstSafeText(source, ["orgName", "nonProfitOrgName"], MAX_SNAPSHOT_FIELD_LENGTH);
+  const email = firstSafeText(source, ["email"], 254);
+  const selection = applicantType === "Vendor"
+    ? sourceDateSelection(source.vendorDatesRequested ?? source.selectedDates ?? source.requestedDates ?? source.dates)
+    : { dates: [], fullSeason: false, requiresFinalDateConfirmation: false };
+  const fullSeason = source.fullSeason === true || Boolean(selection?.fullSeason);
+  const requiresFinalDateConfirmation = selection?.requiresFinalDateConfirmation
+    || (source.fullSeason === true && !selection?.fullSeason);
+  const dates = selection?.dates ?? [];
+  const category = applicantType === "Vendor" ? sourceVendorCategory(source) : "Non-Profit Organization";
+  const details = applicantType === "Non-Profit Organization"
+    ? firstSafeText(source, ["mission", "nonProfitMission"], MAX_SNAPSHOT_DETAILS_LENGTH)
+    : firstSafeText(source, ["details", "message", "description"], MAX_SNAPSHOT_DETAILS_LENGTH);
+
+  if (!vendorName || !businessName || !email || !SIMPLE_EMAIL.test(email)
+    || !applicantType || !category || !selection || (applicantType === "Non-Profit Organization" && !details)) return null;
+  return {
+    vendorName,
+    businessName,
+    email,
+    applicantType,
+    dates: dates ?? [],
+    fullSeason,
+    requiresFinalDateConfirmation,
+    category,
+    details,
+  };
+}
+
 function applicationIdentityKey(application: Pick<ApplicationRow, "market_id" | "location_id" | "contact_id" | "season_id">): string {
   return [application.market_id, application.location_id, application.contact_id, application.season_id].join("\u001f");
 }
@@ -104,10 +265,8 @@ function applicationState(value: string): ApplicationReviewState {
   return "unreviewed";
 }
 
-/**
- * Returns only the identifiers a signed-in market operator needs to render an
- * exact review screen. It intentionally excludes source snapshots and email.
- */
+/** Returns the exact application and a deliberately whitelisted projection of
+ * its latest source snapshot for the signed-in market only. */
 export async function getApplicationReviewDetail(
   applicationId: string,
   marketId: string,
@@ -118,18 +277,63 @@ export async function getApplicationReviewDetail(
     FROM fame_applications
     WHERE id = ${applicationId} AND market_id = ${marketId}`;
   if (!application) return null;
-  const [latest] = await sql<{ event_id: string }[]>`
-    SELECT event_id FROM fame_application_events
+  const [latest] = await sql<SourceEventRow[]>`
+    SELECT event_id, snapshot FROM fame_application_events
     WHERE application_id = ${application.id}
+      AND market_id = ${application.market_id}
+      AND location_id = ${application.location_id}
     ORDER BY created_at DESC, event_id DESC
     LIMIT 1`;
+  const sourceEventId = latest && validSourceEventId(latest.event_id) ? latest.event_id : null;
   return {
     id: application.id,
-    sourceEventId: latest?.event_id ?? null,
+    sourceEventId,
     reviewState: applicationState(application.review_state),
     reviewRevision: Number(application.review_revision),
     hasOpportunity: Boolean(application.opportunity_id),
+    identitySnapshot: sourceEventId ? reviewIdentitySnapshot(latest?.snapshot) : null,
   };
+}
+
+/**
+ * Lists at most 100 exact, market-scoped applications. Every row uses the
+ * current event from that same application/market/location; it never selects
+ * an application by email, contact, opportunity, or a client-supplied market.
+ */
+export async function listApplicationReviewDetails(
+  marketId: string,
+  limit = 50,
+  sql: Sql = configuredClient(),
+): Promise<ApplicationReviewListItem[]> {
+  const boundedLimit = Number.isSafeInteger(limit) ? Math.min(Math.max(limit, 1), 100) : 50;
+  const rows = await sql<ApplicationListRow[]>`
+    SELECT a.id, a.market_id, a.location_id, a.contact_id, a.season_id,
+           a.opportunity_id, a.review_state, a.review_revision,
+           source.event_id, source.snapshot
+    FROM fame_applications AS a
+    LEFT JOIN LATERAL (
+      SELECT event_id, snapshot, created_at
+      FROM fame_application_events
+      WHERE application_id = a.id
+        AND market_id = a.market_id
+        AND location_id = a.location_id
+      ORDER BY created_at DESC, event_id DESC
+      LIMIT 1
+    ) AS source ON TRUE
+    WHERE a.market_id = ${marketId}
+    ORDER BY source.created_at DESC NULLS LAST, a.created_at DESC, a.id DESC
+    LIMIT ${boundedLimit}`;
+  return rows.map(row => {
+    const sourceEventId = row.event_id && validSourceEventId(row.event_id) ? row.event_id : null;
+    return {
+      id: row.id,
+      sourceEventId,
+      reviewState: applicationState(row.review_state),
+      reviewRevision: Number(row.review_revision),
+      hasOpportunity: Boolean(row.opportunity_id),
+      identitySnapshot: sourceEventId ? reviewIdentitySnapshot(row.snapshot) : null,
+    };
+  });
 }
 
 /**
@@ -193,14 +397,20 @@ export async function recordApplicationReview(
       };
     }
 
-    const [latest] = await tx<{ event_id: string }[]>`
-      SELECT event_id FROM fame_application_events
+    const [latest] = await tx<SourceEventRow[]>`
+      SELECT event_id, snapshot FROM fame_application_events
       WHERE application_id = ${application.id}
+        AND market_id = ${application.market_id}
+        AND location_id = ${application.location_id}
       ORDER BY created_at DESC, event_id DESC
       LIMIT 1`;
     if (!latest || latest.event_id !== input.sourceEventId) {
       return { kind: "stale_source", sourceEventId: latest?.event_id ?? null };
     }
+    // Do not allow a hand-crafted PATCH to bypass the manager UI's snapshot
+    // guard. The decision remains bound to this exact source event, and staff
+    // must be able to see its minimally complete identity before reviewing it.
+    if (!reviewIdentitySnapshot(latest.snapshot)) return { kind: "missing_identity_snapshot" };
     if (!application.opportunity_id) return { kind: "missing_opportunity" };
 
     const currentState = applicationState(application.review_state);

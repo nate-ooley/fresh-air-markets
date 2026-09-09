@@ -8,6 +8,8 @@ const {
   claimApplicationReviewOutbox,
   dispatchApplicationReviewOutboxById,
   dispatchApplicationReviewOutbox,
+  getApplicationReviewDetail,
+  listApplicationReviewDetails,
   markApplicationReviewOutboxDelivered,
   recordApplicationReview,
   retryApplicationReviewOutbox,
@@ -61,13 +63,28 @@ async function seedApplication(patch = {}) {
   const contactId = patch.contactId || `contact:${applicationId}`;
   const seasonId = patch.seasonId || '2026-2027';
   const opportunityId = patch.opportunityId === undefined ? `opportunity:${applicationId}` : patch.opportunityId;
+  const sourceSnapshot = patch.sourceSnapshot === undefined ? {
+    vendorName: 'QA Vendor',
+    businessName: 'QA Market Booth',
+    email: 'nate@autocraftstudios.com',
+    applicantType: 'Vendor',
+    selectedDates: ['2027-05-29'],
+    vendorCategory: 'Produce',
+    details: 'Disposable database review test.',
+  } : patch.sourceSnapshot;
+  const storedSnapshot = patch.storedSnapshot === undefined ? {
+    contactId,
+    opportunityId,
+    seasonId,
+    snapshot: sourceSnapshot,
+  } : patch.storedSnapshot;
   await first`
     INSERT INTO fame_applications (id, market_id, location_id, contact_id, season_id, opportunity_id)
     VALUES (${applicationId}, ${marketId}, ${location}, ${contactId}, ${seasonId}, ${opportunityId})`;
   await first`
     INSERT INTO fame_application_events
       (location_id, event_id, market_id, application_id, payload_hash, snapshot)
-    VALUES (${location}, ${eventId}, ${marketId}, ${applicationId}, ${`hash:${eventId}`}, ${first.json({ source: 'qa' })})`;
+    VALUES (${location}, ${eventId}, ${marketId}, ${applicationId}, ${`hash:${eventId}`}, ${first.json(storedSnapshot)})`;
   return { applicationId, eventId, marketId, contactId, seasonId, opportunityId };
 }
 
@@ -149,13 +166,154 @@ test('a correction requires a newer captured source event before a later approva
   await first`
     INSERT INTO fame_application_events
       (location_id, event_id, market_id, application_id, payload_hash, snapshot)
-    VALUES (${location}, ${newEvent}, ${market}, ${application.applicationId}, 'resubmitted-hash', ${first.json({ source: 'resubmitted' })})`;
+    VALUES (${location}, ${newEvent}, ${market}, ${application.applicationId}, 'resubmitted-hash', ${first.json({
+      contactId: application.contactId,
+      opportunityId: application.opportunityId,
+      seasonId: application.seasonId,
+      snapshot: {
+        vendorName: 'QA Vendor', businessName: 'QA Market Booth', email: 'nate@autocraftstudios.com',
+        applicantType: 'Vendor', selectedDates: ['2027-05-29'], vendorCategory: 'Produce',
+      },
+    })})`;
   assert.equal((await recordApplicationReview({
     ...decision(application, { idempotencyKey: '99999999-9999-4999-8999-999999999999', action: 'approve' }), sourceEventId: newEvent,
   }, first)).kind, 'applied');
   const rows = await first`SELECT id, review_state FROM fame_applications ORDER BY season_id`;
   assert.deepEqual(rows.map(row => row.review_state), ['approved', 'unreviewed']);
   assert.equal(rows.find(row => row.id === sibling.applicationId).review_state, 'unreviewed');
+});
+
+test('manager detail and list use only the latest same-market, same-location source snapshot', async () => {
+  const application = await seedApplication({
+    eventId: 'application:qa:source-a',
+    sourceSnapshot: {
+      vendorName: 'Earlier vendor', businessName: 'Earlier business', email: 'earlier@example.com',
+      applicantType: 'Vendor', selectedDates: ['2027-05-22'], vendorCategory: 'Produce', details: 'Earlier detail',
+    },
+  });
+  const eventTime = new Date('2027-04-01T12:00:00.000Z');
+  await first`UPDATE fame_application_events SET created_at = ${eventTime} WHERE event_id = ${application.eventId}`;
+  await first`
+    INSERT INTO fame_application_events
+      (location_id, event_id, market_id, application_id, payload_hash, snapshot, created_at)
+    VALUES (${location}, 'application:qa:source-z', ${market}, ${application.applicationId}, 'source-z', ${first.json({
+      contactId: application.contactId,
+      opportunityId: application.opportunityId,
+      seasonId: application.seasonId,
+      snapshot: {
+        vendorName: 'Current vendor', businessName: 'Current business', email: 'current@example.com',
+        applicantType: 'Vendor', selectedDates: ['2027-05-29'], vendorCategory: 'Community', details: 'Current detail',
+        untrustedToken: 'must-not-leak',
+      },
+    })}, ${eventTime})`;
+  // Schema 001 permits this malformed cross-market binding, so the read query
+  // must explicitly constrain event market/location rather than trust the FK.
+  await first`
+    INSERT INTO fame_application_events
+      (location_id, event_id, market_id, application_id, payload_hash, snapshot, created_at)
+    VALUES (${location}, 'application:qa:foreign-z', ${otherMarket}, ${application.applicationId}, 'foreign-z', ${first.json({
+      contactId: 'foreign-contact', opportunityId: 'foreign-opportunity', seasonId: 'foreign-season',
+      snapshot: {
+        vendorName: 'Foreign vendor', businessName: 'Foreign business', email: 'foreign@example.com',
+        applicantType: 'Vendor', selectedDates: ['2027-06-05'], vendorCategory: 'Foreign', details: 'Foreign detail',
+      },
+    })}, ${new Date('2027-04-02T12:00:00.000Z')})`;
+  await first`
+    INSERT INTO fame_application_events
+      (location_id, event_id, market_id, application_id, payload_hash, snapshot, created_at)
+    VALUES ('qa-review-foreign-location', 'application:qa:wrong-location', ${market}, ${application.applicationId}, 'wrong-location', ${first.json({
+      contactId: application.contactId, opportunityId: application.opportunityId, seasonId: application.seasonId,
+      snapshot: {
+        vendorName: 'Wrong-location vendor', businessName: 'Wrong-location business', email: 'wrong-location@example.com',
+        applicantType: 'Vendor', selectedDates: ['2027-06-12'], vendorCategory: 'Wrong location', details: 'Wrong-location detail',
+      },
+    })}, ${new Date('2027-04-03T12:00:00.000Z')})`;
+
+  const detail = await getApplicationReviewDetail(application.applicationId, market, first);
+  assert.deepEqual(detail, {
+    id: application.applicationId,
+    sourceEventId: 'application:qa:source-z',
+    reviewState: 'unreviewed',
+    reviewRevision: 0,
+    hasOpportunity: true,
+    identitySnapshot: {
+      vendorName: 'Current vendor', businessName: 'Current business', email: 'current@example.com',
+      applicantType: 'Vendor', dates: ['2027-05-29'], fullSeason: false, requiresFinalDateConfirmation: false,
+      category: 'Community', details: 'Current detail',
+    },
+  });
+  assert.equal(JSON.stringify(detail).includes('foreign-opportunity'), false);
+  assert.equal(JSON.stringify(detail).includes('must-not-leak'), false);
+  assert.equal(JSON.stringify(detail).includes('Wrong-location'), false);
+  const list = await listApplicationReviewDetails(market, 50, first);
+  assert.equal(list.filter(row => row.id === application.applicationId).length, 1);
+  assert.deepEqual(list.find(row => row.id === application.applicationId), detail);
+  assert.equal(await getApplicationReviewDetail(application.applicationId, otherMarket, first), null);
+  assert.equal((await listApplicationReviewDetails(otherMarket, 50, first)).some(row => row.id === application.applicationId), false);
+});
+
+test('missing or malformed source identity makes an application visible but impossible to review', async () => {
+  const application = await seedApplication({
+    sourceSnapshot: {
+      vendorName: 'Incomplete vendor', businessName: 'Incomplete business', email: 'not-an-email',
+      applicantType: 'Vendor', selectedDates: ['2027-02-30'], vendorCategory: 'Produce',
+    },
+  });
+  const detail = await getApplicationReviewDetail(application.applicationId, market, first);
+  assert.equal(detail.identitySnapshot, null);
+  assert.deepEqual((await listApplicationReviewDetails(market, 50, first)).find(row => row.id === application.applicationId), detail);
+  assert.deepEqual(await recordApplicationReview(decision(application), first), { kind: 'missing_identity_snapshot' });
+  assert.equal((await first`SELECT * FROM fame_application_review_events`).length, 0);
+  assert.equal((await first`SELECT * FROM fame_application_outbox`).length, 0);
+});
+
+test('AI Studio vendor and nonprofit source keys map to a bounded manager snapshot', async () => {
+  const vendor = await seedApplication({
+    sourceSnapshot: {
+      firstName: 'Vera', lastName: 'Vendor', email: 'vera@example.com', registrationType: 'Vendor',
+      businessName: 'Vera Produce', vendorCategory: 'Produce',
+      vendorDatesRequested: ['Sat, Oct 3, 2026', 'Sat, May 29, 2027'], message: 'Seasonal citrus and greens.',
+    },
+  });
+  const nonprofit = await seedApplication({
+    seasonId: '2027-2028',
+    sourceSnapshot: {
+      firstName: 'Nora', lastName: 'Nonprofit', email: 'nora@example.com', registrationType: 'Non-Profit',
+      orgName: 'North Port Pantry', mission: 'Share food with local families.',
+    },
+  });
+  const fullSeason = await seedApplication({
+    seasonId: '2028-2029',
+    sourceSnapshot: {
+      firstName: 'Faye', lastName: 'Fullseason', email: 'faye@example.com', registrationType: 'Vendor',
+      businessName: 'Faye Flowers', vendorCategory: 'Floral',
+      vendorDatesRequested: ['Full Season (Oct 3 - May 27)'], message: 'Legacy selection retained for confirmation.',
+    },
+  });
+  const correctedFullSeason = await seedApplication({
+    seasonId: '2029-2030',
+    sourceSnapshot: {
+      firstName: 'Cora', lastName: 'Corrected', email: 'cora@example.com', registrationType: 'Vendor',
+      businessName: 'Cora Crafts', vendorCategory: 'Arts & Crafts',
+      vendorDatesRequested: ['Full Season (Oct 3 - May 29)'], message: 'Corrected source label.',
+    },
+  });
+  assert.deepEqual((await getApplicationReviewDetail(vendor.applicationId, market, first)).identitySnapshot, {
+    vendorName: 'Vera Vendor', businessName: 'Vera Produce', email: 'vera@example.com', applicantType: 'Vendor',
+    dates: ['Sat, May 29, 2027', 'Sat, Oct 3, 2026'], fullSeason: false, requiresFinalDateConfirmation: false, category: 'Produce', details: 'Seasonal citrus and greens.',
+  });
+  assert.deepEqual((await getApplicationReviewDetail(nonprofit.applicationId, market, first)).identitySnapshot, {
+    vendorName: 'Nora Nonprofit', businessName: 'North Port Pantry', email: 'nora@example.com', applicantType: 'Non-Profit Organization',
+    dates: [], fullSeason: false, requiresFinalDateConfirmation: false, category: 'Non-Profit Organization', details: 'Share food with local families.',
+  });
+  assert.deepEqual((await getApplicationReviewDetail(fullSeason.applicationId, market, first)).identitySnapshot, {
+    vendorName: 'Faye Fullseason', businessName: 'Faye Flowers', email: 'faye@example.com', applicantType: 'Vendor',
+    dates: ['Full Season (Oct 3 - May 27)'], fullSeason: true, requiresFinalDateConfirmation: true, category: 'Floral', details: 'Legacy selection retained for confirmation.',
+  });
+  assert.deepEqual((await getApplicationReviewDetail(correctedFullSeason.applicationId, market, first)).identitySnapshot, {
+    vendorName: 'Cora Corrected', businessName: 'Cora Crafts', email: 'cora@example.com', applicantType: 'Vendor',
+    dates: ['Full Season (Oct 3 - May 29)'], fullSeason: true, requiresFinalDateConfirmation: false, category: 'Arts & Crafts', details: 'Corrected source label.',
+  });
 });
 
 test('outbox leases prevent duplicate delivery and recover safely after worker failure or an expired lease', async () => {

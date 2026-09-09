@@ -25,7 +25,7 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ id:
   try {
     const application = await getApplicationReviewDetail(id, marketId);
     if (!application) return NextResponse.json({ error: "Application not found." }, { status: 404 });
-    return NextResponse.json({ application });
+    return NextResponse.json({ application }, { headers: { "Cache-Control": "private, no-store" } });
   } catch {
     return NextResponse.json({ error: "Application review is unavailable." }, { status: 503 });
   }
@@ -54,6 +54,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
       ...decision,
     });
     if (result.kind === "not_found") return NextResponse.json({ error: "Application not found." }, { status: 404 });
+    if (result.kind === "missing_identity_snapshot") return NextResponse.json({ error: "The latest application snapshot is incomplete. Reload after a complete vendor submission is captured." }, { status: 409 });
     if (result.kind === "missing_opportunity") return NextResponse.json({ error: "Application is missing its CRM opportunity identity." }, { status: 409 });
     if (result.kind === "stale_source") return NextResponse.json({ error: "Application changed; reload before reviewing." }, { status: 409 });
     if (result.kind === "terminal") return NextResponse.json({ error: `Application is already ${result.reviewState}.` }, { status: 409 });
