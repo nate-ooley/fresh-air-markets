@@ -61,10 +61,14 @@ Correct subaccount: `aooAnUXF0COePorBo7wL`.
   Email and file are required; upload settings show PDF, JPG/JPEG and PNG only,
   multiple files off. Form-level email notification and auto-responder are off.
   This is configuration evidence only: no submission or workflow was executed.
-  The copied form's Submit control is still above the upload because native
-  drag/reorder attempts did not persist, and placeholder policy links remain.
-  Correct those before use. Exact application binding and downstream workflow
-  containment are still unverified. The field uses HighLevel public-file mode;
+  September 9 follow-up: removed the copied placeholder policy links and
+  corrected the layout. Reinserted the same existing Contact upload field after
+  Vendor Business Name through Add Object Fields, restored Required, saved and
+  fully reloaded the editor. Submit remains last after reload; email/upload are
+  required, allowed types and single-file mode are retained, and both form email
+  settings remain off. No submission, workflow, email or payment was executed.
+  Exact application binding and downstream workflow containment are still
+  unverified. The field uses HighLevel public-file mode;
   it is not evidence of the portal's private-transfer or scanner path.
 - AI Studio project `1779802876495102326` lists default domain
   `https://fresh-air-landing.vibepreview.com` and live apex/www domains. UI
