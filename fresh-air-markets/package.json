@@ -13,6 +13,7 @@
     "square:qa-webhook-fixture": "node scripts/generate-square-qa-webhook-fixture.mjs",
     "test:pg": "node --test --test-concurrency=1 tests/pg/*.test.cjs tests/database-readiness.pg.test.cjs",
     "database:plan": "node scripts/database-readiness.mjs plan",
+    "database:bootstrap:qa": "node scripts/bootstrap-qa-account.mjs",
     "database:check": "node scripts/database-readiness.mjs check",
     "database:migrate:qa": "node scripts/database-readiness.mjs apply"
   },

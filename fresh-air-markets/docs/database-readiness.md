@@ -1,9 +1,30 @@
 # QA database migration and readiness
 
-The Preview portal has connected to Neon successfully: its public booth API,
-manager login and authenticated dashboard were previously verified. Those checks
-initialize only the base portal tables. They do **not** apply the application,
-agreement, document, reservation, or Square ledgers in migrations 001–021.
+Historical Preview checks reached a public booth API, manager login and
+dashboard. They do not establish readiness of a newly provisioned Neon branch.
+The regular portal initializer creates only the base tables and can seed a demo
+account; do not use a public demo request to bootstrap the Fresh Air QA tenant.
+The application, agreement, document, reservation and Square ledgers require
+migrations 001–021.
+
+## September 9 hosted inspection
+
+The signed-in Vercel browser can now access `farmers-market` and its existing
+Neon resource `neon-green-car` (`blue-leaf-02724804`). The connection is Preview
+only, with automatic Preview database branching enabled. The variable list
+contains one Neon-linked `DATABASE_URL` and one `DATABASE_URL_UNPOOLED`, both
+Secret / Preview. No duplicate connection or visible manual placeholder remains.
+
+The resource's read-only Query console returned `neondb` / `public` and **zero
+public tables**. This describes the resource-console target, not every deployment
+branch. Deployment `dpl_758fkmxPxWxJBy4erfyq5v3hX8Ne` at commit `abdd607` records
+Neon branch `br-divine-breeze-awf9vfo1` in its provisioning action. Its endpoint
+and schema still need inspection in Neon; the console currently requires the
+owner's email activation. No hosted schema or account was changed.
+
+The immutable Preview entry page renders the vendor application entry point and
+private staff sign-in. Its `/apply` handoff reaches the market's `/vendors` page.
+These are navigation checks, not authenticated/database/workflow acceptance.
 
 The checked-in runner closes that deployment gap without creating a public
 administration endpoint. It sends no email, SMS, HighLevel request or Square
@@ -11,7 +32,70 @@ request, creates no applicants, and does not seed or rename a market account.
 This runner is restricted to a reviewed **Preview / QA Neon target**. It is not a
 production release procedure.
 
-## Run after restoring private Preview environment access
+## Initialize an empty private QA branch
+
+`scripts/bootstrap-qa-account.mjs` supplies the missing base-schema/private-manager
+step without opening public signup or invoking the demo initializer. It is
+separate from the migration runner below. Keep every outbound worker paused.
+The owner must first verify the actual Neon branch and endpoint as QA-only.
+
+Inject the real Preview variables privately. Bootstrap requires
+`VERCEL_ENV=preview`, matching Neon URLs with TLS, `SQUARE_ENVIRONMENT=sandbox`,
+`SQUARE_ALLOW_LIVE_PAYMENTS=false`, and outbound enable/routing flags unset or
+`false`. Creation and account verification also require a private `AUTH_SECRET`
+of at least 32 characters and `FAME_SEASON_ID=2026-2027`.
+
+Inspect before writing, substituting the actual endpoint hostname:
+
+```sh
+node scripts/bootstrap-qa-account.mjs inspect --qa --expected-host=YOUR_QA_NEON_HOST
+```
+
+If the schema is empty and there is no existing private manager, create a new
+mode-0700 directory outside the checkout for the generated login. For this
+expressly isolated QA fixture, 30 spaces is the existing test-suite capacity;
+it does not define the real market's capacity. Leave `FAME_MARKET_ACCOUNT_ID`
+unset for the first creation and set `FAME_BOOTH_CAPACITY=30` or leave it unset
+until the script returns the exact configuration suggestions.
+
+```sh
+FAME_QA_CREDENTIALS_DIR=$(mktemp -d /private/tmp/fame-qa-credentials.XXXXXX)
+node scripts/bootstrap-qa-account.mjs create --qa \
+  --expected-host=YOUR_QA_NEON_HOST \
+  --email=nate@autocraftstudios.com --slug=qa-fresh-air \
+  --qa-capacity=30 \
+  --credentials-file="$FAME_QA_CREDENTIALS_DIR/manager.json"
+```
+
+Only an empty public schema can be initialized. Creation atomically adds the
+four base tables and one private QA manager. It creates no demo tenant, booths,
+bookings, applicants, payment records or outbound events. The QA slug/email
+are checked against the target; existing data is never replaced. A competing
+initializer causes a rollback. A retry with the same private file verifies the
+exact account and password instead of creating another identity or resetting it.
+
+The generated password stays in the private mode-0600 file, never stdout,
+tickets or version control. Keep that file private for login and safe retry.
+Do not put credentials in a command argument. The manager's legacy trial/license
+fields exist only for model compatibility; no subscription or purchase occurs.
+
+If a private QA account already exists, preserve it. After recording its actual
+ID and authorized email, set `FAME_MARKET_ACCOUNT_ID` to that ID and run:
+
+```sh
+node scripts/bootstrap-qa-account.mjs verify-existing --qa \
+  --expected-host=YOUR_QA_NEON_HOST \
+  --account-id=YOUR_VERIFIED_QA_ACCOUNT_ID \
+  --email=nate@autocraftstudios.com --qa-capacity=30
+```
+
+This is read-only and never resets a password. For either path, copy only the
+returned non-secret account/season/capacity suggestions into Preview Config,
+then apply all migrations below. Bootstrap success explicitly reports
+`ready:false`; only the separate complete readiness check can pass schema and
+configuration readiness. Production provisioning remains a separate task.
+
+## Apply migrations using private Preview environment access
 
 1. Authenticate the Vercel CLI or use the approved secret-injection mechanism
    for the `farmers-market` project. Inject its **Preview** variables for branch
