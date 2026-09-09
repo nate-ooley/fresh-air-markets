@@ -44,7 +44,7 @@ test('committed checkout queues once; concurrent repairs and workers deliver one
   await assert.rejects(first`UPDATE fame_payment_pending_sync_outbox SET contact_id = 'foreign'`, /cannot be reassigned/);
 });
 test('checkout preparation and rolled-back creation queue nothing; repair recovers a missed exact committed checkout', async () => {
-  const f = await seed({ checkoutStatus: 'checkout_pending' }); assert.equal(await pendingRow(), undefined);
+  const f = await seed({ checkoutStatus: 'pending_checkout' }); assert.equal(await pendingRow(), undefined);
   await assert.rejects(first.begin(async tx => { await tx`UPDATE fame_payment_orders SET status = 'checkout_created' WHERE id = ${f.order}`; throw new Error('rollback'); }), /rollback/);
   assert.equal(await pendingRow(), undefined);
   await first`UPDATE fame_payment_orders SET status = 'checkout_created' WHERE id = ${f.order}`;
