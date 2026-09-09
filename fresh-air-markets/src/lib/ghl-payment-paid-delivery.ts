@@ -10,6 +10,7 @@ export interface PaymentPaidDeliveryConfig extends PaymentPaidSyncScope {
   pipelineId: string;
   pendingStageId: string;
   confirmedStageId: string;
+  agreementCompletedStageId: string;
 }
 export class PaymentPaidDeliveryError extends Error {
   constructor(public readonly code: string, public readonly retryAfterSeconds?: number) {
@@ -26,10 +27,11 @@ export function readPaymentPaidDeliveryConfig(env: Record<string, string | undef
   const locationId = env.GHL_LOCATION_ID?.trim() ?? "";
   const pendingStageId = env.GHL_PAYMENT_PENDING_STAGE_ID?.trim() ?? "";
   const confirmedStageId = env.GHL_PAYMENT_CONFIRMED_STAGE_ID?.trim() ?? "";
+  const agreementCompletedStageId = env.GHL_AGREEMENT_COMPLETED_STAGE_ID?.trim() ?? "";
   const mode = env.GHL_PAYMENT_DELIVERY_MODE;
   if (apiToken.length < 16 || locationId !== LOCATION || marketId === "demo-market"
-    || ![marketId, seasonId, pendingStageId, confirmedStageId].every(id => ID.test(id))
-    || pendingStageId === confirmedStageId) fail();
+    || ![marketId, seasonId, pendingStageId, confirmedStageId, agreementCompletedStageId].every(id => ID.test(id))
+    || new Set([pendingStageId, confirmedStageId, agreementCompletedStageId]).size !== 3) fail();
   let pipelineId: string;
   let squareEnvironment: "sandbox" | "production";
   if (mode === "qa") {
@@ -47,7 +49,7 @@ export function readPaymentPaidDeliveryConfig(env: Record<string, string | undef
         && (key.startsWith("SQUARE_QA_") || key.startsWith("GHL_QA_") || key.startsWith("GHL_PAYMENT_QA_")))) fail();
     squareEnvironment = "production";
   } else return fail();
-  return { apiToken, marketId, seasonId, locationId, pendingStageId, confirmedStageId, mode, pipelineId, squareEnvironment };
+  return { apiToken, marketId, seasonId, locationId, pendingStageId, confirmedStageId, agreementCompletedStageId, mode, pipelineId, squareEnvironment };
 }
 const object = (v: unknown): Record<string, unknown> | null => v && typeof v === "object" && !Array.isArray(v) ? v as Record<string, unknown> : null;
 async function body(response: Response): Promise<Record<string, unknown>> {
@@ -60,7 +62,7 @@ function providerError(response: Response): PaymentPaidDeliveryError {
   }
   return new PaymentPaidDeliveryError(response.status >= 500 ? "ghl_unavailable" : "ghl_rejected");
 }
-async function request(config: PaymentPaidDeliveryConfig, transport: typeof fetch, path: string, init: RequestInit): Promise<Response> {
+export async function requestPaymentStage(config: PaymentPaidDeliveryConfig, transport: typeof fetch, path: string, init: RequestInit): Promise<Response> {
   let response: Response;
   try {
     response = await transport(`${BASE}${path}`, { ...init, redirect: "error", signal: AbortSignal.timeout(5000),
@@ -69,16 +71,16 @@ async function request(config: PaymentPaidDeliveryConfig, transport: typeof fetc
   if (!response.ok) throw providerError(response);
   return response;
 }
-async function exactContact(job: PaymentPaidSyncMessage, config: PaymentPaidDeliveryConfig, transport: typeof fetch): Promise<void> {
-  const response = await request(config, transport, `/contacts/${encodeURIComponent(job.contactId)}`, { method: "GET" });
+export async function readExactPaymentContact(job: Pick<PaymentPaidSyncMessage, "contactId">, config: PaymentPaidDeliveryConfig, transport: typeof fetch): Promise<void> {
+  const response = await requestPaymentStage(config, transport, `/contacts/${encodeURIComponent(job.contactId)}`, { method: "GET" });
   const contact = object((await body(response)).contact);
   if (contact?.id !== job.contactId || contact.locationId !== config.locationId) throw new PaymentPaidDeliveryError("ghl_identity_mismatch");
   if (config.mode === "qa" && (typeof contact.email !== "string" || !QA_EMAILS.has(contact.email.trim().toLowerCase()))) {
     throw new PaymentPaidDeliveryError("ghl_qa_recipient_rejected");
   }
 }
-async function exactOpportunity(job: PaymentPaidSyncMessage, config: PaymentPaidDeliveryConfig, transport: typeof fetch): Promise<Record<string, unknown>> {
-  const response = await request(config, transport, `/opportunities/${encodeURIComponent(job.opportunityId)}`, { method: "GET" });
+export async function readExactPaymentOpportunity(job: Pick<PaymentPaidSyncMessage, "contactId" | "opportunityId">, config: PaymentPaidDeliveryConfig, transport: typeof fetch): Promise<Record<string, unknown>> {
+  const response = await requestPaymentStage(config, transport, `/opportunities/${encodeURIComponent(job.opportunityId)}`, { method: "GET" });
   const opportunity = object((await body(response)).opportunity);
   if (!opportunity || opportunity.id !== job.opportunityId || opportunity.contactId !== job.contactId
     || opportunity.locationId !== config.locationId) throw new PaymentPaidDeliveryError("ghl_identity_mismatch");
@@ -91,15 +93,17 @@ export async function deliverPaymentPaidToGhl(job: PaymentPaidSyncMessage, confi
   if (job.marketId !== config.marketId || job.seasonId !== config.seasonId || job.locationId !== config.locationId
     || job.squareEnvironment !== config.squareEnvironment
     || ![job.contactId, job.opportunityId].every(id => ID.test(id))) throw new PaymentPaidDeliveryError("ghl_identity_mismatch");
-  await exactContact(job, config, transport);
-  const before = await exactOpportunity(job, config, transport);
+  await readExactPaymentContact(job, config, transport);
+  const before = await readExactPaymentOpportunity(job, config, transport);
   if (before.pipelineStageId === config.confirmedStageId) return;
-  if (before.pipelineStageId !== config.pendingStageId) throw new PaymentPaidDeliveryError("ghl_stage_diverged");
+  // The paid worker supplies exact reconciled Square evidence under the shared
+  // stage lock. A fast payment need not wait for a Pending-stage worker first.
+  if (before.pipelineStageId !== config.pendingStageId && before.pipelineStageId !== config.agreementCompletedStageId) throw new PaymentPaidDeliveryError("ghl_stage_diverged");
   // Fetch current contact again immediately before mutation: stale queued email is never a QA permit.
-  await exactContact(job, config, transport);
-  await request(config, transport, `/opportunities/${encodeURIComponent(job.opportunityId)}`, {
+  await readExactPaymentContact(job, config, transport);
+  await requestPaymentStage(config, transport, `/opportunities/${encodeURIComponent(job.opportunityId)}`, {
     method: "PUT", body: JSON.stringify({ pipelineStageId: config.confirmedStageId }),
   });
-  const after = await exactOpportunity(job, config, transport);
+  const after = await readExactPaymentOpportunity(job, config, transport);
   if (after.pipelineStageId !== config.confirmedStageId) throw new PaymentPaidDeliveryError("ghl_stage_diverged");
 }

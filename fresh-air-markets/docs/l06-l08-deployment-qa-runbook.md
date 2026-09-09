@@ -25,8 +25,11 @@ repository.
 | `FAME_MARKET_ACCOUNT_ID` | portal `accounts.id` for Fresh Air, not the HighLevel location ID |
 | `FAME_SEASON_ID=2026-2027` | all exact-record mappings |
 | `GHL_APPLICATION_WEBHOOK_SECRET` | L06 application intake event |
-| `GHL_API_TOKEN` with `opportunities.readonly` + `opportunities.write` | L06/L07 exact HighLevel opportunity updates |
-| `GHL_APPLICATION_PIPELINE_ID` and the four L06 stage IDs | L06 exact review-stage mapping |
+| `GHL_API_TOKEN` with `contacts.readonly`, `opportunities.readonly` + `opportunities.write` | exact current QA contact checks and HighLevel opportunity updates |
+| `GHL_APPLICATION_PIPELINE_ID` | actual Production pipeline ID, retained in Preview only to verify the QA pipeline is different |
+| `GHL_QA_APPLICATION_PIPELINE_ID` | separate Preview QA pipeline shared by review and payment delivery |
+| Four `GHL_APPLICATION_*_STAGE_ID` values | Review, Approved, Changes Requested and Declined stages in that QA pipeline |
+| `GHL_PAYMENT_QA_ROUTING_VERIFIED=true` | set only after downstream review/payment workflows are verified to use QA recipients exclusively, with no SMS |
 | `CRON_SECRET` | L06 authenticated retry scheduler |
 | `GHL_AGREEMENT_WEBHOOK_SECRET` | L07 agreement issued/completed events |
 | `GHL_AGREEMENT_TEMPLATE_ID` | L07 approved template gate |
@@ -38,6 +41,13 @@ repository.
 The preview is a build check only until these variables and the migrations
 exist. A route returning `503` for missing persistent storage is expected in
 an unconfigured preview and is not a QA pass.
+
+Review delivery requires the Vercel Preview runtime. Never replace
+`GHL_APPLICATION_PIPELINE_ID` with the QA ID: the distinct QA variable is selected
+automatically, matching payment email and paid-status delivery. Review also
+checks the exact current contact email against the two approved addresses before
+any stage update. Production uses the Production pipeline and its stage IDs and
+must not contain nonempty `GHL_QA_*` or `GHL_PAYMENT_QA_*` variables.
 
 ## 2. Apply the portal migrations
 

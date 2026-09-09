@@ -8,8 +8,10 @@ import {
 } from "../src/lib/ghl-application-review-delivery.ts";
 
 const env = {
+  VERCEL: "1",
+  VERCEL_ENV: "production",
   GHL_API_TOKEN: "qa-token-at-least-sixteen-characters",
-  GHL_LOCATION_ID: "qa_location_1",
+  GHL_LOCATION_ID: "aooAnUXF0COePorBo7wL",
   GHL_APPLICATION_PIPELINE_ID: "qa_pipeline_1",
   GHL_APPLICATION_REVIEW_STAGE_ID: "qa_review_1",
   GHL_APPLICATION_APPROVED_STAGE_ID: "qa_approved_1",
@@ -76,9 +78,7 @@ test("approval PUT moves only the immutable opportunity from review to its confi
   assert.equal(script.calls[0].url.endsWith(`/opportunities/${message().payload.opportunityId}`), true);
   assert.equal(script.calls[1].init?.method, "PUT");
   assert.deepEqual(JSON.parse(String(script.calls[1].init?.body)), {
-    pipelineId: env.GHL_APPLICATION_PIPELINE_ID,
     pipelineStageId: env.GHL_APPLICATION_APPROVED_STAGE_ID,
-    status: "open",
   });
   const headers = new Headers(script.calls[1].init?.headers);
   assert.equal(headers.get("version"), "v3");
@@ -103,10 +103,11 @@ test("identity and pipeline mismatches fail before a HighLevel PUT", async () =>
     );
     assert.equal(script.calls.length, 1);
   }
-  const wrongConfiguredLocation = readApplicationReviewDeliveryConfig({ ...env, GHL_LOCATION_ID: "another_location" });
+  const wrongLocationMessage = message();
+  wrongLocationMessage.payload.locationId = "another_location";
   const script = scripted([]);
   await assert.rejects(
-    () => deliverApplicationReviewToGhl(message(), wrongConfiguredLocation, script.transport),
+    () => deliverApplicationReviewToGhl(wrongLocationMessage, config, script.transport),
     error => error instanceof ApplicationReviewDeliveryError && error.code === "ghl_identity_mismatch",
   );
   assert.equal(script.calls.length, 0);
@@ -123,6 +124,9 @@ test("an unexpected source stage or closed opportunity is never overwritten", as
   for (const source of [
     opportunity("manual_other_stage"),
     opportunity(env.GHL_APPLICATION_REVIEW_STAGE_ID, { status: "won" }),
+    opportunity(env.GHL_APPLICATION_APPROVED_STAGE_ID, { status: "won" }),
+    opportunity(env.GHL_APPLICATION_APPROVED_STAGE_ID, { status: "lost" }),
+    opportunity(env.GHL_APPLICATION_APPROVED_STAGE_ID, { status: "abandoned" }),
   ]) {
     const script = scripted([source]);
     await assert.rejects(
@@ -146,6 +150,28 @@ test("the post-update readback rejects a provider lifecycle-status change", asyn
     error => error instanceof ApplicationReviewDeliveryError && error.code === "ghl_stage_diverged",
   );
   assert.equal(script.calls.length, 3);
+});
+
+test("a stage-only PUT cannot reopen or move back an opportunity changed by an operator after preflight", async () => {
+  const current = {
+    id: message().payload.opportunityId, contactId: message().payload.contactId,
+    locationId: config.locationId, pipelineId: config.pipelineId,
+    pipelineStageId: config.reviewStageId, status: "open",
+  };
+  const transport = (async (_input: string | URL | Request, init?: RequestInit) => {
+    if (init?.method === "PUT") {
+      current.status = "won";
+      current.pipelineId = "operator_selected_pipeline";
+      const update = JSON.parse(String(init.body));
+      assert.deepEqual(update, { pipelineStageId: config.stageForOutcome.approved });
+      Object.assign(current, update);
+    }
+    return Response.json({ opportunity: current });
+  }) as typeof fetch;
+  await assert.rejects(() => deliverApplicationReviewToGhl(message(), config, transport),
+    error => error instanceof ApplicationReviewDeliveryError && error.code === "ghl_pipeline_mismatch");
+  assert.equal(current.status, "won");
+  assert.equal(current.pipelineId, "operator_selected_pipeline");
 });
 
 test("rate limits and bad configuration remain safe and report bounded retry signals", async () => {

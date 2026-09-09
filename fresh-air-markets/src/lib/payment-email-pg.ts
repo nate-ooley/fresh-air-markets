@@ -214,7 +214,7 @@ function matches(row: OutboxRow, current: EligibleRow | null): current is Eligib
     && current.payment_due_at?.valueOf() === row.payment_due_at.valueOf());
 }
 
-async function checkSend(sql: Sql, row: OutboxRow, input: DispatchPaymentEmailsInput, now: Date, start: boolean): Promise<"ready" | "cancelled" | "lost"> {
+async function checkSend(sql: Sql, row: OutboxRow, input: DispatchPaymentEmailsInput, now: Date, start: boolean): Promise<"ready" | "cancelled" | "lost" | "waiting" | "failed"> {
   return sql.begin(async tx => {
     const current = await eligibleSnapshot(tx, row.market_id, row.reservation_id, true);
     const [owned] = await tx`SELECT id FROM fame_payment_email_outbox WHERE id = ${row.id} AND state = 'preparing'
@@ -228,12 +228,39 @@ async function checkSend(sql: Sql, row: OutboxRow, input: DispatchPaymentEmailsI
         safe_error = 'payment_email_reservation_changed', lease_id = NULL, lease_expires_at = NULL, updated_at = ${now} WHERE id = ${row.id}`;
       return "cancelled";
     }
+    // Checkout creation queues the Pending CRM stage before a manager can ask
+    // to send this email. Preserve the email intent until that exact stage
+    // receipt arrives instead of treating normal asynchronous ordering as failure.
+    const [prerequisite] = await tx<{ status: string; delivered_at: Date | null }[]>`
+      SELECT j.status, j.delivered_at FROM fame_payment_pending_sync_outbox j
+      JOIN fame_payment_orders p ON p.id = j.payment_order_id AND p.market_id = j.market_id
+      JOIN fame_reservation_finalizations f ON f.reservation_id = p.reservation_id AND f.market_id = p.market_id
+      JOIN fame_agreement_completions g ON g.id = f.agreement_completion_id AND g.market_id = f.market_id AND g.application_id = f.application_id
+      WHERE j.market_id = ${row.market_id} AND j.application_id = ${row.application_id}
+        AND j.reservation_id = ${row.reservation_id} AND j.reservation_revision = ${row.reservation_revision}
+        AND j.location_id = ${row.source_location_id} AND j.contact_id = ${row.contact_id} AND j.opportunity_id = ${row.opportunity_id}
+        AND j.agreement_completion_id = f.agreement_completion_id AND j.season_id = g.season_id
+        AND j.square_environment = ${input.accessConfig.environment} AND p.square_environment = j.square_environment
+        AND p.reservation_id = j.reservation_id AND p.reservation_revision = j.reservation_revision
+        AND p.square_order_id = j.square_order_id AND j.payment_due_at = ${row.payment_due_at} AND p.payment_due_at = j.payment_due_at`;
+    if (prerequisite && ["pending", "processing"].includes(prerequisite.status)) {
+      await tx`UPDATE fame_payment_email_outbox SET state = 'pending', prepare_attempts = GREATEST(0, prepare_attempts - 1),
+        safe_error = 'payment_email_pending_stage_wait', next_attempt_at = ${new Date(now.valueOf() + 30_000)},
+        lease_id = NULL, lease_expires_at = NULL, updated_at = ${now} WHERE id = ${row.id}`;
+      return "waiting";
+    }
+    if (prerequisite?.status !== "delivered" || !prerequisite.delivered_at) {
+      await tx`UPDATE fame_payment_email_outbox SET state = 'failed', invitation_ciphertext = NULL,
+        safe_error = 'payment_email_pending_prerequisite_failed', lease_id = NULL, lease_expires_at = NULL,
+        updated_at = ${now} WHERE id = ${row.id}`;
+      return "failed";
+    }
     if (!start) return "ready";
     // Commit this irreversible checkpoint before entering the provider POST. Never restore the secret or retry POST.
     await tx`UPDATE fame_payment_email_outbox SET state = 'send_started', invitation_ciphertext = NULL,
       send_started_at = ${now}, updated_at = ${now}, safe_error = NULL WHERE id = ${row.id}`;
     return "ready";
-  }) as Promise<"ready" | "cancelled" | "lost">;
+  }) as Promise<"ready" | "cancelled" | "lost" | "waiting" | "failed">;
 }
 
 async function failPreflight(sql: Sql, row: OutboxRow, error: unknown, now: Date): Promise<Outcome> {
@@ -283,7 +310,7 @@ export async function dispatchPaymentEmails(input: DispatchPaymentEmailsInput, s
     if (row.state === "uncertain" || row.state === "failed") { report[row.state]++; continue; }
     if (row.state === "accepted") { report[await pollReceipt(sql, row, input, clock())]++; continue; }
     const beforePreflight = await checkSend(sql, row, input, clock(), false);
-    if (beforePreflight !== "ready") { report[beforePreflight === "cancelled" ? "cancelled" : "pending"]++; continue; }
+    if (beforePreflight !== "ready") { report[beforePreflight === "cancelled" || beforePreflight === "failed" ? beforePreflight : "pending"]++; continue; }
     let prepared: PaymentEmailMessage;
     try {
       const url = decryptPaymentEmailInvitation(row.invitation_ciphertext!, input.secret, { id: row.id, marketId: row.market_id,
@@ -293,7 +320,7 @@ export async function dispatchPaymentEmails(input: DispatchPaymentEmailsInput, s
       await preflightPaymentEmail(prepared, input.deliveryConfig, input.transport, clock());
     } catch (error) { report[await failPreflight(sql, row, error, clock())]++; continue; }
     const beforePost = await checkSend(sql, row, input, clock(), true);
-    if (beforePost !== "ready") { report[beforePost === "cancelled" ? "cancelled" : "pending"]++; continue; }
+    if (beforePost !== "ready") { report[beforePost === "cancelled" || beforePost === "failed" ? beforePost : "pending"]++; continue; }
     let result;
     try { result = await sendPaymentEmail(prepared, input.deliveryConfig, input.transport, clock()); }
     catch { result = { kind: "uncertain" as const, code: "payment_email_send_unconfirmed" }; }

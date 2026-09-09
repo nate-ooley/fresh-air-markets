@@ -9,10 +9,13 @@ const GHL_BASE = "https://services.leadconnectorhq.com";
 const GHL_VERSION = "v3";
 const REQUEST_TIMEOUT_MS = 5_000;
 const IDENTIFIER = /^[A-Za-z0-9_-]{1,192}$/;
+const LOCATION = "aooAnUXF0COePorBo7wL";
+const QA_EMAILS = new Set(["lnooley@gmail.com", "nate@autocraftstudios.com"]);
 
 type FetchTransport = typeof fetch;
 
 export interface AgreementStageDeliveryConfig {
+  mode: "qa" | "production";
   apiToken: string;
   locationId: string;
   pipelineId: string;
@@ -41,14 +44,24 @@ export function readAgreementStageDeliveryConfig(
 ): AgreementStageDeliveryConfig {
   const apiToken = env.GHL_API_TOKEN?.trim() ?? "";
   const locationId = env.GHL_LOCATION_ID?.trim() ?? "";
-  const pipelineId = env.GHL_AGREEMENT_PIPELINE_ID?.trim() ?? "";
+  const productionPipelineId = env.GHL_APPLICATION_PIPELINE_ID?.trim() ?? "";
+  const mode = env.VERCEL_ENV === "preview" ? "qa" : "production";
+  const pipelineId = mode === "qa" ? env.GHL_QA_APPLICATION_PIPELINE_ID?.trim() ?? "" : productionPipelineId;
+  const legacyPipelineId = env.GHL_AGREEMENT_PIPELINE_ID?.trim() ?? "";
   const sentStageId = env.GHL_AGREEMENT_SENT_STAGE_ID?.trim() ?? "";
   const completedStageId = env.GHL_AGREEMENT_COMPLETED_STAGE_ID?.trim() ?? "";
   const ids = [locationId, pipelineId, sentStageId, completedStageId];
-  if (apiToken.length < 16 || ids.some(id => !validIdentifier(id)) || sentStageId === completedStageId) {
+  if (env.VERCEL !== "1" || !["preview", "production"].includes(env.VERCEL_ENV ?? "")
+    || apiToken.length < 16 || /[\r\n\0]/.test(apiToken) || locationId !== LOCATION
+    || ids.some(id => !validIdentifier(id)) || sentStageId === completedStageId
+    || (legacyPipelineId && legacyPipelineId !== pipelineId)
+    || (mode === "qa" && (env.GHL_PAYMENT_QA_ROUTING_VERIFIED !== "true"
+      || !validIdentifier(productionPipelineId) || pipelineId === productionPipelineId))
+    || (mode === "production" && Object.entries(env).some(([key, value]) => value?.trim()
+      && (key.startsWith("GHL_QA_") || key.startsWith("GHL_PAYMENT_QA_"))))) {
     throw new AgreementStageDeliveryError("ghl_config_missing", "HighLevel agreement-stage delivery is not configured.");
   }
-  return { apiToken, locationId, pipelineId, sentStageId, completedStageId };
+  return { apiToken, locationId, pipelineId, sentStageId, completedStageId, mode };
 }
 
 export function agreementStageDeliveryConfigured(env: Record<string, string | undefined>): boolean {
@@ -117,6 +130,7 @@ async function request(
   try {
     return await transport(`${GHL_BASE}${path}`, {
       ...init,
+      redirect: "error",
       headers: {
         Authorization: `Bearer ${config.apiToken}`,
         Version: GHL_VERSION,
@@ -146,7 +160,7 @@ function exactOpportunity(
   if (!opportunity
     || opportunity.id !== message.payload.opportunityId
     || opportunity.contactId !== message.payload.contactId
-    || (opportunity.locationId !== undefined && opportunity.locationId !== message.payload.locationId)) {
+    || opportunity.locationId !== message.payload.locationId) {
     throw new AgreementStageDeliveryError("ghl_identity_mismatch", "HighLevel opportunity identity did not match the agreement completion.");
   }
   if (opportunity.pipelineId !== config.pipelineId) {
@@ -165,6 +179,19 @@ async function getExactOpportunity(
   return exactOpportunity(opportunityFromResponse(await responseJson(response)), message, config);
 }
 
+/** QA must verify the current contact immediately before any workflow-triggering stage write. */
+async function verifyQaContact(message: AgreementStageDeliveryMessage, config: AgreementStageDeliveryConfig,
+  transport: FetchTransport): Promise<void> {
+  if (config.mode !== "qa") return;
+  const response = await request(transport, config, `/contacts/${encodeURIComponent(message.payload.contactId)}`, { method: "GET" });
+  if (!response.ok) throw providerError(response);
+  const contact = object((await responseJson(response))?.contact);
+  if (!contact || contact.id !== message.payload.contactId || contact.locationId !== config.locationId
+    || typeof contact.email !== "string" || !QA_EMAILS.has(contact.email.trim().toLowerCase())) {
+    throw new AgreementStageDeliveryError("ghl_identity_mismatch", "HighLevel agreement contact did not match the allowed QA recipient.");
+  }
+}
+
 /**
  * The preflight/final read is intentional: if HighLevel accepts a PUT but the
  * process exits before the local receipt is written, the retry sees the target
@@ -178,24 +205,24 @@ export async function deliverAgreementStageToGhl(
   if (message.payload.locationId !== config.locationId) {
     throw new AgreementStageDeliveryError("ghl_identity_mismatch", "Agreement completion location did not match the HighLevel configuration.");
   }
+  await verifyQaContact(message, config, transport);
   const before = await getExactOpportunity(message, config, transport);
-  if (before.pipelineStageId === config.completedStageId) return;
-  if (before.pipelineStageId !== config.sentStageId) {
-    throw new AgreementStageDeliveryError("ghl_stage_diverged", "HighLevel opportunity was not in the configured agreement-sent stage.");
-  }
   // Agreement completion is a stage transition, not a lifecycle-status change.
   // Never reopen a won/lost/abandoned opportunity merely because a stale
   // completion event arrives after an operator moved it out of the open flow.
   if (before.status !== "open") {
     throw new AgreementStageDeliveryError("ghl_status_diverged", "HighLevel opportunity was not open for agreement completion.");
   }
+  if (before.pipelineStageId === config.completedStageId) return;
+  if (before.pipelineStageId !== config.sentStageId) {
+    throw new AgreementStageDeliveryError("ghl_stage_diverged", "HighLevel opportunity was not in the configured agreement-sent stage.");
+  }
+  await verifyQaContact(message, config, transport);
 
   const update = await request(transport, config, `/opportunities/${encodeURIComponent(message.payload.opportunityId)}`, {
     method: "PUT",
     body: JSON.stringify({
-      pipelineId: config.pipelineId,
       pipelineStageId: config.completedStageId,
-      status: before.status,
     }),
   });
   if (!update.ok) throw providerError(update);

@@ -6,6 +6,8 @@ Migration `019-payment-email-outbox.sql` adds the notification ledger. Migration
 
 The delivery URL is encrypted with AES-256-GCM. HKDF derives an independent encryption key from the existing strong private `AUTH_SECRET`; no additional secret is required. The authentication data binds the notification, market, reservation, revision, and recipient. Only ciphertext is stored while awaiting preflight. Manager status responses contain no email address, invitation token, URL, body, or CRM identifiers.
 
+Before provider preflight, the worker requires the exact Payment Pending stage outbox receipt for this checkout, finalization, recipient identity, revision and deadline. Pending/processing stage work preserves the encrypted email intent and defers without consuming the email preflight budget. Missing, mismatched or failed prerequisite evidence produces an operator-visible preparation failure. Paid or expired reservations cancel first, even while stage delivery is still waiting. The same prerequisite is rechecked before the email send checkpoint.
+
 The worker processes at most five notifications per request; an immediate manager request can restrict dispatch to its exact notification. Each item is leased for two minutes. The worker checks the current exact checkout and invitation, performs only read-only provider identity/stage checks, then rechecks payment state, revision, deadline, invitation revocation, and the payment stop immediately before committing `send_started`. That committed checkpoint erases the ciphertext **before** the single provider POST.
 
 State meanings:

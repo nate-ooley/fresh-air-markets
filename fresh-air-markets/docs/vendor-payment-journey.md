@@ -14,9 +14,16 @@ acceptance remain unverified until the release checks below are completed.
    Reloading reads that committed reservation without reserving again.
 4. Create its Square payment request. Retrying retrieves the same provider order
    and deadline. Nonprofits skip payment. Creating this request does not send email.
-5. Create the private vendor access link. Replacing it revokes the previous link
-   and its browser sessions. The link is shown for deliberate copying; automated
-   delivery through the correct HighLevel contact is still required.
+   A durable job queues Payment Pending sync for the application's same
+   HighLevel opportunity. The protected worker waits for the exact Agreement
+   Signed delivery receipt before updating its stage; it never creates another
+   opportunity or changes the application's pipeline.
+5. Send the private payment email through the explicit manager confirmation.
+   Preparation verifies the current contact, email, opportunity and Payment
+   Pending stage. A durable send record prevents a second submission after an
+   uncertain response. Provider acceptance and delivery are shown separately.
+   A separately created vendor access link can also be copied deliberately;
+   replacing it revokes the previous link and its browser sessions.
 
 ## Vendor path
 
@@ -39,7 +46,7 @@ merchant, location, order, amount and reservation before the page says paid.
 
 ## Required release work
 
-- Apply and verify migrations 001–017 on the reviewed Preview database, including
+- Apply and verify migrations 001–020 on the reviewed Preview database, including
   the private Fresh Air account and confirmed overall booth capacity.
 - Set `FAME_VENDOR_PORTAL_ORIGIN` as **Config** to the exact Preview HTTPS origin
   used for testing. Production must use `https://freshairmarketsandevents.com`.
@@ -50,6 +57,10 @@ merchant, location, order, amount and reservation before the page says paid.
   real Sandbox success, decline, return, replay, expiry and recovery scenarios.
 - Complete the correct HighLevel application/document handoff, automated private
   link delivery, paid-state synchronization and the authorized inbox checks.
+- Invoke the protected QA workers in application review, agreement completion,
+  Payment Pending, payment email, paid-state sync and expiry order. Creating
+  checkout queues pending-stage work; this batch does not dispatch it inline.
+  Keep the Production scheduler disabled until hosted acceptance passes.
 - Verify Production settings and the website routing; review and authorize the
   final release. Adding production code does not enable live payments.
 

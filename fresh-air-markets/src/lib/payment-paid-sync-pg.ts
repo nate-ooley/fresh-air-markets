@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import postgres from "postgres";
+import { withPaymentStageLock, paymentAgreementStageReadiness, type PaymentStageSql } from "./payment-stage-lock";
 
 type Sql = ReturnType<typeof postgres>;
 let client: Sql | undefined;
@@ -83,7 +84,7 @@ export async function claimPaymentPaidSync(scope: PaymentPaidSyncScope, limit = 
   return rows.map(message);
 }
 /** The immutable queued identity must still match all current paid evidence. */
-export async function paymentPaidSyncStillEligible(job: PaymentPaidSyncMessage, sql: Sql = configuredClient()): Promise<boolean> {
+export async function paymentPaidSyncStillEligible(job: PaymentPaidSyncMessage, sql: PaymentStageSql = configuredClient()): Promise<boolean> {
   const rows = await sql`
     SELECT 1 FROM fame_payment_paid_sync_eligible e
     JOIN fame_payment_paid_sync_outbox j ON j.payment_order_id = e.payment_order_id
@@ -98,7 +99,7 @@ export async function paymentPaidSyncStillEligible(job: PaymentPaidSyncMessage, 
       AND e.payment_id = j.payment_id AND e.event_id = j.event_id`;
   return rows.length === 1;
 }
-export async function markPaymentPaidSyncDelivered(job: PaymentPaidSyncMessage, sql: Sql = configuredClient()): Promise<boolean> {
+export async function markPaymentPaidSyncDelivered(job: PaymentPaidSyncMessage, sql: PaymentStageSql = configuredClient()): Promise<boolean> {
   const rows = await sql`
     UPDATE fame_payment_paid_sync_outbox j SET status = 'delivered', delivered_at = statement_timestamp(),
       locked_until = NULL, lease_token = NULL, last_error_code = NULL, updated_at = statement_timestamp()
@@ -114,20 +115,22 @@ export async function markPaymentPaidSyncDelivered(job: PaymentPaidSyncMessage, 
       AND e.payment_id = j.payment_id AND e.event_id = j.event_id RETURNING j.payment_order_id`;
   return rows.length === 1;
 }
-const RETRY_CODES = new Set(["ghl_rate_limited", "ghl_unavailable", "delivery_unavailable"]);
-const TERMINAL_CODES = new Set(["ghl_config_missing", "ghl_identity_mismatch", "ghl_qa_recipient_rejected", "ghl_pipeline_mismatch", "ghl_stage_diverged", "ghl_status_diverged", "ghl_rejected", "paid_evidence_changed"]);
+const WAIT_CODES = new Set(["payment_stage_busy", "agreement_prerequisite_pending"]);
+const RETRY_CODES = new Set(["ghl_rate_limited", "ghl_unavailable", "delivery_unavailable", ...WAIT_CODES]);
+const TERMINAL_CODES = new Set(["ghl_config_missing", "ghl_identity_mismatch", "ghl_qa_recipient_rejected", "ghl_pipeline_mismatch", "ghl_stage_diverged", "ghl_status_diverged", "ghl_rejected", "paid_evidence_changed", "agreement_prerequisite_failed"]);
 export function paymentPaidSyncFailure(error: unknown, attempt: number): { code: string; terminal: boolean; delay: number } {
   const candidate = error && typeof error === "object" ? error as { code?: unknown; retryAfterSeconds?: unknown } : {};
   const supplied = typeof candidate.code === "string" ? candidate.code : "";
   const code = RETRY_CODES.has(supplied) || TERMINAL_CODES.has(supplied) ? supplied : "delivery_unavailable";
   const seconds = Number(candidate.retryAfterSeconds);
-  return { code, terminal: TERMINAL_CODES.has(code) || attempt >= 8,
-    delay: Number.isInteger(seconds) && seconds >= 1 && seconds <= 3600 ? seconds : Math.min(3600, 30 * 2 ** Math.min(attempt - 1, 7)) };
+  return { code, terminal: TERMINAL_CODES.has(code) || (attempt >= 8 && !WAIT_CODES.has(code)),
+    delay: WAIT_CODES.has(code) ? 30 : Number.isInteger(seconds) && seconds >= 1 && seconds <= 3600 ? seconds : Math.min(3600, 30 * 2 ** Math.min(attempt - 1, 7)) };
 }
-export async function failOrRetryPaymentPaidSync(job: PaymentPaidSyncMessage, error: unknown, sql: Sql = configuredClient()): Promise<"manual_review" | "deferred" | "stale"> {
+export async function failOrRetryPaymentPaidSync(job: PaymentPaidSyncMessage, error: unknown, sql: PaymentStageSql = configuredClient()): Promise<"manual_review" | "deferred" | "stale"> {
   const failure = paymentPaidSyncFailure(error, job.attempt);
   const rows = await sql`
     UPDATE fame_payment_paid_sync_outbox SET status = ${failure.terminal ? "manual_review" : "pending"},
+      attempts = attempts - ${WAIT_CODES.has(failure.code) ? 1 : 0},
       next_attempt_at = statement_timestamp() + ${failure.delay} * interval '1 second',
       locked_until = NULL, lease_token = NULL, last_error_code = ${failure.code}, updated_at = statement_timestamp()
     WHERE payment_order_id = ${job.paymentOrderId} AND lease_token = ${job.leaseToken}
@@ -145,10 +148,15 @@ export async function dispatchPaymentPaidSync(deliver: (job: PaymentPaidSyncMess
     const [job] = await claimPaymentPaidSync(scope, 1, 60, sql);
     if (!job) break;
     try {
-      if (!await paymentPaidSyncStillEligible(job, sql)) throw { code: "paid_evidence_changed" };
-      await deliver(job);
-      if (await markPaymentPaidSyncDelivered(job, sql)) result.delivered++;
-      else result.stale++;
+      const locked = await withPaymentStageLock(sql, job, async tx => {
+        if (!await paymentPaidSyncStillEligible(job, tx)) throw { code: "paid_evidence_changed" };
+        const prerequisite = await paymentAgreementStageReadiness(tx, job);
+        if (prerequisite !== "ready") throw { code: `agreement_prerequisite_${prerequisite}` };
+        await deliver(job);
+        return markPaymentPaidSyncDelivered(job, tx);
+      });
+      if (!locked.acquired) throw { code: "payment_stage_busy" };
+      if (locked.value) result.delivered++; else result.stale++;
     } catch (error) {
       result[await failOrRetryPaymentPaidSync(job, error, sql)]++;
     }

@@ -36,27 +36,30 @@ test('SQL wrapper removal preserves function bodies and quoted semicolons while 
   }
 });
 
-test('all 19 checked-in migrations can run inside one transaction and contribute readiness checks', async () => {
+test('all 20 checked-in migrations can run inside one transaction and contribute readiness checks', async () => {
   const { loadMigrations, expectedObjects } = await modulePromise;
   const migrations = await loadMigrations();
-  assert.equal(migrations.length, 19);
-  assert.match(migrations[18].name, /^019-/);
+  assert.equal(migrations.length, 20);
+  assert.match(migrations[19].name, /^020-/);
   assert.ok(migrations.every(m => /^[a-f0-9]{64}$/.test(m.checksum)));
   const objects = expectedObjects(migrations);
-  for (const name of ['fame_applications', 'fame_reservation_allocations', 'fame_square_payment_link_retirements', 'fame_payment_paid_sync_outbox', 'fame_payment_email_outbox']) {
+  for (const name of ['fame_applications', 'fame_reservation_allocations', 'fame_square_payment_link_retirements', 'fame_payment_paid_sync_outbox', 'fame_payment_email_outbox', 'fame_payment_pending_sync_outbox']) {
     assert.ok(objects.some(o => o.kind === 'table' && o.name === name));
   }
   assert.ok(objects.some(o => o.kind === 'trigger' && o.name === 'fame_application_opportunity_identity_guard'));
   assert.ok(objects.some(o => o.kind === 'trigger' && o.name === 'fame_payment_paid_sync_enqueue'));
   assert.ok(objects.some(o => o.kind === 'trigger' && o.name === 'fame_payment_email_identity_guard'));
   assert.ok(objects.some(o => o.kind === 'view' && o.name === 'fame_payment_paid_sync_eligible'));
+  assert.ok(objects.some(o => o.kind === 'view' && o.name === 'fame_payment_pending_sync_eligible'));
+  assert.ok(objects.some(o => o.kind === 'trigger' && o.name === 'fame_payment_pending_sync_enqueue'));
+  assert.ok(objects.some(o => o.kind === 'trigger' && o.name === 'fame_payment_pending_sync_identity_guard'));
   assert.ok(objects.some(o => o.kind === 'index' && o.name === 'fame_square_payment_link_retirements_ready_idx'));
 });
 
 test('history rejects changed SQL, unknown migrations and gaps rather than silently skipping them', async () => {
   const { loadMigrations, compareHistory } = await modulePromise;
   const migrations = await loadMigrations();
-  assert.equal(compareHistory(migrations, []).length, 19);
+  assert.equal(compareHistory(migrations, []).length, 20);
   assert.equal(compareHistory(migrations, migrations).length, 0);
   assert.throws(() => compareHistory(migrations, [{ ...migrations[0], checksum: 'changed' }]), /migration_checksum_mismatch/);
   assert.throws(() => compareHistory(migrations, [{ name: '999-unreviewed.sql', checksum: 'changed' }]), /migration_history_unknown_version/);

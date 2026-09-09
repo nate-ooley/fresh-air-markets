@@ -6,11 +6,12 @@ const script = import(pathToFileURL(path.resolve(__dirname, '../scripts/run-paym
 const secret = 'scheduler-unit-test-not-a-real-secret-1234567890';
 const env = { FAME_PAYMENT_SCHEDULER_ENABLED: 'true', CRON_SECRET: secret };
 const fixtures = {
+  '/api/internal/cron/application-review-outbox': { delivered: 0, deferred: 1, failed: 0, stale: 0 },
+  '/api/internal/cron/agreement-completion-stage-outbox': { delivered: 0, deferred: 0, failed: 0, stale: 0 },
+  '/api/internal/cron/payment-pending-sync': { queued: 0, delivered: 1, deferred: 0, cancelled: 0, manual_review: 0, stale: 0 },
   '/api/internal/cron/payment-email': { processed: 1, accepted: 1, delivered: 0, failed: 0, uncertain: 0, cancelled: 0, pending: 0 },
   '/api/internal/cron/payment-paid-sync': { queued: 0, delivered: 1, deferred: 0, manual_review: 0, stale: 0 },
   '/api/internal/cron/square-payment-expiry': { expiryPending: 1, expired: 1, deferred: 0, manualReview: 0 },
-  '/api/internal/cron/application-review-outbox': { delivered: 0, deferred: 1, failed: 0, stale: 0 },
-  '/api/internal/cron/agreement-completion-stage-outbox': { delivered: 0, deferred: 0, failed: 0, stale: 0 },
 };
 const fixture = url => fixtures[new URL(url).pathname];
 
@@ -36,7 +37,7 @@ test('scheduler refuses missing, short, oversized and header-injection secrets b
   assert.equal(calls, 0);
 });
 
-test('scheduler invokes only five fixed-domain workers sequentially with bearer authentication and no redirects', async () => {
+test('scheduler invokes all six fixed-domain workers in application-to-payment order sequentially with bearer authentication and no redirects', async () => {
   const { runPaymentScheduler } = await script;
   const calls = []; let active = 0; let maxActive = 0;
   const result = await runPaymentScheduler({ ...env, FAME_VENDOR_PORTAL_ORIGIN: 'https://attacker.invalid', ORIGIN: 'https://other.invalid' }, async (url, init) => {
@@ -49,7 +50,7 @@ test('scheduler invokes only five fixed-domain workers sequentially with bearer 
     await new Promise(resolve => setImmediate(resolve)); active--;
     return Response.json(fixture(url));
   });
-  assert.equal(maxActive, 1); assert.equal(result.ok, true); assert.equal(result.processed, 5); assert.equal(result.failures, 0);
+  assert.equal(maxActive, 1); assert.equal(result.ok, true); assert.equal(result.processed, 6); assert.equal(result.failures, 0);
   assert.deepEqual(calls.map(url => new URL(url).pathname), Object.keys(fixtures));
   assert.ok(!JSON.stringify(result).includes(secret));
 });
@@ -63,8 +64,8 @@ test('failed HTTP calls do not skip later workers or disclose private response b
     return Response.json(fixture(url));
   };
   const result = await runPaymentScheduler(env, transport);
-  assert.equal(calls, 5); assert.equal(result.ok, false); assert.equal(result.failures, 1);
-  assert.deepEqual(result.workers[0], { worker: 'payment_email', ok: false, error: 'http_failure', status: 503 });
+  assert.equal(calls, 6); assert.equal(result.ok, false); assert.equal(result.failures, 1);
+  assert.deepEqual(result.workers.find(w => w.worker === 'payment_email'), { worker: 'payment_email', ok: false, error: 'http_failure', status: 503 });
   const lines = []; assert.equal(await main(env, transport, line => lines.push(line)), 1);
   assert.ok(!lines[0].includes(privateBody)); assert.ok(!lines[0].includes(secret));
 });
@@ -76,8 +77,8 @@ test('timeout and redirect failures are sanitized and attempted only once per wo
     if (new URL(url).pathname.endsWith('payment-paid-sync')) throw new DOMException('private-token https://attacker.invalid', 'TimeoutError');
     return Response.json(fixture(url));
   });
-  assert.equal(result.failures, 1); assert.equal(counts.size, 5); assert.ok([...counts.values()].every(n => n === 1));
-  assert.deepEqual(result.workers[1], { worker: 'payment_paid_sync', ok: false, error: 'request_unavailable' });
+  assert.equal(result.failures, 1); assert.equal(counts.size, 6); assert.ok([...counts.values()].every(n => n === 1));
+  assert.deepEqual(result.workers.find(w => w.worker === 'payment_paid_sync'), { worker: 'payment_paid_sync', ok: false, error: 'request_unavailable' });
   assert.ok(!JSON.stringify(result).includes('attacker')); assert.ok(!JSON.stringify(result).includes('private-token'));
 });
 
@@ -95,7 +96,7 @@ test('marketing HTML, redirects, disabled workers, PII fields and malformed coun
   ];
   for (const response of invalid) {
     const result = await runPaymentScheduler(env, async url => new URL(url).pathname.endsWith('payment-email') ? response() : Response.json(fixture(url)));
-    assert.equal(result.failures, 1); assert.equal(result.processed, 5); assert.ok(!JSON.stringify(result).includes('private@example.com'));
+    assert.equal(result.failures, 1); assert.equal(result.processed, 6); assert.ok(!JSON.stringify(result).includes('private@example.com'));
   }
 });
 
@@ -108,6 +109,25 @@ test('permanent worker failures or manual-review counts fail the run while bound
     return Response.json(data);
   });
   assert.equal(result.failures, 2); assert.equal(result.ok, false);
-  assert.equal(result.workers[0].error, 'worker_needs_attention'); assert.equal(result.workers[1].error, 'worker_needs_attention');
-  assert.equal(result.workers[3].counts.deferred, 1); assert.equal(result.workers[3].ok, true);
+  assert.equal(result.workers.find(w => w.worker === 'payment_email').error, 'worker_needs_attention');
+  assert.equal(result.workers.find(w => w.worker === 'payment_paid_sync').error, 'worker_needs_attention');
+  assert.equal(result.workers.find(w => w.worker === 'application_review').counts.deferred, 1);
+  assert.equal(result.workers.find(w => w.worker === 'application_review').ok, true);
+});
+
+
+test('pending sync cancellation is counted while manual review fails the scheduler without skipping later workers', async () => {
+  const { runPaymentScheduler } = await script;
+  for (const manualReview of [0, 1]) {
+    const calls = [];
+    const result = await runPaymentScheduler(env, async url => {
+      calls.push(new URL(url).pathname);
+      const data = { ...fixture(url) };
+      if (new URL(url).pathname.endsWith('payment-pending-sync')) { data.cancelled = 1; data.manual_review = manualReview; }
+      return Response.json(data);
+    });
+    const pending = result.workers.find(w => w.worker === 'payment_pending_sync');
+    assert.equal(pending.counts.cancelled, 1); assert.equal(pending.ok, manualReview === 0);
+    assert.equal(result.failures, manualReview); assert.deepEqual(calls, Object.keys(fixtures));
+  }
 });

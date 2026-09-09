@@ -19,13 +19,31 @@ Set these private server variables in the verified deployment:
 | --- | --- |
 | `GHL_AGREEMENT_WEBHOOK_SECRET` | A new random 32+ character secret used only by the two agreement webhooks. |
 | `GHL_AGREEMENT_TEMPLATE_ID` | The one approved HighLevel agreement template ID. |
-| `GHL_AGREEMENT_NOTIFICATION_EMAIL` | The internal QA/production notification recipient. Use a QA-only recipient in a QA deployment. |
-| `GHL_API_TOKEN` | A sub-account private integration token with `opportunities.readonly` and `opportunities.write` for the stage worker. |
-| `GHL_AGREEMENT_PIPELINE_ID` | Exact HighLevel pipeline ID expected for the signed agreement opportunity. |
-| `GHL_AGREEMENT_SENT_STAGE_ID` | The only stage from which completion may advance the opportunity. |
-| `GHL_AGREEMENT_COMPLETED_STAGE_ID` | The target stage after an exact completed agreement. |
+| `GHL_AGREEMENT_NOTIFICATION_EMAIL` | The internal notification recipient. Use `nate@autocraftstudios.com` for QA. |
+| `GHL_API_TOKEN` | A sub-account private integration token with `contacts.readonly`, `opportunities.readonly` and `opportunities.write` for the stage worker. |
+| `GHL_APPLICATION_PIPELINE_ID` | Exact Production application pipeline, shared by review, agreements and payment. |
+| `GHL_QA_APPLICATION_PIPELINE_ID` | Preview only: the separate QA application pipeline, shared by the same workflow steps. It must differ from the configured Production pipeline. |
+| `GHL_AGREEMENT_PIPELINE_ID` | Optional legacy alias. If set, it must equal the selected application pipeline. A different agreement pipeline is rejected. |
+| `GHL_AGREEMENT_SENT_STAGE_ID` | The only source stage. This may be the application's Approved stage while the issued agreement awaits signature. |
+| `GHL_AGREEMENT_COMPLETED_STAGE_ID` | The distinct Agreement Signed stage after an exact completed agreement. |
+| `GHL_PAYMENT_QA_ROUTING_VERIFIED` | Preview only: `true` after all native QA downstream email recipients, including admin Nate, have been verified. |
 | `CRON_SECRET` | A random 32+ character credential for the authenticated recovery endpoint. |
 | Existing `DATABASE_URL`, `GHL_LOCATION_ID`, `FAME_MARKET_ACCOUNT_ID`, `FAME_SEASON_ID` | Pin the webhook to this database, HighLevel location, market, and season. |
+
+The worker requires `VERCEL=1` and `VERCEL_ENV=preview` or `production`.
+Preview selects the QA pipeline and checks the current exact contact email
+against `lnooley@gmail.com` and `nate@autocraftstudios.com` before each stage
+mutation. The location must be `aooAnUXF0COePorBo7wL`. Production selects the
+Production application pipeline and rejects residual `GHL_QA_*` or
+`GHL_PAYMENT_QA_*` controls. Approval and agreement processing do not depend on
+Square credentials; payment workers add their own payment environment checks.
+
+An agreement always belongs to the same immutable application opportunity.
+Neither issuance nor completion creates a second opportunity or moves the
+existing opportunity into another pipeline. Configure the Approved stage as the
+sent stage if the native issuance flow leaves the opportunity Approved; use
+Agreement Signed as the explicit completion destination. A native workflow must
+actually issue the document and make the two calls below.
 
 HighLevel must make two authenticated **server-side** webhook calls. Do not put
 the shared secret in AI Studio, a public form, browser code, or a signed link.
@@ -64,7 +82,7 @@ two outboxes are independent: CRM delivery never claims that an email was
 sent. The stage worker reads the exact immutable opportunity ID, verifies its
 contact, pipeline and location, allows only the configured agreement-sent or
 already-completed stage, and then uses HighLevel v3 `PUT /opportunities/:id`
-with the exact configured pipeline/stage IDs. It reads the result again before
+with only the configured destination stage ID. It reads the result again before
 recording delivery. A retry after a provider success but before the local
 receipt sees the target stage and does not issue another PUT.
 
@@ -80,8 +98,8 @@ supports the required frequency. No scheduler or email sender is enabled by
 this repository by itself.
 
 The worker only moves an opportunity that remains in the configured sent stage
-and has `open` status. It preserves that status in the stage update and verifies
-it again after the HighLevel readback. Identity, pipeline, status, source-stage,
+and has `open` status. It omits lifecycle status and pipeline from the stage
+update, and verifies both again after the HighLevel readback. Identity, pipeline, status, source-stage,
 and permanent provider rejections enter a terminal `failed` outbox state with a
 safe error code; they are never automatically retried or reported as delivered.
 Resolve the mapping before an operator explicitly requeues one of those rows.
@@ -93,8 +111,10 @@ without a duplicate outbox item; reuse of an event ID with changed identity
 returns `409`; transient storage failures return `503` so the same source event
 can be retried.
 
-The local test suite covers five handler boundary cases and five fake-transport
-stage-delivery cases. The PostgreSQL suite adds concurrency, wrong-identity,
+The local test suite covers handler boundary cases and fake-transport
+stage delivery, including one QA opportunity advancing from review through
+Approved to Agreement Signed, a mismatched legacy pipeline alias, current QA
+contact checks, and terminal/diverged states. The PostgreSQL suite adds concurrency, wrong-identity,
 superseded-document, terminal-completion, both independent queues, stage
 lease/retry, and rollback/retry cases. It uses the disposable CI database only.
 A completed QA signature, HighLevel field mapping, actual workflow log,

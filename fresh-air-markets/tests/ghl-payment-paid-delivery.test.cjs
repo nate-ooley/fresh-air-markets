@@ -8,7 +8,7 @@ const env = {
   GHL_API_TOKEN: 'qa-token-not-a-real-provider-token', GHL_LOCATION_ID: 'aooAnUXF0COePorBo7wL',
   FAME_MARKET_ACCOUNT_ID: 'qa-market', FAME_SEASON_ID: '2026-2027',
   GHL_QA_APPLICATION_PIPELINE_ID: 'qa-pipeline', GHL_APPLICATION_PIPELINE_ID: 'live-pipeline',
-  GHL_PAYMENT_PENDING_STAGE_ID: 'qa-payment-pending', GHL_PAYMENT_CONFIRMED_STAGE_ID: 'qa-paid',
+  GHL_AGREEMENT_COMPLETED_STAGE_ID: 'qa-agreement-signed', GHL_PAYMENT_PENDING_STAGE_ID: 'qa-payment-pending', GHL_PAYMENT_CONFIRMED_STAGE_ID: 'qa-paid',
 };
 const config = readPaymentPaidDeliveryConfig(env);
 const job = { ...config, paymentOrderId: 'order-1', applicationId: 'app-1', contactId: 'contact-1', opportunityId: 'opportunity-1', reservationId: 'reservation-1', reservationRevision: 1, squareMerchantId: 'merchant-1', squareLocationId: 'square-location', squareOrderId: 'square-order', paymentId: 'payment-1', eventId: 'event-1', attempt: 1, leaseToken: 'lease-1' };

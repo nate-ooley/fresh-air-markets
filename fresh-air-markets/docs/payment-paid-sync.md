@@ -20,6 +20,7 @@ Config shared by both environments:
 - `GHL_LOCATION_ID=aooAnUXF0COePorBo7wL` (the Fresh Air subaccount).
 - `FAME_MARKET_ACCOUNT_ID` — the private Fresh Air market account, never `demo-market`.
 - `FAME_SEASON_ID` — exact application season.
+- `GHL_AGREEMENT_COMPLETED_STAGE_ID` — the Agreement Signed stage in the same pipeline, distinct from both payment stages.
 - `GHL_PAYMENT_PENDING_STAGE_ID` — the payment-pending stage in the chosen environment's pipeline.
 - `GHL_PAYMENT_CONFIRMED_STAGE_ID` — distinct payment-confirmed stage in that same pipeline.
 
@@ -45,11 +46,13 @@ No live IDs, tokens, or routing-verification flag have been invented or enabled 
 
 The cron route repairs and attempts only one scoped job per call, within its 60-second execution budget. The standalone worker supports up to five jobs when invoked outside this route. Jobs are claimed individually with a 60-second lease and `FOR UPDATE SKIP LOCKED`. A provider request times out after five seconds; one delivery makes at most five provider requests. Only the lease owner can write a delivery receipt. Retryable failures use bounded backoff and stop in manual review after eight attempts. Identity, stage, pipeline, closed-opportunity, and QA-recipient failures go directly to manual review. Raw provider bodies and arbitrary exception strings are never stored or returned.
 
+Migration 020 adds the Pending worker and shared per-reservation exclusion for both payment-stage workers. Both wait for the exact finalized agreement's delivered stage receipt; pending agreement work defers without spending the ordinary provider-failure budget. A fast paid event can advance Agreement Signed directly to Payment Confirmed after these checks. Obsolete Pending work cancels after paid/expired evidence changes. The shared advisory lock does not block Square webhook row updates.
+
 HighLevel's documented update endpoint does not provide compare-and-swap against the old stage. The worker performs exact preflight and final reads and refuses already-diverged/closed opportunities, but it cannot guarantee exclusion of a human editing the same opportunity between those requests. This is a remaining provider API limitation, not an exactly-once native-workflow claim.
 
 ## Acceptance evidence still needed
 
-1. Apply migrations through 018 to the correct private Preview database and verify queue triggers remain enabled.
+1. Apply migrations through 020 to the correct private Preview database and verify queue triggers remain enabled.
 2. Verify the dedicated QA pipeline's full downstream routing, then configure its exact stage IDs and QA flag.
 3. Complete a real Square Sandbox payment through the private vendor URL and confirm one paid order, reservation, and queue job.
 4. Invoke the authenticated worker and confirm the exact QA opportunity's stage plus downstream test-email receipts.

@@ -5,11 +5,12 @@ export const PAYMENT_SCHEDULER_ORIGIN = 'https://freshairmarketsandevents.com';
 const TIMEOUT_MS = 55_000;
 const MAX_RESPONSE_BYTES = 4096;
 const WORKERS = Object.freeze([
+  { name: 'application_review', path: '/api/internal/cron/application-review-outbox', keys: ['delivered', 'deferred', 'failed', 'stale'] },
+  { name: 'agreement_completion', path: '/api/internal/cron/agreement-completion-stage-outbox', keys: ['delivered', 'deferred', 'failed', 'stale'] },
+  { name: 'payment_pending_sync', path: '/api/internal/cron/payment-pending-sync', keys: ['queued', 'delivered', 'deferred', 'cancelled', 'manual_review', 'stale'] },
   { name: 'payment_email', path: '/api/internal/cron/payment-email', keys: ['processed', 'accepted', 'delivered', 'failed', 'uncertain', 'cancelled', 'pending'] },
   { name: 'payment_paid_sync', path: '/api/internal/cron/payment-paid-sync', keys: ['queued', 'delivered', 'deferred', 'manual_review', 'stale'] },
   { name: 'square_payment_expiry', path: '/api/internal/cron/square-payment-expiry', keys: ['expiryPending', 'expired', 'deferred', 'manualReview'] },
-  { name: 'application_review', path: '/api/internal/cron/application-review-outbox', keys: ['delivered', 'deferred', 'failed', 'stale'] },
-  { name: 'agreement_completion', path: '/api/internal/cron/agreement-completion-stage-outbox', keys: ['delivered', 'deferred', 'failed', 'stale'] },
 ]);
 const ATTENTION_KEYS = new Set(['failed', 'uncertain', 'manual_review', 'manualReview', 'stale']);
 
@@ -49,7 +50,7 @@ export async function runPaymentScheduler(env = process.env, transport = fetch) 
   }
   const workers = [];
   // Sequential calls keep shared provider/database load bounded. At 55 seconds
-  // each, the complete run is bounded to under five minutes, excluding runner setup.
+  // each, the complete run is bounded to under six minutes, excluding runner setup.
   for (const worker of WORKERS) {
     let response;
     try {

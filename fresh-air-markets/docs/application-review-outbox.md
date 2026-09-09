@@ -53,28 +53,59 @@ saved; raw provider responses remain out of the application ledger.
 
 `dispatchApplicationReviewOutbox` takes an injected delivery function for a
 scheduled, authenticated integration worker. The included L06 adapter uses
-HighLevel's v3 opportunity endpoint, never a contact lookup or newest-record
-search. It needs these private deployment variables:
+HighLevel's v3 opportunity endpoint and, in Preview, the exact contact endpoint.
+It never searches for or upserts a contact or chooses a newest record. It needs
+these private deployment variables:
 
-- `GHL_API_TOKEN` from the QA sub-account, with `opportunities.readonly` and
-  `opportunities.write`;
-- `GHL_LOCATION_ID`, `GHL_APPLICATION_PIPELINE_ID`, and the four exact stage
-  IDs for Review, Approved, Changes Requested, and Declined;
+- `GHL_API_TOKEN` (Secret), with `contacts.readonly`, `opportunities.readonly`
+  and `opportunities.write` for the Fresh Air sub-account;
+- `GHL_LOCATION_ID=aooAnUXF0COePorBo7wL` (Config);
+- `GHL_APPLICATION_PIPELINE_ID` (Config), always the actual Production pipeline
+  ID, including in Preview where it is used to prove separation;
+- `GHL_QA_APPLICATION_PIPELINE_ID` (Config, Preview only), the separate QA
+  pipeline ID. Review, payment email and paid-status delivery all select this
+  same pipeline in Preview;
+- `GHL_APPLICATION_REVIEW_STAGE_ID`, `GHL_APPLICATION_APPROVED_STAGE_ID`,
+  `GHL_APPLICATION_CHANGES_REQUESTED_STAGE_ID`, and
+  `GHL_APPLICATION_DECLINED_STAGE_ID` (Config): four distinct stage IDs belonging
+  to the selected environment's pipeline;
+- `GHL_PAYMENT_QA_ROUTING_VERIFIED=true` (Config, Preview only), set only after
+  every downstream native workflow triggered by review or payment stages is
+  checked to prevent live vendor/admin notifications and SMS;
 - `CRON_SECRET`, a 32+ character credential for the recovery endpoint.
+
+The adapter requires an actual Vercel Preview or Production runtime
+(`VERCEL=1`, platform-provided `VERCEL_ENV`). Preview never falls back to the
+Production pipeline. Production uses `GHL_APPLICATION_PIPELINE_ID` and rejects
+nonempty `GHL_QA_*` or `GHL_PAYMENT_QA_*` controls. Review does not depend on
+Square payment enablement, because review precedes payment.
 
 The manager review route first commits the review and outbox transaction, then
 tries that **same outbox ID** immediately. It checks the payload location
 against the configured location before any request, then reads the immutable
 opportunity ID, contact ID, pipeline and returned location ID before moving the
-record. It accepts only the configured Review stage on an open opportunity,
+record. In Preview it also reads that exact contact's current primary email,
+allowing only `lnooley@gmail.com` or `nate@autocraftstudios.com`, and repeats this
+check immediately before the stage update. A changed identity or unapproved
+email fails with a terminal identity error before any PUT. These checks cannot
+replace verification of downstream native admin recipients; that is what the
+routing verification flag records. It accepts only the configured Review stage on an open opportunity,
 moves it to the stage for the saved decision without changing lifecycle status,
 then reads it again to verify the destination and status. If a retry starts
 after a successful provider update, finding the target stage is a successful
 no-op rather than a second workflow trigger.
 
+HighLevel does not expose an atomic compare-and-swap across the contact read
+and opportunity update. An operator changing the contact after the last read
+can still race delivery; keep the verified QA pipeline isolated throughout
+testing. Requests refuse redirects so credentials cannot follow another origin.
+
 `GET /api/internal/cron/application-review-outbox` is the recovery path. It
 requires `Authorization: Bearer <CRON_SECRET>`, returns counts only, and does
-not expose vendor details. Configure it with an authenticated scheduler only
+not expose vendor details. Each run claims one job with a 60-second lease and a
+60-second route duration limit. Preview delivery can make five provider calls
+with five-second timeouts; claiming a batch would age later jobs' leases while
+the earlier jobs wait on HighLevel. Configure it with an authenticated scheduler only
 after confirming the hosting plan supports the intended cadence. The immediate
 per-decision attempt does not wait for that scheduler.
 

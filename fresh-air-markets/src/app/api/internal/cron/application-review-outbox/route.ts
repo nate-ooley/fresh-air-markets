@@ -8,6 +8,7 @@ import {
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const maxDuration = 60;
 
 /**
  * Recovery-only endpoint for a trusted scheduler. It exposes counts, never
@@ -27,7 +28,7 @@ export async function GET(request: Request): Promise<Response> {
     const config = readApplicationReviewDeliveryConfig(process.env);
     const result = await dispatchApplicationReviewOutbox(
       message => deliverApplicationReviewToGhl(message, config),
-      { limit: 5, leaseSeconds: 60 },
+      { limit: 1, leaseSeconds: 60 },
     );
     return Response.json(result);
   } catch {

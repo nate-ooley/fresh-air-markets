@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { randomUUID, createHash } = require('node:crypto');
 const postgres = require('postgres');
+const { seedPaymentSync } = require('./helpers/payment-sync-fixture.cjs');
 const { persistSquarePaymentWebhook } = require('../../.test-build/square-webhook-pg.js');
 const { dispatchPaymentPaidSync, claimPaymentPaidSync, markPaymentPaidSyncDelivered, enqueueMissingPaymentPaidSync } = require('../../.test-build/payment-paid-sync-pg.js');
 const url = new URL(process.env.DATABASE_TEST_URL || 'postgres://invalid/');
@@ -19,24 +20,14 @@ before(async () => {
   await first`CREATE TABLE accounts (id TEXT PRIMARY KEY)`;
   await first`INSERT INTO accounts (id) VALUES (${scope.marketId})`;
   const migration = postgres(url.toString(), { max: 1, prepare: false, connection: { search_path: schema } });
-  try { for (const file of ['001-application-handoff.sql', '006-application-document-ledger.sql', '011-square-payment-checkout-ledger.sql', '012-square-webhook-events.sql', '018-payment-paid-sync-outbox.sql']) {
+  try { for (const file of ['001-application-handoff.sql', '004-application-review-outbox.sql', '005-agreement-completion-outbox.sql', '006-application-document-ledger.sql', '007-agreement-completion-stage-outbox.sql', '009-agreement-stage-terminal-state.sql', '011-square-payment-checkout-ledger.sql', '012-square-webhook-events.sql', '013-final-reservation-writer.sql', '018-payment-paid-sync-outbox.sql']) {
     await migration.unsafe(fs.readFileSync(path.join(__dirname, '../../docs/migrations', file), 'utf8'));
   } } finally { await migration.end(); }
 });
 beforeEach(async () => { await first`TRUNCATE fame_payment_paid_sync_outbox, fame_square_webhook_events, fame_payment_orders, fame_reservations, fame_applications CASCADE`; });
 after(async () => { await first.end(); await second.end(); await admin.unsafe(`DROP SCHEMA ${schema} CASCADE`); await admin.end(); });
-async function seed() {
-  const app = `app-${randomUUID()}`; const reservation = `reservation-${randomUUID()}`; const order = `order-${randomUUID()}`;
-  await first`INSERT INTO fame_applications (id, market_id, location_id, contact_id, opportunity_id, season_id)
-    VALUES (${app}, ${scope.marketId}, ${scope.locationId}, ${`contact-${app}`}, ${`opportunity-${app}`}, ${scope.seasonId})`;
-  await first`INSERT INTO fame_reservations (id, market_id, application_id, revision, state, payment_required, currency, total_cents, checkout_description, quote_version, final_booth_quantity, final_dates, payment_request_sent_at, payment_due_at)
-    VALUES (${reservation}, ${scope.marketId}, ${app}, 1, 'payment_pending', true, 'USD', 1000, 'QA', 'qa-v1', 1, ${first.json(['2026-10-03'])}, ${now}, ${new Date('2026-10-03T12:00:00Z')})`;
-  await first`INSERT INTO fame_payment_orders (id, market_id, reservation_id, reservation_revision, square_environment, square_merchant_id, square_location_id, expected_currency, expected_total_cents, idempotency_key, status, square_payment_link_id, square_order_id, checkout_url, payment_request_sent_at, payment_due_at)
-    VALUES (${order}, ${scope.marketId}, ${reservation}, 1, 'sandbox', 'merchant', 'square-location', 'USD', 1000, ${order}, 'checkout_created', ${`link-${order}`}, ${`square-${order}`}, 'https://sandbox.square.link/qa', ${now}, ${new Date('2026-10-03T12:00:00Z')})`;
-  const event = { eventId: `event-${order}`, eventType: 'payment.updated', merchantId: 'merchant', occurredAt: '2026-10-01T12:01:00Z', payment: { id: `payment-${order}`, status: 'COMPLETED', locationId: 'square-location', orderId: `square-${order}`, amountCents: 1000, currency: 'USD', createdAt: '2026-10-01T12:01:00Z', updatedAt: '2026-10-01T12:01:00Z' } };
-  event.rawBodySha256 = createHash('sha256').update(JSON.stringify(event)).digest('hex');
-  return { app, reservation, order, event };
-}
+async function seed(options = {}) { return seedPaymentSync(first, scope, now, options); }
+
 const persist = (f, sql = first, extra = {}) => persistSquarePaymentWebhook(f.event, { environment: 'sandbox', now, ...extra }, sql);
 test('100 concurrent signed payment replays create one immutable paid-sync job with exact identities', async () => {
   const f = await seed();

@@ -3,7 +3,7 @@
 The Preview portal has connected to Neon successfully: its public booth API,
 manager login and authenticated dashboard were previously verified. Those checks
 initialize only the base portal tables. They do **not** apply the application,
-agreement, document, reservation, or Square ledgers in migrations 001–019.
+agreement, document, reservation, or Square ledgers in migrations 001–020.
 
 The checked-in runner closes that deployment gap without creating a public
 administration endpoint. It sends no email, SMS, HighLevel request or Square
@@ -52,7 +52,7 @@ pooled/unpooled host variants. No new secret has to be created for the runner.
 
 ## What the runner verifies
 
-- All fifteen numbered migrations are present in order.
+- All twenty numbered migrations are present in order.
 - The portal's base `accounts`, `booths`, `bookings` and `booking_dates` tables
   exist before migration. Missing base tables stop the migration; the runner
   will not fabricate an account or seed production-like application records.
@@ -64,7 +64,9 @@ pooled/unpooled host variants. No new secret has to be created for the runner.
   history to make a failed check pass.
 - Expected tables, valid indexes and enabled business-rule triggers are present.
   A disabled opportunity identity guard is a failure even when migration
-  history says the migration ran.
+  history says the migration ran. Payment Pending and paid-stage sync each
+  require their outbox table, enqueue trigger and eligibility view; a disabled
+  enqueue trigger or missing view blocks readiness.
 - `FAME_MARKET_ACCOUNT_ID` names an existing account other than `demo-market`,
   `FAME_SEASON_ID` is `2026-2027`, and `FAME_BOOTH_CAPACITY` is a positive integer
   accepted by the reservation configuration.
@@ -121,12 +123,13 @@ routing or authorize live collection.
 ## Regression coverage
 
 `tests/database-readiness.test.cjs` verifies target validation, transaction
-wrapper handling, all fifteen migration files, checksum/order enforcement and
+wrapper handling, all twenty migration files, checksum/order enforcement and
 redaction of invalid connection values. These five tests pass locally.
 
 `tests/database-readiness.pg.test.cjs` runs only with `DATABASE_TEST_URL` pointing
-to the disposable local database `fresh_air_test`. Its five database scenarios
+to the disposable local database `fresh_air_test`. Its six database scenarios
 cover read-only inspection, full application/repeat with existing-row
 preservation, rollback on a mid-sequence failure, concurrent runners, and
-readiness failures for a disabled guard or incorrect account/season. The suite
+readiness failures for a disabled guard or incorrect account/season, and disabled
+payment enqueue triggers or missing eligibility views. The suite
 must pass in PostgreSQL CI before treating the runner as verified.

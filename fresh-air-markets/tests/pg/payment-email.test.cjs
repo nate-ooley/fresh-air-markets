@@ -18,7 +18,7 @@ const first = connect();
 const second = connect();
 const marketId = 'qa-private-vendor-market';
 const locationId = 'aooAnUXF0COePorBo7wL';
-const now = new Date('2026-10-01T12:00:00.000Z');
+const now = new Date();
 const due = new Date(now.valueOf() + 48 * 3600_000);
 const config = { marketId, environment: 'sandbox', portalOrigin: 'https://qa-market.vercel.app', allowCheckout: true };
 const hash = () => hashVendorAccessToken(createVendorAccessToken());
@@ -34,7 +34,7 @@ before(async () => {
       '005-agreement-completion-outbox.sql', '006-application-document-ledger.sql',
       '011-square-payment-checkout-ledger.sql', '012-square-webhook-events.sql',
       '013-final-reservation-writer.sql', '014-square-payment-expiry.sql',
-      '017-vendor-payment-access.sql', '019-payment-email-outbox.sql',
+      '017-vendor-payment-access.sql', '018-payment-paid-sync-outbox.sql', '019-payment-email-outbox.sql', '020-payment-pending-sync-outbox.sql',
     ]) await migration.unsafe(fs.readFileSync(path.join(__dirname, '../../docs/migrations', file), 'utf8'));
   } finally { await migration.end(); }
 });
@@ -95,7 +95,7 @@ async function seedEligibleApplication(sql = first, patch = {}) {
   return { applicationId, sourceEventId, reviewEventId, agreementId, insuranceId };
 }
 
-async function finalReservation({ nonprofit = false, checkout = true, email } = {}) {
+async function finalReservation({ nonprofit = false, checkout = true, email, pendingStage = 'delivered' } = {}) {
   const application = await seedEligibleApplication(first, { email });
   const result = await reserveFinalApplication({
     marketId, applicationId: application.applicationId, actorAccountId: marketId, now,
@@ -113,6 +113,8 @@ async function finalReservation({ nonprofit = false, checkout = true, email } = 
       VALUES (${randomUUID()}, ${marketId}, ${id}, 1, 'sandbox', 'verified-merchant', 'verified-location',
         'USD', 4000, ${randomUUID()}, 'checkout_created', ${randomUUID()}, ${randomUUID()},
         'https://sandbox.square.link/u/qa-private', ${now}, ${due})`;
+    if (pendingStage !== 'pending') await first`UPDATE fame_payment_pending_sync_outbox SET status = ${pendingStage},
+      delivered_at = ${pendingStage === 'delivered' ? now : null} WHERE reservation_id = ${id}`;
   }
   return id;
 }
@@ -384,4 +386,55 @@ test('five unavailable receipt checks park uncertain and explicit retry cannot r
   await dispatch(unknown.transport, { now: future(6 * 3600_000) });
   assert.equal(unknown.calls.length, before);
   assert.equal(unknown.posts(), 0);
+});
+
+test('email requested immediately after checkout waits for exact Pending-stage receipt without spending attempt budget', async () => {
+  const id = await finalReservation({ pendingStage: 'pending' });
+  await queue(id);
+  const original = await state(id);
+  const mock = await provider(id);
+  for (let i = 0; i < 9; i++) {
+    if (i === 4) await first`UPDATE fame_payment_pending_sync_outbox SET status = 'processing', lease_token = 'qa-pending-worker',
+      locked_until = ${future(20 * 60_000)} WHERE reservation_id = ${id}`;
+    const report = await dispatch(mock.transport, { now: future(i * 60_000) });
+    assert.equal(report.pending, 1);
+    const row = await state(id);
+    assert.equal(row.state, 'pending'); assert.equal(row.prepare_attempts, 0);
+    assert.equal(row.invitation_ciphertext, original.invitation_ciphertext);
+    assert.equal(row.invitation_hash, original.invitation_hash);
+  }
+  assert.equal(mock.calls.length, 0, 'no provider preflight before prerequisite receipt');
+  await first`UPDATE fame_payment_pending_sync_outbox SET status = 'delivered', delivered_at = ${now}, locked_until = NULL, lease_token = NULL WHERE reservation_id = ${id}`;
+  await dispatch(mock.transport, { now: future(10 * 60_000) });
+  assert.equal(mock.posts(), 1); assert.equal((await state(id)).state, 'accepted');
+  await dispatch(mock.transport, { now: future(11 * 60_000) });
+  assert.equal(mock.posts(), 1); assert.equal((await state(id)).state, 'delivered');
+});
+
+test('payment while waiting for Pending stage cancels email locally before any provider call', async () => {
+  const id = await finalReservation({ pendingStage: 'pending' }); await queue(id);
+  const mock = await provider(id);
+  await dispatch(mock.transport);
+  await first`UPDATE fame_reservations SET state = 'paid' WHERE id = ${id}`;
+  const result = await dispatch(mock.transport, { now: future(60_000) });
+  assert.equal(result.cancelled, 1); assert.equal(mock.calls.length, 0);
+  assert.equal((await state(id)).state, 'cancelled'); assert.equal((await state(id)).invitation_ciphertext, null);
+});
+
+test('missing, mismatched or failed Pending-stage prerequisite fails closed with operator code and no provider calls', async () => {
+  for (const pendingStage of ['missing', 'manual_review', 'mismatched']) {
+    const id = await finalReservation({ pendingStage: pendingStage === 'manual_review' ? pendingStage : 'pending' });
+    if (pendingStage === 'missing') await first`DELETE FROM fame_payment_pending_sync_outbox WHERE reservation_id = ${id}`;
+    if (pendingStage === 'mismatched') {
+      const [prior] = await first`DELETE FROM fame_payment_pending_sync_outbox WHERE reservation_id = ${id} RETURNING *`;
+      await first`INSERT INTO fame_payment_pending_sync_outbox SELECT * FROM jsonb_populate_record(NULL::fame_payment_pending_sync_outbox,
+        ${first.json({ ...prior, contact_id: 'foreign-contact' })})`;
+    }
+    await queue(id); const mock = await provider(id);
+    const result = await dispatch(mock.transport);
+    assert.equal(result.failed, 1); assert.equal(mock.calls.length, 0);
+    const row = await state(id); assert.equal(row.safe_error, 'payment_email_pending_prerequisite_failed');
+    assert.equal(row.invitation_ciphertext, null); assert.equal(row.send_started_at, null);
+    assert.equal((await publicStatus(id)).canRetryPreflight, true);
+  }
 });

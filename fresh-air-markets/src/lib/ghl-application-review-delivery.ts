@@ -10,11 +10,14 @@ const GHL_BASE = "https://services.leadconnectorhq.com";
 const GHL_VERSION = "v3";
 const REQUEST_TIMEOUT_MS = 5_000;
 const IDENTIFIER = /^[A-Za-z0-9_-]{1,192}$/;
+const LOCATION = "aooAnUXF0COePorBo7wL";
+const QA_EMAILS = new Set(["lnooley@gmail.com", "nate@autocraftstudios.com"]);
 
 type ReviewOutcome = "approved" | "changes_requested" | "declined";
 type FetchTransport = typeof fetch;
 
 export interface ApplicationReviewDeliveryConfig {
+  mode: "qa" | "production";
   apiToken: string;
   locationId: string;
   pipelineId: string;
@@ -47,7 +50,11 @@ export function readApplicationReviewDeliveryConfig(
 ): ApplicationReviewDeliveryConfig {
   const apiToken = env.GHL_API_TOKEN?.trim() ?? "";
   const locationId = env.GHL_LOCATION_ID?.trim() ?? "";
-  const pipelineId = env.GHL_APPLICATION_PIPELINE_ID?.trim() ?? "";
+  const productionPipelineId = env.GHL_APPLICATION_PIPELINE_ID?.trim() ?? "";
+  const mode = env.VERCEL_ENV === "preview" ? "qa" : "production";
+  const pipelineId = mode === "qa"
+    ? env.GHL_QA_APPLICATION_PIPELINE_ID?.trim() ?? ""
+    : productionPipelineId;
   const reviewStageId = env.GHL_APPLICATION_REVIEW_STAGE_ID?.trim() ?? "";
   const stageForOutcome = {
     approved: env.GHL_APPLICATION_APPROVED_STAGE_ID?.trim() ?? "",
@@ -56,10 +63,16 @@ export function readApplicationReviewDeliveryConfig(
   };
   const ids = [locationId, pipelineId, reviewStageId, ...Object.values(stageForOutcome)];
   const stages = [reviewStageId, ...Object.values(stageForOutcome)];
-  if (apiToken.length < 16 || ids.some(id => !validIdentifier(id)) || new Set(stages).size !== stages.length) {
+  if (env.VERCEL !== "1" || !["preview", "production"].includes(env.VERCEL_ENV ?? "")
+    || apiToken.length < 16 || /[\r\n\0]/.test(apiToken) || locationId !== LOCATION
+    || ids.some(id => !validIdentifier(id)) || new Set(stages).size !== stages.length
+    || (mode === "qa" && (env.GHL_PAYMENT_QA_ROUTING_VERIFIED !== "true"
+      || !validIdentifier(productionPipelineId) || pipelineId === productionPipelineId))
+    || (mode === "production" && Object.entries(env).some(([key, entry]) => entry?.trim()
+      && (key.startsWith("GHL_QA_") || key.startsWith("GHL_PAYMENT_QA_"))))) {
     throw new ApplicationReviewDeliveryError("ghl_config_missing", "HighLevel application-review delivery is not configured.");
   }
-  return { apiToken, locationId, pipelineId, reviewStageId, stageForOutcome };
+  return { apiToken, locationId, pipelineId, reviewStageId, stageForOutcome, mode };
 }
 
 export function applicationReviewDeliveryConfigured(env: Record<string, string | undefined>): boolean {
@@ -130,6 +143,7 @@ async function request(
   try {
     return await transport(`${GHL_BASE}${path}`, {
       ...init,
+      redirect: "error",
       headers: {
         Authorization: `Bearer ${config.apiToken}`,
         Version: GHL_VERSION,
@@ -184,6 +198,21 @@ async function getExactOpportunity(
   return exactOpportunity(opportunityFromResponse(await responseJson(response)), message, config);
 }
 
+async function verifyQaContact(
+  message: ApplicationReviewOutboxMessage,
+  config: ApplicationReviewDeliveryConfig,
+  transport: FetchTransport,
+): Promise<void> {
+  if (config.mode !== "qa") return;
+  const response = await request(transport, config, `/contacts/${encodeURIComponent(message.payload.contactId)}`, { method: "GET" });
+  if (!response.ok) throw providerError(response);
+  const contact = object((await responseJson(response))?.contact);
+  if (!contact || contact.id !== message.payload.contactId || contact.locationId !== config.locationId
+    || typeof contact.email !== "string" || !QA_EMAILS.has(contact.email.trim().toLowerCase())) {
+    throw new ApplicationReviewDeliveryError("ghl_identity_mismatch", "HighLevel QA contact did not match an authorized test recipient.");
+  }
+}
+
 /**
  * Move only the outbox record's immutable opportunity. A GET before and after
  * the PUT turns a crash-after-success retry into a harmless no-op.
@@ -197,23 +226,22 @@ export async function deliverApplicationReviewToGhl(
     throw new ApplicationReviewDeliveryError("ghl_identity_mismatch", "Review location did not match the HighLevel configuration.");
   }
   const targetStageId = config.stageForOutcome[outcomeFor(message)];
+  await verifyQaContact(message, config, transport);
   const before = await getExactOpportunity(message, config, transport);
+  if (before.status !== "open") {
+    throw new ApplicationReviewDeliveryError("ghl_status_diverged", "HighLevel opportunity was not open for application review.");
+  }
   if (before.pipelineStageId === targetStageId) return;
   if (before.pipelineStageId !== config.reviewStageId) {
     throw new ApplicationReviewDeliveryError("ghl_stage_diverged", "HighLevel opportunity was not in the configured review stage.");
   }
-  // An application review changes a stage; it must never reopen an
-  // opportunity that an operator closed while this record was queued.
-  if (before.status !== "open") {
-    throw new ApplicationReviewDeliveryError("ghl_status_diverged", "HighLevel opportunity was not open for application review.");
-  }
+  // A queued snapshot is not permission to notify a contact whose email changed.
+  await verifyQaContact(message, config, transport);
 
   const update = await request(transport, config, `/opportunities/${encodeURIComponent(message.payload.opportunityId)}`, {
     method: "PUT",
     body: JSON.stringify({
-      pipelineId: config.pipelineId,
       pipelineStageId: targetStageId,
-      status: before.status,
     }),
   });
   if (!update.ok) throw providerError(update);
