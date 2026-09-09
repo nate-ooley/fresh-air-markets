@@ -106,7 +106,16 @@ test('legacy paid-stage receipt is preserved and revalidated once with exact Sig
   const f = await seed(); await persist(f);
   await first`ALTER TABLE fame_payment_paid_sync_outbox DROP CONSTRAINT fame_paid_field_delivery_proof`;
   await first`UPDATE fame_payment_paid_sync_outbox SET status = 'delivered', delivered_at = statement_timestamp() WHERE payment_order_id = ${f.order}`;
-  await first.unsafe(fs.readFileSync(path.join(__dirname, '../../docs/migrations/021-opportunity-field-delivery-receipts.sql'), 'utf8'));
+  // The migration contains its own BEGIN/COMMIT; pin it to one pooled connection.
+  const migration = await first.reserve();
+  try {
+    await migration.unsafe(fs.readFileSync(path.join(__dirname, '../../docs/migrations/021-opportunity-field-delivery-receipts.sql'), 'utf8'));
+  } catch (error) {
+    await migration`ROLLBACK`;
+    throw error;
+  } finally {
+    migration.release();
+  }
   const [legacy] = await first`SELECT status, delivery_receipt, legacy_delivery_receipt FROM fame_payment_paid_sync_outbox WHERE payment_order_id = ${f.order}`;
   assert.equal(legacy.status, 'pending'); assert.equal(legacy.delivery_receipt, null); assert.equal(legacy.legacy_delivery_receipt.status, 'delivered');
   let calls = 0; let expected;

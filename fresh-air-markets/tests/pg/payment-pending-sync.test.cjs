@@ -133,7 +133,16 @@ test('legacy pending stage success is requeued for current eligibility and cance
   await first`ALTER TABLE fame_payment_pending_sync_outbox DROP CONSTRAINT fame_pending_field_delivery_proof`;
   await first`UPDATE fame_payment_pending_sync_outbox SET status = 'delivered', delivered_at = statement_timestamp() WHERE payment_order_id = ${f.order}`;
   await first`UPDATE fame_reservations SET state = 'expired' WHERE id = ${f.reservation}`;
-  await first.unsafe(fs.readFileSync(path.join(__dirname, '../../docs/migrations/021-opportunity-field-delivery-receipts.sql'), 'utf8'));
+  // The migration contains its own BEGIN/COMMIT; pin it to one pooled connection.
+  const migration = await first.reserve();
+  try {
+    await migration.unsafe(fs.readFileSync(path.join(__dirname, '../../docs/migrations/021-opportunity-field-delivery-receipts.sql'), 'utf8'));
+  } catch (error) {
+    await migration`ROLLBACK`;
+    throw error;
+  } finally {
+    migration.release();
+  }
   let calls = 0;
   const result = await dispatchPaymentPendingSync(async () => { calls++; }, scope, { sql: first });
   assert.equal(result.cancelled, 1); assert.equal(calls, 0);

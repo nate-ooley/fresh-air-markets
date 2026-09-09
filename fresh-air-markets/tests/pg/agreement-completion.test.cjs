@@ -351,7 +351,16 @@ test('migration requeues legacy agreement stage success without fabricating fiel
   const completedResult = await persistAgreementCompletionWithStageOutbox(completed(issue), first);
   await first`ALTER TABLE fame_agreement_stage_outbox DROP CONSTRAINT fame_agreement_field_delivery_proof`;
   await first`UPDATE fame_agreement_stage_outbox SET status = 'delivered', delivered_at = statement_timestamp(), attempts = 2 WHERE id = ${completedResult.stageOutboxId}`;
-  await first.unsafe(fs.readFileSync(path.join(__dirname, '../../docs/migrations/021-opportunity-field-delivery-receipts.sql'), 'utf8'));
+  // The migration contains its own BEGIN/COMMIT; pin it to one pooled connection.
+  const migration = await first.reserve();
+  try {
+    await migration.unsafe(fs.readFileSync(path.join(__dirname, '../../docs/migrations/021-opportunity-field-delivery-receipts.sql'), 'utf8'));
+  } catch (error) {
+    await migration`ROLLBACK`;
+    throw error;
+  } finally {
+    migration.release();
+  }
   const [legacy] = await first`SELECT status, delivered_at, delivery_receipt, legacy_delivery_receipt FROM fame_agreement_stage_outbox WHERE id = ${completedResult.stageOutboxId}`;
   assert.equal(legacy.status, 'pending'); assert.equal(legacy.delivered_at, null); assert.equal(legacy.delivery_receipt, null);
   assert.equal(legacy.legacy_delivery_receipt.status, 'delivered'); assert.equal(legacy.legacy_delivery_receipt.attempts, 2);

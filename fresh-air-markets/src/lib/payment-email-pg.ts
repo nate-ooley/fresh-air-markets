@@ -239,7 +239,7 @@ async function checkSend(sql: Sql, row: OutboxRow, input: DispatchPaymentEmailsI
     }
     // Checkout creation queues the Ready for Payment field before a manager can ask
     // to send this email. Preserve the email intent until that exact field
-    // field receipt arrives instead of treating normal asynchronous ordering as failure.
+    // receipt arrives instead of treating normal asynchronous ordering as failure.
     const [prerequisite] = await tx<{ status: string; delivered_at: Date | null; delivery_receipt: unknown }[]>`
       SELECT j.status, j.delivered_at, j.delivery_receipt FROM fame_payment_pending_sync_outbox j
       JOIN fame_payment_orders p ON p.id = j.payment_order_id AND p.market_id = j.market_id

@@ -524,15 +524,15 @@ test('Paid serialization defers Sent field without budget loss then skips lower 
   assert.equal(mock.calls.filter(c => c.method === 'PUT').length, 0); assert.equal(mock.posts(), 1);
 });
 
-test('a delivered legacy/misconfigured field receipt cannot authorize email from another field ID', async () => {
+test('a changed field mapping cannot reuse an immutable receipt from another field ID', async () => {
   const id = await finalReservation();
   const [job] = await first`SELECT * FROM fame_payment_pending_sync_outbox WHERE reservation_id = ${id}`;
-  const mismatched = pendingFieldProof(job.application_id); mismatched.fields[1].fieldId = 'different-payment-field';
-  await first`UPDATE fame_payment_pending_sync_outbox SET delivery_receipt = ${first.json(mismatched)} WHERE reservation_id = ${id}`;
   await queue(id); const mock = await provider(id);
-  await dispatch(mock.transport);
+  await dispatch(mock.transport, { deliveryConfig: { ...deliveryConfig, paymentStatusFieldId: 'different-payment-field' } });
   assert.equal((await state(id)).state, 'failed'); assert.equal(mock.calls.length, 0);
   assert.equal((await state(id)).safe_error, 'payment_email_pending_prerequisite_failed');
+  const [unchanged] = await first`SELECT delivery_receipt FROM fame_payment_pending_sync_outbox WHERE reservation_id = ${id}`;
+  assert.deepEqual(unchanged.delivery_receipt, job.delivery_receipt);
 });
 
 test('native Paid without exact reconciled Square evidence parks field sync without labeling payment confirmed', async () => {
