@@ -22,6 +22,13 @@ Neon branch `br-divine-breeze-awf9vfo1` in its provisioning action. Its endpoint
 and schema still need inspection in Neon; the console currently requires the
 owner's email activation. No hosted schema or account was changed.
 
+The September 10 read-only inspection of that exact Preview branch found the
+legacy five-table schema and the known Sunrise demo tenant, rather than an empty
+schema. The inspected bookings had the known `.example` vendor identities and
+there were no inquiry receipts. This does not turn the demo into the Fresh Air
+account. The separate seeded-QA procedure below preserves those records and
+still requires exact schema and data validation at execution time.
+
 The immutable Preview entry page renders the vendor application entry point and
 private staff sign-in. Its `/apply` handoff reaches the market's `/vendors` page.
 These are navigation checks, not authenticated/database/workflow acceptance.
@@ -94,6 +101,69 @@ returned non-secret account/season/capacity suggestions into Preview Config,
 then apply all migrations below. Bootstrap success explicitly reports
 `ready:false`; only the separate complete readiness check can pass schema and
 configuration readiness. Production provisioning remains a separate task.
+
+## Add a private QA account beside an unchanged legacy demo
+
+Use this path only when the reviewed, isolated Preview branch was already
+initialized by the legacy portal. Do not rename the demo account, repurpose its
+password, delete its data, reopen public signup, or use the regular account
+creation route. Ordinary `create` remains empty-schema-only.
+
+The explicit `add-to-seeded-qa` command requires all the private Preview,
+Sandbox/live-off, disabled-outbound, account, season, capacity and credential-file
+guards above. First run this read-only inspection with the actual endpoint:
+
+```sh
+node scripts/bootstrap-qa-account.mjs inspect-seeded-qa --qa \
+  --expected-host=YOUR_QA_NEON_HOST
+```
+
+The inspection accepts only the compatible `accounts`, `booths`, `bookings`,
+`booking_dates`, and `inquiry_requests` tables with their reviewed built-in
+column types, required constraints and valid indexes. Unexpected tables,
+functions, rules, triggers, row-security policies, inheritance, expression
+indexes, or incompatible columns/constraints stop the procedure.
+
+The only preexisting account must match the known Sunrise demo identity and
+its public demo password. Any booths and bookings must match the application's
+known demo records, including ownership, vendor identities, dates and amounts.
+Dates are recognized from their original creation day, including partial
+weekends; no fixed sample counts or current dates are assumed. Subsets of the
+known seed are permitted, but extra tenants, real vendor details, modified demo
+records, orphaned dates, and any inquiry receipts are refused. The inspection
+prints aggregate counts only and never returns passwords or applicant rows.
+
+After a successful inspection, leave `FAME_MARKET_ACCOUNT_ID` unset for first
+creation and use a fresh mode-0700 directory outside the checkout:
+
+```sh
+FAME_QA_CREDENTIALS_DIR=$(mktemp -d /private/tmp/fame-qa-credentials.XXXXXX)
+node scripts/bootstrap-qa-account.mjs add-to-seeded-qa --qa \
+  --expected-host=YOUR_QA_NEON_HOST \
+  --email=nate@autocraftstudios.com --slug=qa-fresh-air \
+  --qa-capacity=30 \
+  --credentials-file="$FAME_QA_CREDENTIALS_DIR/manager.json"
+```
+
+The command checks eligibility before generating a credential. Inside the
+transaction it holds the same migration advisory lock and table locks, rechecks
+the schema and every existing record, then inserts exactly one private QA
+account. It creates no booths, bookings, application records or outbound events
+and never changes any existing row. A conflict or failure rolls back the insert.
+Keep ordinary QA writers paused during setup.
+
+Reuse the same private credential file for a retry. If its exact account already
+exists, the command verifies that identity and password without resetting it or
+adding another account, including after migrations have run. A different file
+cannot add a second QA tenant to the already initialized branch. If the private
+file is unavailable but the exact QA identity is known, use `verify-existing`;
+do not create a replacement credential or modify the account to make setup pass.
+
+Set only the returned nonsecret account ID/season/capacity suggestions in Preview
+and apply all migrations below. Both inspection and creation return
+`ready:false`: migration readiness, private manager login, hosted workflows,
+and Square Sandbox acceptance remain separate checks. A schema/data rejection
+requires investigation of the private target, not deletion or a force option.
 
 ## Apply migrations using private Preview environment access
 
@@ -217,3 +287,12 @@ preservation, rollback on a mid-sequence failure, concurrent runners, and
 readiness failures for a disabled guard or incorrect account/season, and disabled
 payment enqueue triggers or missing eligibility views. The suite
 must pass in PostgreSQL CI before treating the runner as verified.
+
+The seeded-QA tests compare the recognizer against the actual portal fixtures,
+including varied creation weekdays and refusal of real applicant changes.
+`tests/pg/qa-seeded-bootstrap.test.cjs` covers read-only inspection, preservation
+of every original row, private-password verification, concurrent/repeated runs,
+conflicting identities, incompatible schemas and SQL hooks, rollback, and the
+complete 001–021 migration sequence beside the preserved demo. Run this suite
+against the disposable local PostgreSQL CI service before using the command on
+the hosted Preview branch; isolated tests do not establish hosted readiness.
