@@ -54,7 +54,12 @@ export function verifySessionToken(token: string | undefined): string | null {
 /** Account id from the request's session cookie, or null. */
 export async function getSessionAccountId(): Promise<string | null> {
   const store = await cookies();
-  return verifySessionToken(store.get(SESSION_COOKIE)?.value);
+  try {
+    return verifySessionToken(store.get(SESSION_COOKIE)?.value);
+  } catch {
+    // A missing/weak AUTH_SECRET must not turn every page into a 500; treat as signed out.
+    return null;
+  }
 }
 
 export function sessionCookieOptions() {

@@ -15,7 +15,11 @@
     "database:plan": "node scripts/database-readiness.mjs plan",
     "database:bootstrap:qa": "node scripts/bootstrap-qa-account.mjs",
     "database:check": "node scripts/database-readiness.mjs check",
-    "database:migrate:qa": "node scripts/database-readiness.mjs apply"
+    "database:migrate:qa": "node scripts/database-readiness.mjs apply",
+    "database:check:production": "node scripts/database-readiness.mjs check --production",
+    "database:migrate:production": "node scripts/database-readiness.mjs apply --production",
+    "database:bootstrap:production": "node scripts/bootstrap-qa-account.mjs create-production-manager --production",
+    "database:remove-demo:production": "node scripts/bootstrap-qa-account.mjs remove-demo-tenant --production"
   },
   "dependencies": {
     "next": "^15.3.4",

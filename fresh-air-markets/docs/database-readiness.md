@@ -36,8 +36,11 @@ These are navigation checks, not authenticated/database/workflow acceptance.
 The checked-in runner closes that deployment gap without creating a public
 administration endpoint. It sends no email, SMS, HighLevel request or Square
 request, creates no applicants, and does not seed or rename a market account.
-This runner is restricted to a reviewed **Preview / QA Neon target**. It is not a
-production release procedure.
+With `--qa` this runner targets a reviewed **Preview / QA Neon target**. The
+separate `--production` mode, the production manager account command and the
+demo-tenant removal are documented in
+[`production-database-bringup.md`](production-database-bringup.md); they
+require `VERCEL_ENV=production` and refuse Preview variables.
 
 ## Initialize an empty private QA branch
 

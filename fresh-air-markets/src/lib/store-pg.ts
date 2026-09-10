@@ -5,8 +5,10 @@ import { ApproveResult, Store, decorateBooth } from "./store";
 import { DEMO_MARKET_ID, DEMO_PASSWORD, defaultBooths, demoAccount, demoBookings } from "./seed";
 import { hashPassword } from "./auth";
 import { InquiryConflict, inquiryFingerprint } from "./inquiry-idempotency";
+import { demoTenantAllowed } from "./demo-tenant";
 
 type Sql = ReturnType<typeof postgres>;
+type Queryable = Sql | postgres.TransactionSql<{}>;
 
 function client(): Sql {
   const g = globalThis as typeof globalThis & { __marketSql?: Sql };
@@ -18,13 +20,11 @@ function client(): Sql {
 
 const initialized = new WeakMap<Sql, Promise<void>>();
 
-/** Creates the schema and seeds the demo tenant on first connect. */
-function init(sql: Sql): Promise<void> {
-  let ready = initialized.get(sql);
-  if (!ready) {
-    ready = (async () => {
-      await sql`
-        CREATE TABLE IF NOT EXISTS accounts (
+/** The public demo tenant is for local/Preview only; Production never receives it. */
+export const demoSeedAllowed = demoTenantAllowed;
+
+const BASE_TABLE_DDL: Record<string, string> = {
+  accounts: `CREATE TABLE IF NOT EXISTS accounts (
           id TEXT PRIMARY KEY,
           email TEXT NOT NULL UNIQUE,
           password_hash TEXT NOT NULL,
@@ -36,9 +36,8 @@ function init(sql: Sql): Promise<void> {
           license_status TEXT NOT NULL DEFAULT 'trial',
           trial_ends_at TIMESTAMPTZ NOT NULL,
           created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-        )`;
-      await sql`
-        CREATE TABLE IF NOT EXISTS booths (
+        )`,
+  booths: `CREATE TABLE IF NOT EXISTS booths (
           id TEXT PRIMARY KEY,
           market_id TEXT NOT NULL,
           label TEXT NOT NULL,
@@ -49,9 +48,8 @@ function init(sql: Sql): Promise<void> {
           h INTEGER NOT NULL,
           price_per_day NUMERIC NOT NULL DEFAULT 50,
           active BOOLEAN NOT NULL DEFAULT TRUE
-        )`;
-      await sql`
-        CREATE TABLE IF NOT EXISTS bookings (
+        )`,
+  bookings: `CREATE TABLE IF NOT EXISTS bookings (
           id TEXT PRIMARY KEY,
           booth_id TEXT NOT NULL REFERENCES booths(id),
           market_id TEXT NOT NULL,
@@ -64,47 +62,78 @@ function init(sql: Sql): Promise<void> {
           email TEXT NOT NULL,
           phone TEXT NOT NULL DEFAULT '',
           category TEXT NOT NULL DEFAULT ''
-        )`;
-      await sql`
-        CREATE TABLE IF NOT EXISTS booking_dates (
+        )`,
+  booking_dates: `CREATE TABLE IF NOT EXISTS booking_dates (
           booking_id TEXT NOT NULL REFERENCES bookings(id) ON DELETE CASCADE,
           date DATE NOT NULL,
           PRIMARY KEY (booking_id, date)
-        )`;
-      // Upgrade path for databases created before multi-tenancy.
-      // DDL defaults cannot use protocol bind parameters. This literal comes
-      // only from the internal seed constant, never request input.
-      const legacyMarketDefault = "'" + DEMO_MARKET_ID.replace(/'/g, "''") + "'";
-      await sql.unsafe(`ALTER TABLE booths ADD COLUMN IF NOT EXISTS market_id TEXT NOT NULL DEFAULT ${legacyMarketDefault}`);
-      await sql.unsafe(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS market_id TEXT NOT NULL DEFAULT ${legacyMarketDefault}`);
-      await sql`CREATE TABLE IF NOT EXISTS inquiry_requests (
+        )`,
+  inquiry_requests: `CREATE TABLE IF NOT EXISTS inquiry_requests (
         market_id TEXT NOT NULL,
         request_key TEXT NOT NULL,
         payload_hash TEXT NOT NULL,
         booking_id TEXT NOT NULL REFERENCES bookings(id),
         created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
         PRIMARY KEY (market_id, request_key)
-      )`;
+      )`,
+};
 
-      const [{ count }] = await sql`SELECT count(*)::int AS count FROM accounts`;
-      if (count === 0) {
-        const demo = demoAccount(hashPassword(DEMO_PASSWORD));
-        await insertAccount(sql, demo);
-        const [{ count: boothCount }] =
-          await sql`SELECT count(*)::int AS count FROM booths WHERE market_id = ${DEMO_MARKET_ID}`;
-        if (boothCount === 0) {
-          for (const b of defaultBooths(DEMO_MARKET_ID, "demo")) await insertBooth(sql, b);
-          for (const bk of demoBookings()) {
-            await sql`INSERT INTO bookings (id, booth_id, market_id, status, total_price, message,
-                vendor_name, business_name, email, phone, category)
-              VALUES (${bk.id}, ${bk.boothId}, ${bk.marketId}, ${bk.status}, ${bk.totalPrice}, ${bk.message},
-                ${bk.vendor.name}, ${bk.vendor.businessName}, ${bk.vendor.email}, ${bk.vendor.phone}, ${bk.vendor.category})`;
-            for (const date of bk.dates) {
-              await sql`INSERT INTO booking_dates (booking_id, date) VALUES (${bk.id}, ${date})`;
+/**
+ * Creates the base schema on first connect and, outside Production, seeds the
+ * demo tenant. A warm schema costs two catalog reads and no DDL, so cold starts
+ * never queue exclusive table locks behind live bookings. Concurrent cold starts
+ * serialize on an advisory lock instead of racing CREATE/INSERT.
+ */
+function init(sql: Sql): Promise<void> {
+  let ready = initialized.get(sql);
+  if (!ready) {
+    ready = (async () => {
+      const tables = new Set((await sql<{ tablename: string }[]>`
+        SELECT tablename FROM pg_tables WHERE schemaname = current_schema()`).map((r) => r.tablename));
+      const legacy = await sql<{ table_name: string }[]>`
+        SELECT table_name FROM information_schema.columns
+        WHERE table_schema = current_schema() AND table_name IN ('booths', 'bookings') AND column_name = 'market_id'`;
+      const tenantColumns = new Set(legacy.map((r) => r.table_name));
+      const schemaComplete = Object.keys(BASE_TABLE_DDL).every((name) => tables.has(name))
+        && tenantColumns.has("booths") && tenantColumns.has("bookings");
+      if (schemaComplete && !demoSeedAllowed()) return;
+      await sql.begin(async (tx) => {
+        await tx`SELECT pg_advisory_xact_lock(1178684741, 2)`;
+        for (const [name, ddl] of Object.entries(BASE_TABLE_DDL)) {
+          if (name === "inquiry_requests") {
+            // Upgrade path for databases created before multi-tenancy.
+            // DDL defaults cannot use protocol bind parameters. This literal comes
+            // only from the internal seed constant, never request input.
+            const legacyMarketDefault = "'" + DEMO_MARKET_ID.replace(/'/g, "''") + "'";
+            for (const table of ["booths", "bookings"]) {
+              if (tables.has(table) && !tenantColumns.has(table)) {
+                await tx.unsafe(`ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS market_id TEXT NOT NULL DEFAULT ${legacyMarketDefault}`);
+              }
+            }
+          }
+          if (!tables.has(name)) await tx.unsafe(ddl);
+        }
+        if (!demoSeedAllowed()) return;
+        const [{ count }] = await tx`SELECT count(*)::int AS count FROM accounts`;
+        if (count === 0) {
+          const demo = demoAccount(hashPassword(DEMO_PASSWORD));
+          await insertAccount(tx, demo);
+          const [{ count: boothCount }] =
+            await tx`SELECT count(*)::int AS count FROM booths WHERE market_id = ${DEMO_MARKET_ID}`;
+          if (boothCount === 0) {
+            for (const b of defaultBooths(DEMO_MARKET_ID, "demo")) await insertBooth(tx, b);
+            for (const bk of demoBookings()) {
+              await tx`INSERT INTO bookings (id, booth_id, market_id, status, total_price, message,
+                  vendor_name, business_name, email, phone, category)
+                VALUES (${bk.id}, ${bk.boothId}, ${bk.marketId}, ${bk.status}, ${bk.totalPrice}, ${bk.message},
+                  ${bk.vendor.name}, ${bk.vendor.businessName}, ${bk.vendor.email}, ${bk.vendor.phone}, ${bk.vendor.category})`;
+              for (const date of bk.dates) {
+                await tx`INSERT INTO booking_dates (booking_id, date) VALUES (${bk.id}, ${date})`;
+              }
             }
           }
         }
-      }
+      });
     })().catch((err) => {
       initialized.delete(sql); // allow retry on next request
       throw err;
@@ -170,14 +199,14 @@ function toBooking(r: BookingRow): Booking {
   };
 }
 
-async function insertAccount(sql: Sql, a: Account): Promise<void> {
+async function insertAccount(sql: Queryable, a: Account): Promise<void> {
   await sql`INSERT INTO accounts (id, email, password_hash, owner_name, market_name, slug,
       plan, license_key, license_status, trial_ends_at, created_at)
     VALUES (${a.id}, ${a.email}, ${a.passwordHash}, ${a.ownerName}, ${a.marketName}, ${a.slug},
       ${a.plan}, ${a.licenseKey}, ${a.licenseStatus}, ${a.trialEndsAt}, ${a.createdAt})`;
 }
 
-async function insertBooth(sql: Sql, b: Booth): Promise<void> {
+async function insertBooth(sql: Queryable, b: Booth): Promise<void> {
   await sql`INSERT INTO booths (id, market_id, label, zone, x, y, w, h, price_per_day, active)
     VALUES (${b.id}, ${b.marketId}, ${b.label}, ${b.zone}, ${b.x}, ${b.y}, ${b.w}, ${b.h},
       ${b.pricePerDay}, ${b.active})`;

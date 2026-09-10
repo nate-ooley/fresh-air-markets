@@ -65,7 +65,8 @@ export async function loadMigrations(directory = migrationDirectory) {
   const names = (await readdir(directory)).filter(name => /^\d{3}-[a-z0-9-]+\.sql$/.test(name)).sort();
   if (!names.length || names.some((name, index) => Number(name.slice(0, 3)) !== index + 1)) fail('migration_sequence_invalid');
   return Promise.all(names.map(async name => {
-    const source = await readFile(new URL(name, directory), 'utf8');
+    // Line endings are normalized so a CRLF checkout never changes recorded checksums.
+    const source = (await readFile(new URL(name, directory), 'utf8')).replace(/\r\n/g, '\n');
     return { name, checksum: createHash('sha256').update(source).digest('hex'), sql: transactionBody(source), source };
   }));
 }
@@ -79,15 +80,26 @@ function connection(value) {
 }
 const directHost = hostname => hostname.replace(/-pooler(?=\.)/, '');
 
-export function resolveQaTarget(env, { qa, expectedHost }) {
-  if (qa !== true || env.VERCEL_ENV !== 'preview') fail('preview_qa_target_required');
+// Each mode pins the Vercel environment whose variables were injected, so a
+// Preview/QA command can never run against Production variables or vice versa.
+const TARGET_MODES = { qa: 'preview', production: 'production' };
+
+export function resolveTarget(env, { mode, expectedHost }) {
+  if (!Object.hasOwn(TARGET_MODES, mode ?? '')) fail('target_mode_required');
+  if (env.VERCEL_ENV !== TARGET_MODES[mode]) fail(mode === 'production' ? 'production_target_required' : 'preview_qa_target_required');
   const pooled = connection(env.DATABASE_URL);
   const direct = env.DATABASE_URL_UNPOOLED ? connection(env.DATABASE_URL_UNPOOLED) : pooled;
   if (directHost(pooled.hostname) !== directHost(direct.hostname) || pooled.pathname !== direct.pathname
     || pooled.username !== direct.username) fail('database_urls_target_mismatch');
   if (!expectedHost || directHost(direct.hostname) !== directHost(expectedHost.toLowerCase())) fail('database_expected_host_mismatch');
   if (!direct.hostname.endsWith('.neon.tech') || direct.searchParams.get('sslmode') !== 'require') fail('neon_tls_required');
-  return { url: direct.toString(), host: direct.hostname };
+  return { url: direct.toString(), host: direct.hostname, mode };
+}
+
+/** Preview/QA target: the original entry point, kept for existing callers. */
+export function resolveQaTarget(env, { qa, expectedHost }) {
+  if (qa !== true) fail('preview_qa_target_required');
+  return resolveTarget(env, { mode: 'qa', expectedHost });
 }
 
 export function expectedObjects(migrations) {
@@ -129,14 +141,21 @@ async function catalog(sql) {
   return [...relations, ...triggers];
 }
 
-export async function inspectSchema(sql, migrations, env = {}) {
+export async function inspectSchema(sql, migrations, env = {}, { production = false } = {}) {
   const objects = await catalog(sql);
   const known = new Set(objects.filter(object => object.valid).map(object => `${object.kind}:${object.name}`));
   const missingObjects = expectedObjects(migrations).filter(object => !known.has(`${object.kind}:${object.name}`));
   const history = known.has(`table:${historyTable}`) ? await sql`SELECT name, checksum FROM fame_schema_migrations ORDER BY name` : [];
   const pending = compareHistory(migrations, history).map(m => m.name);
   const blockers = [];
+  // The portal (or the manager bootstrap) creates these; apply refuses without them.
+  if (baseTables.some(name => !known.has(`table:${name}`))) blockers.push('base_portal_schema_required');
   if (missingObjects.length) blockers.push('schema_objects_missing_or_disabled');
+  if (production && known.has('table:accounts')) {
+    // The public demo login must never exist beside real vendor data.
+    const demo = await sql`SELECT 1 FROM accounts WHERE id = 'demo-market'`;
+    if (demo.length) blockers.push('demo_account_present');
+  }
   if (pending.length) blockers.push('migration_history_incomplete');
   const marketId = env.FAME_MARKET_ACCOUNT_ID?.trim();
   if (!marketId) blockers.push('market_account_id_missing');
@@ -166,7 +185,12 @@ export async function applyMigrations(sql, migrations) {
     const history = await tx`SELECT name, checksum FROM fame_schema_migrations ORDER BY name`;
     const pending = compareHistory(migrations, history);
     for (const migration of pending) {
-      await tx.unsafe(migration.sql);
+      try {
+        await tx.unsafe(migration.sql);
+      } catch (error) {
+        if (error && typeof error === 'object') error.migration = migration.name;
+        throw error;
+      }
       await tx`INSERT INTO fame_schema_migrations (name, checksum) VALUES (${migration.name}, ${migration.checksum})`;
     }
     const objects = new Set((await catalog(tx)).filter(o => o.valid).map(o => `${o.kind}:${o.name}`));
@@ -177,19 +201,32 @@ export async function applyMigrations(sql, migrations) {
 
 export async function main(args = process.argv.slice(2), env = process.env) {
   const command = args[0] ?? 'plan';
-  if (!['plan', 'check', 'apply'].includes(command) || args.slice(1).some(a => a !== '--qa' && !a.startsWith('--expected-host='))) fail('usage_plan_check_apply');
+  const flags = args.slice(1);
+  if (!['plan', 'check', 'apply'].includes(command)
+    || flags.some(a => a !== '--qa' && a !== '--production' && !a.startsWith('--expected-host='))) fail('usage_plan_check_apply');
+  const qa = flags.includes('--qa');
+  const production = flags.includes('--production');
+  if (qa && production) fail('usage_plan_check_apply');
   const migrations = await loadMigrations();
   if (command === 'plan') {
     console.log(JSON.stringify({ command, migrations: migrations.map(({ name, checksum }) => ({ name, checksum })) }, null, 2));
     return;
   }
-  const target = resolveQaTarget(env, { qa: args.includes('--qa'), expectedHost: args.find(a => a.startsWith('--expected-host='))?.slice(16) });
+  const expectedHost = flags.find(a => a.startsWith('--expected-host='))?.slice(16);
+  const target = production ? resolveTarget(env, { mode: 'production', expectedHost }) : resolveQaTarget(env, { qa, expectedHost });
   const sql = postgres(target.url, { max: 1, prepare: false, connect_timeout: 10, idle_timeout: 5,
     onnotice: () => {}, connection: { search_path: 'public', statement_timeout: 120000 } });
   try {
     const result = command === 'apply' ? await applyMigrations(sql, migrations) : undefined;
-    const readiness = await sql.begin('READ ONLY', tx => inspectSchema(tx, migrations, env));
-    console.log(JSON.stringify({ command, targetHost: target.host, migrations: result, ...readiness }, null, 2));
+    let readiness;
+    try {
+      readiness = await sql.begin('READ ONLY', tx => inspectSchema(tx, migrations, env, { production }));
+    } catch (error) {
+      // Migrations may already be committed; keep that fact visible in the failure output.
+      if (result && error && typeof error === 'object') error.migrations = result;
+      throw error;
+    }
+    console.log(JSON.stringify({ command, mode: target.mode, targetHost: target.host, migrations: result, ...readiness }, null, 2));
     if (!readiness.ready) process.exitCode = 2;
   } finally { await sql.end({ timeout: 5 }); }
 }
@@ -198,7 +235,13 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
   main().catch(error => {
     // Database/provider errors can contain connection strings or stored rows.
     // Emit only our fixed error codes, never their message, stack, or detail.
-    console.error(JSON.stringify({ ready: false, error: error instanceof DatabaseReadinessError ? error.code : 'database_operation_failed' }));
+    // A bare SQLSTATE and the failing migration file name carry no secrets and
+    // make the failure actionable without consulting provider logs.
+    const output = { ready: false, error: error instanceof DatabaseReadinessError ? error.code : 'database_operation_failed' };
+    if (typeof error?.code === 'string' && /^[0-9A-Z]{5}$/.test(error.code) && !(error instanceof DatabaseReadinessError)) output.pgCode = error.code;
+    if (typeof error?.migration === 'string') output.migration = error.migration;
+    if (error?.migrations && typeof error.migrations === 'object') output.migrations = error.migrations;
+    console.error(JSON.stringify(output));
     process.exitCode = 1;
   });
 }

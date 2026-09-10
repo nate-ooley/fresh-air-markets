@@ -1,0 +1,2 @@
+# Migration checksums are recorded in the database; keep SQL bytes stable across checkouts.
+*.sql text eol=lf

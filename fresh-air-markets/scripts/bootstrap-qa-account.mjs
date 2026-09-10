@@ -4,7 +4,7 @@ import { lstat, open, realpath } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import postgres from 'postgres';
-import { DatabaseReadinessError, resolveQaTarget } from './database-readiness.mjs';
+import { DatabaseReadinessError, resolveQaTarget, resolveTarget } from './database-readiness.mjs';
 
 // Keep these four statements identical to PgStore's base tables. The parity
 // test prevents schema drift without importing its demo-seeding initializer.
@@ -56,6 +56,14 @@ export const BASE_SCHEMA = [
 ];
 const QA_EMAILS = new Set(['nate@autocraftstudios.com', 'lnooley@gmail.com']);
 const PURPOSE = 'fresh-air-qa-bootstrap-v1';
+const PRODUCTION_PURPOSE = 'fresh-air-production-manager-v1';
+const PRODUCTION_DEFAULT_NAME = 'Fresh Air Markets & Events';
+const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const SLUG = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+const NAME = /^[^\r\n\0]{1,120}$/;
+const PRODUCTION_UUID = /^fame-[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
+const PRODUCTION_COMMANDS = new Set(['create-production-manager', 'verify-existing', 'remove-demo-tenant']);
+const BASE_TABLES = ['accounts', 'booths', 'bookings', 'booking_dates'];
 const appDirectory = fileURLToPath(new URL('../', import.meta.url));
 const ID = /^[A-Za-z0-9:_-]{1,192}$/;
 const HASH = /^[a-f0-9]{32}:[a-f0-9]{64}$/;
@@ -93,15 +101,33 @@ const SEEDED_CONSTRAINTS = {
 
 export function parseOptions(args) {
   const command = args[0];
-  if (!INSPECTIONS.has(command) && !CREATIONS.has(command) && command !== 'verify-existing') fail('qa_bootstrap_usage');
+  if (!INSPECTIONS.has(command) && !CREATIONS.has(command) && !PRODUCTION_COMMANDS.has(command)) fail('qa_bootstrap_usage');
   const options = { command };
-  const allowed = new Set(['expected-host', 'email', 'account-id', 'slug', 'qa-capacity', 'credentials-file']);
+  const allowed = new Set(['expected-host', 'email', 'account-id', 'slug', 'qa-capacity', 'credentials-file', 'market-name', 'owner-name']);
   for (const arg of args.slice(1)) {
     if (arg === '--qa' && !options.qa) { options.qa = true; continue; }
+    if (arg === '--production' && !options.production) { options.production = true; continue; }
     const match = /^--([a-z-]+)=(.+)$/.exec(arg);
     if (!match || !allowed.has(match[1]) || options[match[1]] !== undefined) fail('qa_bootstrap_usage');
     options[match[1]] = match[2];
   }
+  if (options.production) {
+    // Production commands never accept QA-only identity, capacity or --qa.
+    if (options.qa || !PRODUCTION_COMMANDS.has(command) || options['qa-capacity'] !== undefined) fail('qa_bootstrap_usage');
+    if (command === 'remove-demo-tenant') {
+      if (['email', 'account-id', 'slug', 'credentials-file', 'market-name', 'owner-name'].some(key => options[key])) fail('qa_bootstrap_usage');
+      return options;
+    }
+    if (!EMAIL.test(options.email ?? '') || options.email.length > 254 || options.email !== options.email.toLowerCase()) fail('production_identity_invalid');
+    if (command === 'create-production-manager' && (!SLUG.test(options.slug ?? '') || options.slug.length > 40
+      || options.slug.startsWith('qa-') || options.slug === 'sunrise-market' || !path.isAbsolute(options['credentials-file'] ?? '')
+      || options['account-id'] || ['market-name', 'owner-name'].some(key => options[key] !== undefined && !NAME.test(options[key])))) fail('qa_bootstrap_usage');
+    if (command === 'verify-existing' && (!ID.test(options['account-id'] ?? '') || options['account-id'] === 'demo-market'
+      || options.slug || options['credentials-file'] || options['market-name'] || options['owner-name'])) fail('qa_bootstrap_usage');
+    return options;
+  }
+  if (command === 'create-production-manager' || command === 'remove-demo-tenant'
+    || options['market-name'] !== undefined || options['owner-name'] !== undefined) fail('qa_bootstrap_usage');
   if (INSPECTIONS.has(command) && ['email', 'account-id', 'slug', 'qa-capacity', 'credentials-file'].some(key => options[key])) fail('qa_bootstrap_usage');
   if (!INSPECTIONS.has(command) && (!QA_EMAILS.has(options.email) || !/^[1-9]\d{0,3}$/.test(options['qa-capacity'] ?? ''))) fail('qa_identity_or_capacity_invalid');
   if (CREATIONS.has(command) && (!/^qa-[a-z0-9]+(?:-[a-z0-9]+)*$/.test(options.slug ?? '') || options.slug.length > 40
@@ -112,6 +138,7 @@ export function parseOptions(args) {
 }
 
 export function validateConfig(env, options) {
+  if (options.production) return validateProductionConfig(env, options);
   const target = resolveQaTarget(env, { qa: options.qa, expectedHost: options['expected-host'] });
   if (env.SQUARE_ENVIRONMENT !== 'sandbox' || env.SQUARE_ALLOW_LIVE_PAYMENTS !== 'false') fail('qa_sandbox_live_off_required');
   // Review and agreement delivery have no ENABLED flag: their Preview gate is
@@ -131,6 +158,24 @@ export function validateConfig(env, options) {
   return { ...target, targetKey };
 }
 
+function targetKeyFor(target) {
+  const url = new URL(target.url);
+  return createHash('sha256').update(JSON.stringify([url.hostname.replace(/-pooler(?=\.)/, ''), url.pathname, url.username])).digest('hex');
+}
+
+/** Production requires the Production variables, a private secret and no QA fault controls. */
+export function validateProductionConfig(env, options) {
+  const target = resolveTarget(env, { mode: 'production', expectedHost: options['expected-host'] });
+  if (Object.entries(env).some(([key, value]) => /^SQUARE_QA_/.test(key) && value !== undefined && value !== '')) fail('production_qa_controls_must_be_absent');
+  if (env.GHL_LOCATION_ID && env.GHL_LOCATION_ID !== 'aooAnUXF0COePorBo7wL') fail('qa_location_mismatch');
+  if (options.command !== 'remove-demo-tenant') {
+    if (!env.AUTH_SECRET || env.AUTH_SECRET.trim().length < 32 || /[\r\n\0]/.test(env.AUTH_SECRET)) fail('production_private_auth_secret_required');
+    if (env.FAME_SEASON_ID !== '2026-2027') fail('production_season_invalid');
+    if (options.command === 'verify-existing' && env.FAME_MARKET_ACCOUNT_ID !== options['account-id']) fail('qa_account_mapping_conflict');
+  }
+  return { ...target, targetKey: targetKeyFor(target) };
+}
+
 export function hashQaPassword(password) {
   const salt = randomBytes(16).toString('hex');
   return `${salt}:${scryptSync(password, salt, 32).toString('hex')}`;
@@ -143,6 +188,16 @@ function matchesPassword(password, stored) {
 
 function newCredentials(options, target) {
   const createdAt = new Date().toISOString();
+  if (options.production) {
+    return {
+      purpose: PRODUCTION_PURPOSE, targetKey: target.targetKey, accountId: `fame-${randomUUID()}`,
+      email: options.email, slug: options.slug, password: randomBytes(32).toString('base64url'),
+      ownerName: options['owner-name'] ?? PRODUCTION_DEFAULT_NAME, marketName: options['market-name'] ?? PRODUCTION_DEFAULT_NAME,
+      plan: 'pro', licenseStatus: 'active',
+      licenseKey: `FAM-${Array.from({ length: 3 }, () => randomBytes(2).toString('hex').toUpperCase()).join('-')}`,
+      createdAt, trialEndsAt: new Date(Date.parse(createdAt) + 365 * 86400_000).toISOString(),
+    };
+  }
   return {
     purpose: PURPOSE, targetKey: target.targetKey, accountId: `qa-${randomUUID()}`,
     email: options.email, slug: options.slug, password: randomBytes(32).toString('base64url'),
@@ -153,6 +208,17 @@ function newCredentials(options, target) {
 }
 
 function validateCredentials(value, options, target) {
+  if (options.production) {
+    if (!value || typeof value !== 'object' || Array.isArray(value) || value.purpose !== PRODUCTION_PURPOSE || value.targetKey !== target.targetKey
+      || !PRODUCTION_UUID.test(value.accountId ?? '') || value.email !== options.email || value.slug !== options.slug
+      || !/^[A-Za-z0-9_-]{43}$/.test(value.password ?? '') || !NAME.test(value.ownerName ?? '') || !NAME.test(value.marketName ?? '')
+      || (options['owner-name'] !== undefined && value.ownerName !== options['owner-name'])
+      || (options['market-name'] !== undefined && value.marketName !== options['market-name'])
+      || value.plan !== 'pro' || value.licenseStatus !== 'active' || !/^FAM-(?:[A-F0-9]{4}-){2}[A-F0-9]{4}$/.test(value.licenseKey ?? '')
+      || !Number.isFinite(Date.parse(value.createdAt)) || !Number.isFinite(Date.parse(value.trialEndsAt))
+      || Date.parse(value.trialEndsAt) - Date.parse(value.createdAt) !== 365 * 86400_000) fail('qa_credentials_file_mismatch');
+    return value;
+  }
   if (!value || typeof value !== 'object' || Array.isArray(value) || value.purpose !== PURPOSE || value.targetKey !== target.targetKey
     || !UUID.test(value.accountId ?? '') || value.email !== options.email || value.slug !== options.slug
     || !/^[A-Za-z0-9_-]{43}$/.test(value.password ?? '') || value.ownerName !== 'Fresh Air QA' || value.marketName !== 'Fresh Air QA'
@@ -417,6 +483,69 @@ export async function addQaAccountToSeededDatabase(sql, credentials) {
   });
 }
 
+export async function verifyExistingProductionAccount(sql, identity) {
+  if (!ID.test(identity.accountId ?? '') || identity.accountId === 'demo-market' || !EMAIL.test(identity.email ?? '')) fail('production_identity_invalid');
+  return sql.begin('READ ONLY', tx => verifyAccount(tx, identity));
+}
+
+async function demoTenantPresent(tx) {
+  const rows = await tx`SELECT 1 FROM accounts WHERE id = ${DEMO.id}`;
+  return rows.length > 0;
+}
+
+/**
+ * Production manager: creates the base tables when the schema is still empty,
+ * otherwise adopts the portal-initialized base tables. It never touches other
+ * rows and a same-file retry only verifies the existing account.
+ */
+export async function createProductionManager(sql, credentials) {
+  if (!PRODUCTION_UUID.test(credentials.accountId ?? '') || !EMAIL.test(credentials.email ?? '')
+    || !SLUG.test(credentials.slug ?? '') || credentials.slug.startsWith('qa-')) fail('production_identity_invalid');
+  return sql.begin(async tx => {
+    await tx`SET LOCAL lock_timeout = '10s'`;
+    await tx`SET LOCAL statement_timeout = '30s'`;
+    await tx`SELECT pg_advisory_xact_lock(1178684741, 1)`;
+    const state = await inventory(tx);
+    const present = new Set(state.relations.filter(row => row.kind === 'r').map(row => row.name));
+    if (!BASE_TABLES.every(name => present.has(name))) {
+      // Half-initialized base schema is investigated, never silently completed.
+      if (BASE_TABLES.some(name => present.has(name))) fail('production_base_schema_partial');
+      for (const statement of BASE_SCHEMA) await tx.unsafe(statement);
+    }
+    await tx`LOCK TABLE ONLY accounts IN SHARE ROW EXCLUSIVE MODE`;
+    const existing = await tx`SELECT id FROM accounts WHERE id = ${credentials.accountId}`;
+    if (existing.length) return { ...(await verifyAccount(tx, credentials)), demoAccountPresent: await demoTenantPresent(tx) };
+    const conflicts = await tx`SELECT id FROM accounts WHERE email = ${credentials.email} OR slug = ${credentials.slug}`;
+    if (conflicts.length) fail('production_identity_conflict');
+    const result = await insertPrivateQaAccount(tx, credentials);
+    return { ...result, demoAccountPresent: await demoTenantPresent(tx) };
+  });
+}
+
+/**
+ * Removes only the public demo tenant (its account, booths, bookings, dates and
+ * inquiry receipts) after proving the row is the known demo identity with the
+ * public demo password. Any other data, including Fresh Air rows, is untouched.
+ */
+export async function removeDemoTenant(sql) {
+  return sql.begin(async tx => {
+    await tx`SET LOCAL lock_timeout = '10s'`;
+    await tx`SET LOCAL statement_timeout = '30s'`;
+    await tx`SELECT pg_advisory_xact_lock(1178684741, 1)`;
+    const state = await inventory(tx);
+    if (!BASE_TABLES.every(name => state.relations.some(row => row.name === name && row.kind === 'r'))) fail('qa_base_schema_missing');
+    const [account] = await tx`SELECT id, email, slug, password_hash FROM accounts WHERE id = ${DEMO.id}`;
+    if (!account) return { status: 'demo_absent', removed: { accounts: 0, booths: 0, bookings: 0 } };
+    if (account.email !== DEMO.email || account.slug !== DEMO.slug || !matchesPassword('sunrise-demo', account.password_hash)) fail('demo_identity_not_recognized');
+    const hasInquiryReceipts = state.relations.some(row => row.name === 'inquiry_requests' && row.kind === 'r');
+    if (hasInquiryReceipts) await tx`DELETE FROM inquiry_requests WHERE market_id = ${DEMO.id}`;
+    const bookings = await tx`DELETE FROM bookings WHERE market_id = ${DEMO.id} RETURNING id`;
+    const booths = await tx`DELETE FROM booths WHERE market_id = ${DEMO.id} RETURNING id`;
+    const accounts = await tx`DELETE FROM accounts WHERE id = ${DEMO.id} RETURNING id`;
+    return { status: 'demo_removed', removed: { accounts: accounts.length, booths: booths.length, bookings: bookings.length } };
+  });
+}
+
 /** Only an entirely empty schema is writable. Replays only verify the account. */
 export async function createQaAccount(sql, credentials) {
   return sql.begin(async tx => {
@@ -447,18 +576,35 @@ export async function main(args = process.argv.slice(2), env = process.env) {
       return;
     }
     let result;
-    if (options.command === 'verify-existing') result = await verifyExistingQaAccount(sql, { accountId: options['account-id'], email: options.email });
-    else {
+    if (options.command === 'remove-demo-tenant') {
+      result = await removeDemoTenant(sql);
+      console.log(JSON.stringify({ command: options.command, ...result, ready: false,
+        next: 'Run the production readiness check; demo_account_present must no longer be listed.' }));
+      return;
+    }
+    if (options.command === 'verify-existing') {
+      const identity = { accountId: options['account-id'], email: options.email };
+      result = options.production ? await verifyExistingProductionAccount(sql, identity) : await verifyExistingQaAccount(sql, identity);
+    } else {
       let credentials = await credentialFile(options['credentials-file'], options, target, { allowCreate: false });
       if (!credentials) {
         if (env.FAME_MARKET_ACCOUNT_ID?.trim()) fail('qa_account_mapping_conflict');
         if (options.command === 'add-to-seeded-qa') await inspectSeededQaDatabase(sql);
-        else if (!(await inspectQaDatabase(sql)).empty) fail('qa_schema_not_empty');
+        else if (options.command === 'create' && !(await inspectQaDatabase(sql)).empty) fail('qa_schema_not_empty');
         credentials = await credentialFile(options['credentials-file'], options, target);
       }
       if (env.FAME_MARKET_ACCOUNT_ID?.trim() && env.FAME_MARKET_ACCOUNT_ID !== credentials.accountId) fail('qa_account_mapping_conflict');
-      result = options.command === 'add-to-seeded-qa'
-        ? await addQaAccountToSeededDatabase(sql, credentials) : await createQaAccount(sql, credentials);
+      result = options.command === 'add-to-seeded-qa' ? await addQaAccountToSeededDatabase(sql, credentials)
+        : options.command === 'create-production-manager' ? await createProductionManager(sql, credentials)
+        : await createQaAccount(sql, credentials);
+    }
+    if (options.production) {
+      console.log(JSON.stringify({ command: options.command, ...result, ready: false,
+        config: { FAME_MARKET_ACCOUNT_ID: result.accountId, FAME_SEASON_ID: '2026-2027' },
+        next: result.demoAccountPresent
+          ? 'Remove the public demo tenant (remove-demo-tenant --production), then apply and check migrations 001–021 with --production.'
+          : 'Set FAME_MARKET_ACCOUNT_ID and FAME_BOOTH_CAPACITY in Production, then apply and check migrations 001–021 with --production.' }));
+      return;
     }
     console.log(JSON.stringify({ command: options.command, ...result, ready: false,
       config: { FAME_MARKET_ACCOUNT_ID: result.accountId, FAME_SEASON_ID: '2026-2027', FAME_BOOTH_CAPACITY: options['qa-capacity'] },

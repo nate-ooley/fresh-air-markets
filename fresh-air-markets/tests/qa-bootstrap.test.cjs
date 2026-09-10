@@ -25,7 +25,8 @@ async function temporary(fn) {
 test('QA bootstrap uses exactly the portal base schema without demo seed code', async () => {
   const { BASE_SCHEMA } = await mod;
   const original = await readFile(path.join(__dirname, '../src/lib/store-pg.ts'), 'utf8');
-  const statements = [...original.matchAll(/await sql`(\s*CREATE TABLE IF NOT EXISTS (?:accounts|booths|bookings|booking_dates) \([\s\S]*?)`;/g)].map(m => normalize(m[1]));
+  // The portal keeps its base DDL in the BASE_TABLE_DDL record of store-pg.ts.
+  const statements = [...original.matchAll(/\b(?:accounts|booths|bookings|booking_dates): `(\s*CREATE TABLE IF NOT EXISTS (?:accounts|booths|bookings|booking_dates) \([\s\S]*?)`,/g)].map(m => normalize(m[1]));
   assert.equal(statements.length, 4);
   assert.deepEqual(BASE_SCHEMA.map(normalize), statements);
   const source = await readFile(path.join(__dirname, '../scripts/bootstrap-qa-account.mjs'), 'utf8');
@@ -125,3 +126,86 @@ test('malformed secret configuration and unexpected failures never print credent
   assert.match(result.stderr, /database_url_invalid/);
   assert.doesNotMatch(result.stdout + result.stderr, new RegExp(marker + '|password=|QA-only'));
 });
+
+const productionHost = 'ep-production-example.us-east-2.aws.neon.tech';
+const productionEnv = {
+  VERCEL_ENV: 'production', DATABASE_URL: `postgresql://owner:fake-local-test-value@${productionHost}/neondb?sslmode=require`,
+  AUTH_SECRET: 'isolated-unit-test-only-secret-value', FAME_SEASON_ID: '2026-2027', GHL_LOCATION_ID: 'aooAnUXF0COePorBo7wL',
+  SQUARE_ENVIRONMENT: 'production', SQUARE_ALLOW_LIVE_PAYMENTS: 'true',
+};
+const productionArgs = filename => ['create-production-manager', '--production', `--expected-host=${productionHost}`,
+  '--email=owner@example.com', '--slug=fresh-air-markets', '--market-name=Fresh Air Markets & Events', `--credentials-file=${filename}`];
+
+test('production manager command accepts an owner identity and rejects QA-only or ambiguous arguments', async () => {
+  const { parseOptions } = await mod;
+  const options = parseOptions(productionArgs('/private/manager.json'));
+  assert.equal(options.production, true);
+  assert.equal(options.slug, 'fresh-air-markets');
+  assert.equal(parseOptions(['verify-existing', '--production', `--expected-host=${productionHost}`, '--email=owner@example.com', '--account-id=fame-observed']).production, true);
+  assert.equal(parseOptions(['remove-demo-tenant', '--production', `--expected-host=${productionHost}`]).command, 'remove-demo-tenant');
+  for (const input of [
+    productionArgs('relative.json'), productionArgs('/private/m.json').concat('--production'), productionArgs('/private/m.json').concat('--qa'),
+    productionArgs('/private/m.json').concat('--qa-capacity=30'), productionArgs('/private/m.json').concat('--password=never'),
+    productionArgs('/private/m.json').map(s => s.replace('--slug=fresh-air-markets', '--slug=qa-fresh-air')),
+    productionArgs('/private/m.json').map(s => s.replace('--slug=fresh-air-markets', '--slug=sunrise-market')),
+    productionArgs('/private/m.json').map(s => s.replace('--slug=fresh-air-markets', '--slug=Fresh Air')),
+    productionArgs('/private/m.json').map(s => s.replace('--email=owner@example.com', '--email=not-an-email')),
+    productionArgs('/private/m.json').map(s => s.replace('--email=owner@example.com', '--email=Owner@Example.com')),
+    productionArgs('/private/m.json').filter(s => !s.startsWith('--email=')),
+    ['create-production-manager', `--expected-host=${productionHost}`, '--email=owner@example.com', '--slug=fresh-air-markets', '--credentials-file=/private/m.json'],
+    ['create', '--production', `--expected-host=${productionHost}`, '--email=owner@example.com', '--slug=fresh-air-markets', '--credentials-file=/private/m.json'],
+    ['verify-existing', '--production', `--expected-host=${productionHost}`, '--email=owner@example.com', '--account-id=demo-market'],
+    ['remove-demo-tenant', '--production', `--expected-host=${productionHost}`, '--email=owner@example.com'],
+    ['remove-demo-tenant', '--qa', `--expected-host=${productionHost}`],
+    args('/private/qa.json').concat('--market-name=Not for QA'),
+  ]) assert.throws(() => parseOptions(input), undefined, JSON.stringify(input));
+});
+
+test('production config requires Production variables, a private secret and no QA fault controls', async () => {
+  const { parseOptions, validateConfig } = await mod;
+  const options = parseOptions(productionArgs('/private/manager.json'));
+  const target = validateConfig(productionEnv, options);
+  assert.equal(target.host, productionHost);
+  assert.equal(target.mode, 'production');
+  assert.match(target.targetKey, /^[a-f0-9]{64}$/);
+  for (const [patch, code] of [
+    [{ VERCEL_ENV: 'preview' }, 'production_target_required'],
+    [{ DATABASE_URL: 'QA-only Neon/Postgres connection string' }, 'database_url_invalid'],
+    [{ DATABASE_URL: productionEnv.DATABASE_URL.replace('sslmode=require', 'sslmode=disable') }, 'neon_tls_required'],
+    [{ AUTH_SECRET: 'short' }, 'production_private_auth_secret_required'],
+    [{ AUTH_SECRET: undefined }, 'production_private_auth_secret_required'],
+    [{ FAME_SEASON_ID: '2027-2028' }, 'production_season_invalid'],
+    [{ SQUARE_QA_FAULT_MODE: 'checkout' }, 'production_qa_controls_must_be_absent'],
+    [{ GHL_LOCATION_ID: 'other-business' }, 'qa_location_mismatch'],
+  ]) assert.throws(() => validateConfig({ ...productionEnv, ...patch }, options), error => error.code === code, code);
+  assert.throws(() => validateConfig(productionEnv, { ...options, 'expected-host': 'ep-other.neon.tech' }));
+  // Preview/QA variables must never satisfy a production command.
+  assert.throws(() => validateConfig(env, options), error => error.code === 'production_target_required');
+  const existing = parseOptions(['verify-existing', '--production', `--expected-host=${productionHost}`, '--email=owner@example.com', '--account-id=fame-observed']);
+  assert.throws(() => validateConfig(productionEnv, existing), /qa_account_mapping_conflict/);
+  assert.equal(validateConfig({ ...productionEnv, FAME_MARKET_ACCOUNT_ID: 'fame-observed' }, existing).host, productionHost);
+  const removal = parseOptions(['remove-demo-tenant', '--production', `--expected-host=${productionHost}`]);
+  assert.equal(validateConfig({ ...productionEnv, AUTH_SECRET: undefined, FAME_SEASON_ID: undefined }, removal).host, productionHost);
+});
+
+test('production credentials use the owner identity, an active plan and a distinct private file purpose', async () => temporary(async directory => {
+  const { parseOptions, validateConfig, credentialFile } = await mod;
+  const filename = path.join(directory, 'manager.json');
+  const options = parseOptions(productionArgs(filename));
+  const target = validateConfig(productionEnv, options);
+  assert.equal(await credentialFile(filename, options, target, { allowCreate: false }), null);
+  const created = await credentialFile(filename, options, target);
+  assert.equal((await stat(filename)).mode & 0o777, 0o600);
+  assert.match(created.accountId, /^fame-/);
+  assert.equal(created.purpose, 'fresh-air-production-manager-v1');
+  assert.equal(created.email, 'owner@example.com');
+  assert.equal(created.marketName, 'Fresh Air Markets & Events');
+  assert.equal(created.plan, 'pro');
+  assert.equal(created.licenseStatus, 'active');
+  assert.equal(created.password.length, 43);
+  assert.deepEqual(await credentialFile(filename, options, target), created);
+  await assert.rejects(credentialFile(filename, { ...options, 'market-name': 'Other Market' }, target), /qa_credentials_file_mismatch/);
+  // A QA credential file can never be replayed as a production identity, or vice versa.
+  const qaOptions = parseOptions(args(filename));
+  await assert.rejects(credentialFile(filename, qaOptions, { ...validateConfig(env, qaOptions), targetKey: target.targetKey }), /qa_credentials_file_mismatch/);
+}));
