@@ -3,11 +3,13 @@ import { Account, Booth, Booking, BoothWithAvailability, InquiryInput } from "./
 import { ApproveResult, Store, decorateBooth } from "./store";
 import { DEMO_MARKET_ID, DEMO_PASSWORD, defaultBooths, demoAccount, demoBookings } from "./seed";
 import { hashPassword } from "./auth";
+import { InquiryConflict, inquiryFingerprint } from "./inquiry-idempotency";
 
 interface MemoryData {
   accounts: Account[];
   booths: Booth[];
   bookings: Booking[];
+  inquiryKeys?: Map<string, { hash: string; bookingId: string }>;
 }
 
 /** Survives Next.js HMR in dev; resets on cold start (demo mode only). */
@@ -77,7 +79,27 @@ export class MemoryStore implements Store {
       });
   }
 
-  async createInquiry(marketId: string, input: InquiryInput, totalPrice: number): Promise<Booking> {
+  async getInquiryReplay(marketId: string, input: InquiryInput, requestKey: string): Promise<Booking | null> {
+    return this.inquiryReplay(marketId, input, requestKey);
+  }
+
+  private inquiryReplay(marketId: string, input: InquiryInput, requestKey: string): Booking | null {
+    const prior = data().inquiryKeys?.get(JSON.stringify([marketId, requestKey]));
+    if (!prior) return null;
+    if (prior.hash !== inquiryFingerprint(input)) throw new InquiryConflict();
+    const booking = data().bookings.find(b => b.id === prior.bookingId && b.marketId === marketId);
+    if (!booking) throw new Error("Stored application is unavailable.");
+    return booking;
+  }
+
+  async createInquiry(marketId: string, input: InquiryInput, totalPrice: number, requestKey?: string): Promise<Booking & { replayed?: boolean }> {
+    // Keep lookup and insertion synchronous so concurrent demo requests cannot
+    // both pass the lookup before either records its result.
+    const prior = requestKey ? this.inquiryReplay(marketId, input, requestKey) : null;
+    if (prior) return { ...prior, replayed: true };
+    if (!data().booths.some(b => b.id === input.boothId && b.marketId === marketId && b.active)) {
+      throw new Error("Booth is unavailable for this market.");
+    }
     const booking: Booking = {
       id: randomUUID(),
       boothId: input.boothId,
@@ -97,6 +119,10 @@ export class MemoryStore implements Store {
       },
     };
     data().bookings.push(booking);
+    if (requestKey) {
+      data().inquiryKeys ??= new Map();
+      data().inquiryKeys!.set(JSON.stringify([marketId, requestKey]), { hash: inquiryFingerprint(input), bookingId: booking.id });
+    }
     return booking;
   }
 
@@ -113,8 +139,13 @@ export class MemoryStore implements Store {
   async approveBooking(marketId: string, id: string): Promise<ApproveResult> {
     const booking = await this.getBooking(marketId, id);
     if (!booking) return { ok: false, conflicts: [] };
+    if (!await this.getBooth(marketId, booking.boothId)) return { ok: false, conflicts: [] };
+    // Recheck after the awaits: a cancellation/rejection may have arrived while
+    // looking up the booth. Late approvals must not revive terminal decisions.
+    if (booking.status !== "pending" && booking.status !== "approved") return { ok: false, conflicts: [] };
+    if (booking.status === "approved") return { ok: true, booking, alreadyApproved: true };
     const conflicts = data()
-      .bookings.filter((b) => b.id !== id && b.boothId === booking.boothId && b.status === "approved")
+      .bookings.filter((b) => b.marketId === marketId && b.id !== id && b.boothId === booking.boothId && b.status === "approved")
       .flatMap((b) =>
         b.dates
           .filter((d) => booking.dates.includes(d))

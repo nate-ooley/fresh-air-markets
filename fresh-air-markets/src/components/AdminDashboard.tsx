@@ -89,7 +89,7 @@ export default function AdminDashboard({ weekends, demoMode, account }: AdminDas
       if (!res.ok) {
         flash("err", data.error ?? "Action failed.");
       } else {
-        flash("ok", action === "approve" ? "Vendor approved — booth locked in and GHL notified." : `Booking ${action}ed.`);
+        flash("ok", action === "approve" ? "Booking approval saved." : `Booking ${action}ed.`);
       }
       await refresh();
     } finally {
@@ -172,6 +172,7 @@ export default function AdminDashboard({ weekends, demoMode, account }: AdminDas
             )}
           </div>
           <div className="flex items-center gap-2">
+            <a href="/applications" className="rounded-full px-4 py-2 text-sm font-semibold text-pine hover:bg-pine/10">Review applications</a>
             <a
               href={publicUrl}
               target="_blank"
@@ -225,18 +226,18 @@ export default function AdminDashboard({ weekends, demoMode, account }: AdminDas
 
         {/* ── Weekend selector ──────────────────────────── */}
         <div className="mt-6 flex flex-wrap items-center gap-2">
-          <span className="mr-1 text-sm font-semibold text-ink/60">Viewing:</span>
-          {weekends.slice(0, 6).map((w) => (
-            <button
-              key={w.key}
-              onClick={() => setViewedWeekend(w.key)}
-              className={`rounded-full px-4 py-1.5 text-sm font-semibold transition ${
-                w.key === viewedWeekend ? "bg-pine text-cream shadow" : "bg-white text-pine ring-1 ring-pine/15 hover:ring-amber"
-              }`}
+          <label className="flex items-center gap-2 text-sm font-semibold text-ink/60">
+            Viewing market date
+            <select
+              value={viewedWeekend}
+              onChange={(event) => setViewedWeekend(event.target.value)}
+              disabled={weekends.length === 0}
+              className="rounded-xl bg-white px-4 py-2 text-pine ring-1 ring-pine/15"
             >
-              {w.label}
-            </button>
-          ))}
+              {weekends.length === 0 && <option value="">No configured market dates</option>}
+              {weekends.map((w) => <option key={w.key} value={w.key}>{w.label}</option>)}
+            </select>
+          </label>
         </div>
 
         <div className="mt-6 grid gap-8 xl:grid-cols-[1fr_400px]">

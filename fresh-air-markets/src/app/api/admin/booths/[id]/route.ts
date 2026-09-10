@@ -1,3 +1,4 @@
+import { readObjectBody } from "@/lib/request-body";
 import { NextRequest, NextResponse } from "next/server";
 import { getStore } from "@/lib/store";
 import { getSessionAccountId } from "@/lib/auth";
@@ -10,7 +11,8 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
   const marketId = await getSessionAccountId();
   if (!marketId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   const { id } = await params;
-  const body = await req.json().catch(() => ({}));
+  const body = await readObjectBody(req);
+  if (!body) return NextResponse.json({ error: "A JSON object body is required." }, { status: 400 });
   const patch: Partial<Booth> = {};
   if (body.x !== undefined) patch.x = Math.max(0, Math.min(1200, Number(body.x) || 0));
   if (body.y !== undefined) patch.y = Math.max(0, Math.min(820, Number(body.y) || 0));
@@ -36,3 +38,4 @@ export async function DELETE(_req: NextRequest, { params }: { params: Promise<{ 
     ? NextResponse.json({ ok: true })
     : NextResponse.json({ error: "Booth not found." }, { status: 404 });
 }
+

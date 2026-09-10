@@ -1,11 +1,12 @@
 import { createHmac, randomBytes, scryptSync, timingSafeEqual } from "crypto";
 import { cookies } from "next/headers";
+import { signingSecret } from "./auth-secret";
 
 export const SESSION_COOKIE = "bhq_session";
 const SESSION_HOURS = 24 * 7;
 
 function secret(): string {
-  return process.env.AUTH_SECRET || "demo-secret-change-me";
+  return signingSecret(process.env);
 }
 
 /* ── Passwords (scrypt, salt:hash hex) ─────────────────── */
@@ -42,6 +43,8 @@ export function verifySessionToken(token: string | undefined): string | null {
   const parts = token.split(".");
   if (parts.length !== 3) return null;
   const [accountId, expires, sig] = parts;
+  // Reject malformed signatures before comparing their encoded byte buffers.
+  if (!/^[a-f0-9]{64}$/.test(sig)) return null;
   const expected = sign(`${accountId}.${expires}`);
   if (sig.length !== expected.length) return null;
   if (!timingSafeEqual(Buffer.from(sig), Buffer.from(expected))) return null;
@@ -51,7 +54,12 @@ export function verifySessionToken(token: string | undefined): string | null {
 /** Account id from the request's session cookie, or null. */
 export async function getSessionAccountId(): Promise<string | null> {
   const store = await cookies();
-  return verifySessionToken(store.get(SESSION_COOKIE)?.value);
+  try {
+    return verifySessionToken(store.get(SESSION_COOKIE)?.value);
+  } catch {
+    // A missing/weak AUTH_SECRET must not turn every page into a 500; treat as signed out.
+    return null;
+  }
 }
 
 export function sessionCookieOptions() {

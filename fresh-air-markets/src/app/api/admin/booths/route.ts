@@ -1,3 +1,4 @@
+import { readObjectBody } from "@/lib/request-body";
 import { NextRequest, NextResponse } from "next/server";
 import { getStore } from "@/lib/store";
 import { getSessionAccountId } from "@/lib/auth";
@@ -10,7 +11,8 @@ export const dynamic = "force-dynamic";
 export async function POST(req: NextRequest) {
   const marketId = await getSessionAccountId();
   if (!marketId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  const body = await req.json().catch(() => ({}));
+  const body = await readObjectBody(req);
+  if (!body) return NextResponse.json({ error: "A JSON object body is required." }, { status: 400 });
   const booth: Booth = {
     id: randomUUID().slice(0, 8),
     marketId,
@@ -27,3 +29,4 @@ export async function POST(req: NextRequest) {
   await store.createBooth(booth);
   return NextResponse.json({ booth }, { status: 201 });
 }
+

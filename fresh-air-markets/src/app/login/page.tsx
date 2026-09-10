@@ -3,7 +3,6 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { DEMO_EMAIL, DEMO_PASSWORD } from "@/lib/seed";
 import { LogoMark } from "@/components/Logo";
 
 export default function LoginPage() {
@@ -30,11 +29,6 @@ export default function LoginPage() {
       setError(data.error ?? "Sign in failed.");
       setBusy(false);
     }
-  };
-
-  const fillDemo = () => {
-    setEmail(DEMO_EMAIL);
-    setPassword(DEMO_PASSWORD);
   };
 
   const field =
@@ -83,18 +77,10 @@ export default function LoginPage() {
             {busy ? "Signing in…" : "Sign in"}
           </button>
 
-          <button
-            type="button"
-            onClick={fillDemo}
-            className="mt-3 w-full rounded-xl border border-dashed border-pine/30 py-2.5 text-xs font-semibold text-pine/70 transition hover:border-amber hover:text-amber"
-          >
-            Fill in the live demo login
-          </button>
-
           <p className="mt-6 text-center text-sm text-ink/60">
-            New to Fresh Air?{" "}
-            <Link href="/signup" className="font-semibold text-clay hover:underline">
-              Start your free trial
+            Applying as a vendor?{" "}
+            <Link href="/apply" className="font-semibold text-clay hover:underline">
+              Start your application
             </Link>
           </p>
         </form>

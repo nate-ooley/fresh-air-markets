@@ -4,8 +4,11 @@ import { Account, Booth, Booking, BoothWithAvailability, InquiryInput } from "./
 import { ApproveResult, Store, decorateBooth } from "./store";
 import { DEMO_MARKET_ID, DEMO_PASSWORD, defaultBooths, demoAccount, demoBookings } from "./seed";
 import { hashPassword } from "./auth";
+import { InquiryConflict, inquiryFingerprint } from "./inquiry-idempotency";
+import { demoTenantAllowed } from "./demo-tenant";
 
 type Sql = ReturnType<typeof postgres>;
+type Queryable = Sql | postgres.TransactionSql<{}>;
 
 function client(): Sql {
   const g = globalThis as typeof globalThis & { __marketSql?: Sql };
@@ -15,14 +18,13 @@ function client(): Sql {
   return g.__marketSql;
 }
 
-let ready: Promise<void> | null = null;
+const initialized = new WeakMap<Sql, Promise<void>>();
 
-/** Creates the schema and seeds the demo tenant on first connect. */
-function init(sql: Sql): Promise<void> {
-  if (!ready) {
-    ready = (async () => {
-      await sql`
-        CREATE TABLE IF NOT EXISTS accounts (
+/** The public demo tenant is for local/Preview only; Production never receives it. */
+export const demoSeedAllowed = demoTenantAllowed;
+
+const BASE_TABLE_DDL: Record<string, string> = {
+  accounts: `CREATE TABLE IF NOT EXISTS accounts (
           id TEXT PRIMARY KEY,
           email TEXT NOT NULL UNIQUE,
           password_hash TEXT NOT NULL,
@@ -34,9 +36,8 @@ function init(sql: Sql): Promise<void> {
           license_status TEXT NOT NULL DEFAULT 'trial',
           trial_ends_at TIMESTAMPTZ NOT NULL,
           created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-        )`;
-      await sql`
-        CREATE TABLE IF NOT EXISTS booths (
+        )`,
+  booths: `CREATE TABLE IF NOT EXISTS booths (
           id TEXT PRIMARY KEY,
           market_id TEXT NOT NULL,
           label TEXT NOT NULL,
@@ -47,9 +48,8 @@ function init(sql: Sql): Promise<void> {
           h INTEGER NOT NULL,
           price_per_day NUMERIC NOT NULL DEFAULT 50,
           active BOOLEAN NOT NULL DEFAULT TRUE
-        )`;
-      await sql`
-        CREATE TABLE IF NOT EXISTS bookings (
+        )`,
+  bookings: `CREATE TABLE IF NOT EXISTS bookings (
           id TEXT PRIMARY KEY,
           booth_id TEXT NOT NULL REFERENCES booths(id),
           market_id TEXT NOT NULL,
@@ -62,46 +62,88 @@ function init(sql: Sql): Promise<void> {
           email TEXT NOT NULL,
           phone TEXT NOT NULL DEFAULT '',
           category TEXT NOT NULL DEFAULT ''
-        )`;
-      await sql`
-        CREATE TABLE IF NOT EXISTS booking_dates (
+        )`,
+  booking_dates: `CREATE TABLE IF NOT EXISTS booking_dates (
           booking_id TEXT NOT NULL REFERENCES bookings(id) ON DELETE CASCADE,
           date DATE NOT NULL,
           PRIMARY KEY (booking_id, date)
-        )`;
-      // Upgrade path for databases created before multi-tenancy.
-      await sql`ALTER TABLE booths ADD COLUMN IF NOT EXISTS market_id TEXT NOT NULL DEFAULT ${DEMO_MARKET_ID}`;
-      await sql`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS market_id TEXT NOT NULL DEFAULT ${DEMO_MARKET_ID}`;
+        )`,
+  inquiry_requests: `CREATE TABLE IF NOT EXISTS inquiry_requests (
+        market_id TEXT NOT NULL,
+        request_key TEXT NOT NULL,
+        payload_hash TEXT NOT NULL,
+        booking_id TEXT NOT NULL REFERENCES bookings(id),
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        PRIMARY KEY (market_id, request_key)
+      )`,
+};
 
-      const [{ count }] = await sql`SELECT count(*)::int AS count FROM accounts`;
-      if (count === 0) {
-        const demo = demoAccount(hashPassword(DEMO_PASSWORD));
-        await insertAccount(sql, demo);
-        const [{ count: boothCount }] =
-          await sql`SELECT count(*)::int AS count FROM booths WHERE market_id = ${DEMO_MARKET_ID}`;
-        if (boothCount === 0) {
-          for (const b of defaultBooths(DEMO_MARKET_ID, "demo")) await insertBooth(sql, b);
-          for (const bk of demoBookings()) {
-            await sql`INSERT INTO bookings (id, booth_id, market_id, status, total_price, message,
-                vendor_name, business_name, email, phone, category)
-              VALUES (${bk.id}, ${bk.boothId}, ${bk.marketId}, ${bk.status}, ${bk.totalPrice}, ${bk.message},
-                ${bk.vendor.name}, ${bk.vendor.businessName}, ${bk.vendor.email}, ${bk.vendor.phone}, ${bk.vendor.category})`;
-            for (const date of bk.dates) {
-              await sql`INSERT INTO booking_dates (booking_id, date) VALUES (${bk.id}, ${date})`;
+/**
+ * Creates the base schema on first connect and, outside Production, seeds the
+ * demo tenant. A warm schema costs two catalog reads and no DDL, so cold starts
+ * never queue exclusive table locks behind live bookings. Concurrent cold starts
+ * serialize on an advisory lock instead of racing CREATE/INSERT.
+ */
+function init(sql: Sql): Promise<void> {
+  let ready = initialized.get(sql);
+  if (!ready) {
+    ready = (async () => {
+      const tables = new Set((await sql<{ tablename: string }[]>`
+        SELECT tablename FROM pg_tables WHERE schemaname = current_schema()`).map((r) => r.tablename));
+      const legacy = await sql<{ table_name: string }[]>`
+        SELECT table_name FROM information_schema.columns
+        WHERE table_schema = current_schema() AND table_name IN ('booths', 'bookings') AND column_name = 'market_id'`;
+      const tenantColumns = new Set(legacy.map((r) => r.table_name));
+      const schemaComplete = Object.keys(BASE_TABLE_DDL).every((name) => tables.has(name))
+        && tenantColumns.has("booths") && tenantColumns.has("bookings");
+      if (schemaComplete && !demoSeedAllowed()) return;
+      await sql.begin(async (tx) => {
+        await tx`SELECT pg_advisory_xact_lock(1178684741, 2)`;
+        for (const [name, ddl] of Object.entries(BASE_TABLE_DDL)) {
+          if (name === "inquiry_requests") {
+            // Upgrade path for databases created before multi-tenancy.
+            // DDL defaults cannot use protocol bind parameters. This literal comes
+            // only from the internal seed constant, never request input.
+            const legacyMarketDefault = "'" + DEMO_MARKET_ID.replace(/'/g, "''") + "'";
+            for (const table of ["booths", "bookings"]) {
+              if (tables.has(table) && !tenantColumns.has(table)) {
+                await tx.unsafe(`ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS market_id TEXT NOT NULL DEFAULT ${legacyMarketDefault}`);
+              }
+            }
+          }
+          if (!tables.has(name)) await tx.unsafe(ddl);
+        }
+        if (!demoSeedAllowed()) return;
+        const [{ count }] = await tx`SELECT count(*)::int AS count FROM accounts`;
+        if (count === 0) {
+          const demo = demoAccount(hashPassword(DEMO_PASSWORD));
+          await insertAccount(tx, demo);
+          const [{ count: boothCount }] =
+            await tx`SELECT count(*)::int AS count FROM booths WHERE market_id = ${DEMO_MARKET_ID}`;
+          if (boothCount === 0) {
+            for (const b of defaultBooths(DEMO_MARKET_ID, "demo")) await insertBooth(tx, b);
+            for (const bk of demoBookings()) {
+              await tx`INSERT INTO bookings (id, booth_id, market_id, status, total_price, message,
+                  vendor_name, business_name, email, phone, category)
+                VALUES (${bk.id}, ${bk.boothId}, ${bk.marketId}, ${bk.status}, ${bk.totalPrice}, ${bk.message},
+                  ${bk.vendor.name}, ${bk.vendor.businessName}, ${bk.vendor.email}, ${bk.vendor.phone}, ${bk.vendor.category})`;
+              for (const date of bk.dates) {
+                await tx`INSERT INTO booking_dates (booking_id, date) VALUES (${bk.id}, ${date})`;
+              }
             }
           }
         }
-      }
+      });
     })().catch((err) => {
-      ready = null; // allow retry on next request
+      initialized.delete(sql); // allow retry on next request
       throw err;
     });
+    initialized.set(sql, ready);
   }
   return ready;
 }
 
-async function db(): Promise<Sql> {
-  const sql = client();
+async function db(sql: Sql = client()): Promise<Sql> {
   await init(sql);
   return sql;
 }
@@ -157,14 +199,14 @@ function toBooking(r: BookingRow): Booking {
   };
 }
 
-async function insertAccount(sql: Sql, a: Account): Promise<void> {
+async function insertAccount(sql: Queryable, a: Account): Promise<void> {
   await sql`INSERT INTO accounts (id, email, password_hash, owner_name, market_name, slug,
       plan, license_key, license_status, trial_ends_at, created_at)
     VALUES (${a.id}, ${a.email}, ${a.passwordHash}, ${a.ownerName}, ${a.marketName}, ${a.slug},
       ${a.plan}, ${a.licenseKey}, ${a.licenseStatus}, ${a.trialEndsAt}, ${a.createdAt})`;
 }
 
-async function insertBooth(sql: Sql, b: Booth): Promise<void> {
+async function insertBooth(sql: Queryable, b: Booth): Promise<void> {
   await sql`INSERT INTO booths (id, market_id, label, zone, x, y, w, h, price_per_day, active)
     VALUES (${b.id}, ${b.marketId}, ${b.label}, ${b.zone}, ${b.x}, ${b.y}, ${b.w}, ${b.h},
       ${b.pricePerDay}, ${b.active})`;
@@ -176,54 +218,56 @@ const BOOKING_SELECT = `
   ) AS dates FROM bookings b`;
 
 export class PgStore implements Store {
+  constructor(private readonly connection?: Sql) {}
+
   /* ── Accounts ────────────────────────────────────────── */
 
   async createAccount(account: Account): Promise<Account> {
-    const sql = await db();
+    const sql = await db(this.connection);
     await insertAccount(sql, account);
     return account;
   }
 
   async getAccountByEmail(email: string): Promise<Account | null> {
-    const sql = await db();
+    const sql = await db(this.connection);
     const rows = await sql<AccountRow[]>`SELECT * FROM accounts WHERE email = ${email.toLowerCase()}`;
     return rows[0] ? toAccount(rows[0]) : null;
   }
 
   async getAccountById(id: string): Promise<Account | null> {
-    const sql = await db();
+    const sql = await db(this.connection);
     const rows = await sql<AccountRow[]>`SELECT * FROM accounts WHERE id = ${id}`;
     return rows[0] ? toAccount(rows[0]) : null;
   }
 
   async getAccountBySlug(slug: string): Promise<Account | null> {
-    const sql = await db();
+    const sql = await db(this.connection);
     const rows = await sql<AccountRow[]>`SELECT * FROM accounts WHERE slug = ${slug}`;
     return rows[0] ? toAccount(rows[0]) : null;
   }
 
   async slugExists(slug: string): Promise<boolean> {
-    const sql = await db();
+    const sql = await db(this.connection);
     const rows = await sql`SELECT 1 FROM accounts WHERE slug = ${slug}`;
     return rows.length > 0;
   }
 
   async seedMarket(marketId: string): Promise<void> {
-    const sql = await db();
+    const sql = await db(this.connection);
     for (const b of defaultBooths(marketId, marketId.slice(0, 8))) await insertBooth(sql, b);
   }
 
   /* ── Booths & bookings ───────────────────────────────── */
 
   async getBooth(marketId: string, id: string): Promise<Booth | null> {
-    const sql = await db();
+    const sql = await db(this.connection);
     const rows = await sql<BoothRow[]>`
       SELECT * FROM booths WHERE market_id = ${marketId} AND id = ${id} AND active`;
     return rows[0] ? toBooth(rows[0]) : null;
   }
 
   async boothsWithAvailability(marketId: string, dates: string[], admin: boolean): Promise<BoothWithAvailability[]> {
-    const sql = await db();
+    const sql = await db(this.connection);
     const booths = await sql<BoothRow[]>`
       SELECT * FROM booths WHERE market_id = ${marketId} AND active ORDER BY label`;
     const approved = dates.length
@@ -247,10 +291,37 @@ export class PgStore implements Store {
     });
   }
 
-  async createInquiry(marketId: string, input: InquiryInput, totalPrice: number): Promise<Booking> {
-    const sql = await db();
+  async getInquiryReplay(marketId: string, input: InquiryInput, requestKey: string): Promise<Booking | null> {
+    const sql = await db(this.connection);
+    const [prior] = await sql`SELECT payload_hash, booking_id FROM inquiry_requests
+      WHERE market_id = ${marketId} AND request_key = ${requestKey}`;
+    if (!prior) return null;
+    if (prior.payload_hash !== inquiryFingerprint(input)) throw new InquiryConflict();
+    const booking = await this.getBooking(marketId, prior.booking_id);
+    if (!booking) throw new Error("Stored application is unavailable.");
+    return booking;
+  }
+
+  async createInquiry(marketId: string, input: InquiryInput, totalPrice: number, requestKey?: string): Promise<Booking & { replayed?: boolean }> {
+    const sql = await db(this.connection);
     const id = randomUUID();
-    await sql.begin(async (tx) => {
+    const result = await sql.begin(async (tx) => {
+      if (requestKey) {
+        // All writers for this market/key serialize across processes and pools.
+        // A failed transaction releases the lock and leaves no consumed key.
+        await tx`SELECT pg_advisory_xact_lock(hashtextextended(${JSON.stringify([marketId, requestKey])}, 0))`;
+        const [prior] = await tx`SELECT payload_hash, booking_id FROM inquiry_requests
+          WHERE market_id = ${marketId} AND request_key = ${requestKey}`;
+        if (prior) {
+          if (prior.payload_hash !== inquiryFingerprint(input)) throw new InquiryConflict();
+          return { id: String(prior.booking_id), replayed: true };
+        }
+      }
+      // Keep tenant ownership and active state valid until the inquiry commits,
+      // including when the booth changes after the route's availability check.
+      const owned = await tx`SELECT id FROM booths
+        WHERE id = ${input.boothId} AND market_id = ${marketId} AND active FOR SHARE`;
+      if (!owned.length) throw new Error("Booth is unavailable for this market.");
       await tx`INSERT INTO bookings (id, booth_id, market_id, status, total_price, message,
           vendor_name, business_name, email, phone, category)
         VALUES (${id}, ${input.boothId}, ${marketId}, 'pending', ${totalPrice}, ${input.message ?? ""},
@@ -258,35 +329,48 @@ export class PgStore implements Store {
       for (const date of input.dates) {
         await tx`INSERT INTO booking_dates (booking_id, date) VALUES (${id}, ${date})`;
       }
+      if (requestKey) await tx`INSERT INTO inquiry_requests (market_id, request_key, payload_hash, booking_id)
+        VALUES (${marketId}, ${requestKey}, ${inquiryFingerprint(input)}, ${id})`;
+      return { id, replayed: false };
     });
-    return (await this.getBooking(marketId, id))!;
+    return { ...(await this.getBooking(marketId, result.id))!, replayed: result.replayed };
   }
 
   async listBookings(marketId: string): Promise<Booking[]> {
-    const sql = await db();
+    const sql = await db(this.connection);
     const rows = await sql.unsafe<BookingRow[]>(
       `${BOOKING_SELECT} WHERE b.market_id = $1 ORDER BY b.created_at DESC`, [marketId]);
     return rows.map(toBooking);
   }
 
   async getBooking(marketId: string, id: string): Promise<Booking | null> {
-    const sql = await db();
+    const sql = await db(this.connection);
     const rows = await sql.unsafe<BookingRow[]>(
       `${BOOKING_SELECT} WHERE b.market_id = $1 AND b.id = $2`, [marketId, id]);
     return rows[0] ? toBooking(rows[0]) : null;
   }
 
   async approveBooking(marketId: string, id: string): Promise<ApproveResult> {
-    const sql = await db();
+    const sql = await db(this.connection);
     return sql.begin(async (tx): Promise<ApproveResult> => {
       const target = await tx.unsafe<BookingRow[]>(
         `${BOOKING_SELECT} WHERE b.market_id = $1 AND b.id = $2 FOR UPDATE OF b`, [marketId, id]);
       if (!target[0]) return { ok: false, conflicts: [] };
       const booking = toBooking(target[0]);
+      if (booking.status !== "pending" && booking.status !== "approved") return { ok: false, conflicts: [] };
+      if (booking.status === "approved") return { ok: true, booking, alreadyApproved: true };
+      // Different applications have different booking rows. Lock their shared
+      // booth before checking availability so competing approvals serialize.
+      // The next statement then sees the preceding approval's committed dates.
+      const booth = await tx`SELECT id FROM booths
+        WHERE id = ${booking.boothId} AND market_id = ${marketId} AND active
+        FOR UPDATE`;
+      if (!booth.length) return { ok: false, conflicts: [] };
       const conflicts = await tx<{ date: string; business_name: string }[]>`
         SELECT d.date::text AS date, b.business_name
         FROM bookings b JOIN booking_dates d ON d.booking_id = b.id
-        WHERE b.booth_id = ${booking.boothId} AND b.status = 'approved' AND b.id != ${id}
+        WHERE b.market_id = ${marketId} AND b.booth_id = ${booking.boothId}
+          AND b.status = 'approved' AND b.id != ${id}
           AND d.date IN ${tx(booking.dates)}`;
       if (conflicts.length > 0) {
         return {
@@ -303,13 +387,13 @@ export class PgStore implements Store {
   }
 
   async setBookingStatus(marketId: string, id: string, status: "rejected" | "cancelled"): Promise<Booking | null> {
-    const sql = await db();
+    const sql = await db(this.connection);
     await sql`UPDATE bookings SET status = ${status} WHERE market_id = ${marketId} AND id = ${id}`;
     return this.getBooking(marketId, id);
   }
 
   async updateBooth(marketId: string, id: string, patch: Partial<Booth>): Promise<Booth | null> {
-    const sql = await db();
+    const sql = await db(this.connection);
     const current = await this.getBooth(marketId, id);
     if (!current) return null;
     const next = { ...current, ...patch, id, marketId };
@@ -322,13 +406,13 @@ export class PgStore implements Store {
   }
 
   async createBooth(booth: Booth): Promise<Booth> {
-    const sql = await db();
+    const sql = await db(this.connection);
     await insertBooth(sql, booth);
     return booth;
   }
 
   async deleteBooth(marketId: string, id: string): Promise<boolean> {
-    const sql = await db();
+    const sql = await db(this.connection);
     const rows = await sql`
       UPDATE booths SET active = FALSE WHERE market_id = ${marketId} AND id = ${id} RETURNING id`;
     return rows.length > 0;

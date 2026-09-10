@@ -74,19 +74,31 @@ See `.env.example`. Summary:
 
 | Variable | Purpose | Default |
 | --- | --- | --- |
-| `DATABASE_URL` | Postgres (Neon) connection string. Schema auto-creates, migrates, and seeds the demo tenant on first request. | unset → demo mode |
-| `AUTH_SECRET` | Signs session cookies | dev fallback |
-| `GHL_API_TOKEN` | GHL Private Integration token (scopes: contacts.write, contacts.readonly) | unset → GHL skipped |
+| `DATABASE_URL` | Postgres (Neon) connection string. Base tables auto-create on first request; the demo tenant is seeded only outside Production. Migrations 001–021 are applied by the readiness runner. | unset → demo mode |
+| `AUTH_SECRET` | Signs session cookies and limiter/email tokens. Production requires a private value of at least 32 characters; the public demo key is rejected. | dev fallback only |
+| `GHL_API_TOKEN` | GHL Private Integration token (contacts plus `opportunities.readonly` / `opportunities.write` for L06) | unset → GHL skipped |
 | `GHL_LOCATION_ID` | GHL location (sub-account) id | unset → GHL skipped |
 
 ## Deploying on Vercel
 
-1. Import the repo in Vercel and set **Root Directory** to `farmers-market/`.
+1. Import the repo in Vercel and set **Root Directory** to `fresh-air-markets/`.
 2. (Optional but recommended) Storage → Create Database → **Neon Postgres**;
-   Vercel injects `DATABASE_URL` automatically. Tables create, migrate, and
-   seed themselves on the first request.
+   Vercel injects `DATABASE_URL` automatically. Base booking tables seed on
+   first request, while reviewed integration migrations are applied separately.
 3. Set `AUTH_SECRET` and your `GHL_API_TOKEN` + `GHL_LOCATION_ID` env vars.
 4. Deploy.
+
+For a **Production** database (Neon branch connected to the Production
+environment, manager account, migrations 001–021, readiness check) follow
+[`docs/production-database-bringup.md`](docs/production-database-bringup.md).
+Production never seeds the public demo tenant and rejects the demo login.
+
+For the Fresh Air L06–L08 workflows, follow the exact migration, private
+environment-variable, HighLevel event-mapping and QA evidence steps in
+[`docs/l06-l08-deployment-qa-runbook.md`](docs/l06-l08-deployment-qa-runbook.md).
+For the new Square Sandbox application, use the staged
+[`docs/square-sandbox-setup.md`](docs/square-sandbox-setup.md) runbook before
+adding a payment link or webhook subscription.
 
 ## Architecture
 
