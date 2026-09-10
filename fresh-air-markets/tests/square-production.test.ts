@@ -19,9 +19,20 @@ test("production payment runtime requires every explicit gate, merchant, webhook
   for (const key of Object.keys(env)) assert.throws(() => squarePaymentRuntimeConfig({ ...env, [key]: undefined }), key);
   for (const [key, value] of [
     ["VERCEL_ENV", "preview"], ["SQUARE_ENVIRONMENT", "sandbox"], ["SQUARE_ALLOW_LIVE_PAYMENTS", "TRUE"],
+    ["FAME_VENDOR_PORTAL_ORIGIN", "https://another-market.example.com"], ["FAME_VENDOR_PORTAL_ORIGIN", "https://vercel.app.evil.invalid"],
     ["FAME_VENDOR_PORTAL_ORIGIN", "https://another-market.vercel.app"], ["SQUARE_WEBHOOK_URL", "https://attacker.invalid/webhook"],
     ["SQUARE_QA_FAULT_MODE", "checkout_429"], ["SQUARE_QA_SIGNER_SECRET", "leftover"], ["SQUARE_QA_UNKNOWN", "leftover"],
   ]) assert.throws(() => squarePaymentRuntimeConfig({ ...env, [key]: value }));
+});
+
+test("production may serve the vendor portal from the Vercel host or a market subdomain, with the webhook on the same origin", () => {
+  for (const origin of ["https://farmers-market-wine.vercel.app", "https://portal.freshairmarketsandevents.com"]) {
+    const hosted = { ...env, FAME_VENDOR_PORTAL_ORIGIN: origin, SQUARE_WEBHOOK_URL: `${origin}/api/payments/square/webhook` };
+    assert.equal(squarePortalOrigin(hosted), origin);
+    assert.equal(squarePaymentRuntimeConfig(hosted).checkoutRedirectUrl, `${origin}/vendor/payment?returned=1`);
+    // The webhook may not point at a different allowed host than the portal.
+    assert.throws(() => squarePaymentRuntimeConfig({ ...hosted, SQUARE_WEBHOOK_URL: env.SQUARE_WEBHOOK_URL }));
+  }
 });
 
 test("Preview is Sandbox only and configured return origin cannot contain a path, query, credentials or other domain", () => {

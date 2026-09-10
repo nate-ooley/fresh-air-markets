@@ -10,8 +10,8 @@ The backend now supports two explicit runtime pairs. This is implementation read
 
 Production also requires a server-only access token, location ID, pinned `SQUARE_MERCHANT_ID`, webhook signature key, and:
 
-- `FAME_VENDOR_PORTAL_ORIGIN=https://freshairmarketsandevents.com`
-- `SQUARE_WEBHOOK_URL=https://freshairmarketsandevents.com/api/payments/square/webhook`
+- `FAME_VENDOR_PORTAL_ORIGIN` set to the exact HTTPS origin that serves this app in Production: `https://freshairmarketsandevents.com`, a subdomain of it, or the Vercel deployment host (for example `https://farmers-market-wine.vercel.app`). No path, port or query.
+- `SQUARE_WEBHOOK_URL` equal to that origin plus `/api/payments/square/webhook`. The GitHub scheduler reads the same origin from the repository variable `FAME_VENDOR_PORTAL_ORIGIN`.
 - `FAME_MARKET_ACCOUNT_ID` set to the private Fresh Air market account, never the public demo account.
 - Every `SQUARE_QA_*` variable absent. Local QA signer/fault controls cannot operate in Production.
 

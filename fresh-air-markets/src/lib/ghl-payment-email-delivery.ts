@@ -3,6 +3,7 @@
 import { readOpportunityStatusField, assertOpportunityStatusFieldMetadata,
   AGREEMENT_STATUS_FIELD, PAYMENT_STATUS_FIELD } from "./ghl-opportunity-status-fields";
 import { makeOpportunityFieldProof, type GhlOpportunityFieldProof } from "./ghl-opportunity-field-proof";
+import { productionPortalHostAllowed } from "./square";
 const BASE = "https://services.leadconnectorhq.com";
 const LOCATION = "aooAnUXF0COePorBo7wL";
 const ID = /^[A-Za-z0-9:_-]{1,192}$/;
@@ -91,7 +92,7 @@ export function readPaymentEmailDeliveryConfig(env: Record<string, string | unde
     }
   } else if (mode === "production") {
     if (env.VERCEL_ENV !== "production" || env.SQUARE_ENVIRONMENT !== "production"
-      || env.SQUARE_ALLOW_LIVE_PAYMENTS !== "true" || portalOrigin !== "https://freshairmarketsandevents.com"
+      || env.SQUARE_ALLOW_LIVE_PAYMENTS !== "true" || !productionPortalHostAllowed(origin.hostname)
       || Object.entries(env).some(([key, value]) => value?.trim()
         && (key.startsWith("SQUARE_QA_") || key.startsWith("GHL_PAYMENT_QA_") || key === "GHL_QA_APPLICATION_PIPELINE_ID"))) {
       throw new PaymentEmailDeliveryError("payment_email_config_missing");

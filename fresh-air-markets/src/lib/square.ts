@@ -95,6 +95,17 @@ export function squarePreviewSandboxRuntimeConfig(env: Record<string, string | u
   return config;
 }
 
+/**
+ * Production may serve the vendor portal from the market's own domain (apex or
+ * a subdomain) or from the Vercel deployment host; never an arbitrary origin.
+ */
+export function productionPortalHostAllowed(hostname: string): boolean {
+  const host = hostname.toLowerCase();
+  return host === "freshairmarketsandevents.com"
+    || host.endsWith(".freshairmarketsandevents.com")
+    || host.endsWith(".vercel.app");
+}
+
 /** Server-owned public origin for vendor invitations and provider returns. */
 export function squarePortalOrigin(env: Record<string, string | undefined>): string {
   const value = requiredSquareValue(env, "FAME_VENDOR_PORTAL_ORIGIN");
@@ -102,7 +113,7 @@ export function squarePortalOrigin(env: Record<string, string | undefined>): str
   if (env.VERCEL !== "1" || !["preview", "production"].includes(env.VERCEL_ENV ?? "")
     || url.protocol !== "https:" || url.username || url.password || url.port || url.search || url.hash
     || url.pathname !== "/" || (env.VERCEL_ENV === "production"
-      ? url.origin !== "https://freshairmarketsandevents.com"
+      ? !productionPortalHostAllowed(url.hostname)
       : !url.hostname.endsWith(".vercel.app"))) {
     throw new Error("Invalid vendor portal origin for this deployment.");
   }
@@ -130,9 +141,10 @@ export function squarePaymentRuntimeConfig(env: Record<string, string | undefine
     config.checkoutRedirectUrl = new URL("/vendor/payment?returned=1", squarePortalOrigin(env)).toString();
   }
   if (config.environment === "production") {
+    // The webhook must land on the same origin that serves the vendor portal.
     const webhook = squareWebhookConfig(env);
-    if (webhook.webhookUrl !== "https://freshairmarketsandevents.com/api/payments/square/webhook") {
-      throw new Error("Production Square webhook must use the configured market website endpoint.");
+    if (webhook.webhookUrl !== new URL("/api/payments/square/webhook", squarePortalOrigin(env)).toString()) {
+      throw new Error("Production Square webhook must use the vendor portal origin.");
     }
   }
   return config;

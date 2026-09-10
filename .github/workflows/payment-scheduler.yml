@@ -20,6 +20,7 @@ jobs:
     env:
       FAME_PAYMENT_SCHEDULER_ENABLED: ${{ vars.FAME_PAYMENT_SCHEDULER_ENABLED }}
       CRON_SECRET: ${{ secrets.CRON_SECRET }}
+      FAME_VENDOR_PORTAL_ORIGIN: ${{ vars.FAME_VENDOR_PORTAL_ORIGIN }}
     steps:
       - uses: actions/checkout@v6
         with:

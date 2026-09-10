@@ -1,7 +1,20 @@
 import { pathToFileURL } from 'node:url';
 
-// No origin/path supplied by an event, caller, repository variable, or response.
+// No path is ever supplied by an event, caller, or response. The origin is the
+// vendor portal origin when the repository variable names an allowed host (the
+// market domain, one of its subdomains, or the Vercel deployment host); any
+// other value falls back to the market website.
 export const PAYMENT_SCHEDULER_ORIGIN = 'https://freshairmarketsandevents.com';
+export function paymentSchedulerOrigin(env = process.env) {
+  try {
+    const url = new URL(env.FAME_VENDOR_PORTAL_ORIGIN ?? '');
+    const host = url.hostname.toLowerCase();
+    const allowed = host === 'freshairmarketsandevents.com' || host.endsWith('.freshairmarketsandevents.com') || host.endsWith('.vercel.app');
+    if (url.protocol === 'https:' && !url.username && !url.password && !url.port && url.pathname === '/'
+      && !url.search && !url.hash && allowed) return url.origin;
+  } catch { /* fall through to the default origin */ }
+  return PAYMENT_SCHEDULER_ORIGIN;
+}
 const TIMEOUT_MS = 55_000;
 const MAX_RESPONSE_BYTES = 4096;
 const WORKERS = Object.freeze([
@@ -48,13 +61,14 @@ export async function runPaymentScheduler(env = process.env, transport = fetch) 
   if (typeof secret !== 'string' || secret.length < 32 || secret.length > 4096 || /[\r\n\0]/.test(secret)) {
     return { enabled: true, ok: false, processed: 0, failures: 1, error: 'scheduler_secret_invalid', workers: [] };
   }
+  const origin = paymentSchedulerOrigin(env);
   const workers = [];
   // Sequential calls keep shared provider/database load bounded. At 55 seconds
   // each, the complete run is bounded to under six minutes, excluding runner setup.
   for (const worker of WORKERS) {
     let response;
     try {
-      response = await transport(PAYMENT_SCHEDULER_ORIGIN + worker.path, {
+      response = await transport(origin + worker.path, {
         method: 'GET', redirect: 'error', cache: 'no-store', signal: AbortSignal.timeout(TIMEOUT_MS),
         headers: { Authorization: `Bearer ${secret}`, Accept: 'application/json' },
       });

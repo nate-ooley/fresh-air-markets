@@ -58,9 +58,13 @@ test('configuration rejects demo market, wrong environment and untrusted payment
     { FAME_VENDOR_PORTAL_ORIGIN: 'https://qa-market.vercel.app/path' },
     { FAME_VENDOR_PORTAL_ORIGIN: 'https://qa-market.vercel.app?token=1' },
     { FAME_VENDOR_PORTAL_ORIGIN: 'http://qa-market.vercel.app' },
-    { VERCEL_ENV: 'production', SQUARE_ENVIRONMENT: 'production' },
+    { VERCEL_ENV: 'production', SQUARE_ENVIRONMENT: 'production', FAME_VENDOR_PORTAL_ORIGIN: 'https://evil.invalid' },
+    { VERCEL_ENV: 'production', SQUARE_ENVIRONMENT: 'production', FAME_VENDOR_PORTAL_ORIGIN: 'https://freshairmarketsandevents.com.evil.invalid' },
   ]) assert.throws(() => vendorPaymentAccessConfig({ ...env, ...patch }));
-  assert.equal(vendorPaymentAccessConfig({ ...env, VERCEL_ENV: 'production', SQUARE_ENVIRONMENT: 'production', FAME_VENDOR_PORTAL_ORIGIN: 'https://freshairmarketsandevents.com' }).portalOrigin, 'https://freshairmarketsandevents.com');
+  // Production accepts the market domain, its subdomains, and the Vercel deployment host.
+  for (const origin of ['https://freshairmarketsandevents.com', 'https://portal.freshairmarketsandevents.com', 'https://qa-market.vercel.app']) {
+    assert.equal(vendorPaymentAccessConfig({ ...env, VERCEL_ENV: 'production', SQUARE_ENVIRONMENT: 'production', FAME_VENDOR_PORTAL_ORIGIN: origin }).portalOrigin, origin);
+  }
   const prod = { ...env, VERCEL_ENV: 'production', SQUARE_ENVIRONMENT: 'production', FAME_VENDOR_PORTAL_ORIGIN: 'https://freshairmarketsandevents.com' };
   assert.equal(vendorPaymentAccessConfig(prod).allowCheckout, false);
   assert.equal(vendorPaymentAccessConfig({ ...prod, SQUARE_ALLOW_LIVE_PAYMENTS: 'true' }).allowCheckout, true);
