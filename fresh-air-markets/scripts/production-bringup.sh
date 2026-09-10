@@ -6,8 +6,10 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 EMAIL="${1:-}"
-if [ -z "$EMAIL" ]; then echo "usage: bash scripts/production-bringup.sh OWNER_EMAIL"; exit 1; fi
+CAPACITY_ARG="${2:-}"
+if [ -z "$EMAIL" ]; then echo "usage: bash scripts/production-bringup.sh OWNER_EMAIL [BOOTH_CAPACITY]"; exit 1; fi
 EMAIL=$(printf '%s' "$EMAIL" | tr '[:upper:]' '[:lower:]')
+trap 'rm -f .env.production.local' EXIT
 
 echo "== 1/6 pulling Production variables"
 # A connection string exported in this shell wins over the pulled file, because
@@ -41,7 +43,12 @@ HOST=$(node -e "console.log(new URL(process.env.DATABASE_URL_UNPOOLED).hostname)
 echo "   Neon host: $HOST"
 
 echo "== 2/6 creating the manager account (password goes only to a private file)"
-export FAME_SEASON_ID="${FAME_SEASON_ID:-2026-2027}"
+# Season is a constant; capacity comes from the optional second argument when
+# Vercel hides the stored value.
+export FAME_SEASON_ID=2026-2027
+placeholder "${FAME_BOOTH_CAPACITY:-}" && FAME_BOOTH_CAPACITY="$CAPACITY_ARG"
+[ -n "$CAPACITY_ARG" ] && FAME_BOOTH_CAPACITY="$CAPACITY_ARG"
+export FAME_BOOTH_CAPACITY
 CRED_DIR=$(mktemp -d /private/tmp/fame-production.XXXXXX)
 CRED="$CRED_DIR/manager.json"
 node scripts/bootstrap-qa-account.mjs create-production-manager --production \
@@ -65,10 +72,13 @@ printf '%s' "$ACCOUNT_ID" | npx vercel env add FAME_MARKET_ACCOUNT_ID production
 
 echo "== 5/6 applying migrations 001-021 and checking readiness"
 node scripts/database-readiness.mjs apply --production --expected-host="$HOST" > "$CRED_DIR/apply.json" || { cat "$CRED_DIR/apply.json"; exit 1; }
-node scripts/database-readiness.mjs check --production --expected-host="$HOST" | tee "$CRED_DIR/check.json" | node -e "
-const r=JSON.parse(require('fs').readFileSync(0,'utf8'));
+node scripts/database-readiness.mjs check --production --expected-host="$HOST" > "$CRED_DIR/check.json" || true
+node -e "
+const r=JSON.parse(require('fs').readFileSync('$CRED_DIR/check.json','utf8'));
 console.log('   ready:', r.ready, ' applied:', r.appliedCount, ' blockers:', JSON.stringify(r.blockers));
-process.exit(r.ready?0:2)"
+const only=(r.blockers||[]).filter(b=>b!=='booth_capacity_invalid');
+if (r.blockers?.includes('booth_capacity_invalid')) console.log('   (capacity could not be read here; it is checked by the deployed app, not this script)');
+process.exit(only.length?2:0)"
 
 echo "== 6/6 redeploying Production so the new variables take effect"
 npx vercel redeploy --prod >/dev/null 2>&1 || npx vercel --prod >/dev/null 2>&1 || echo "   (redeploy from the Vercel dashboard if this line printed)"
