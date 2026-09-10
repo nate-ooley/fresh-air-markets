@@ -150,11 +150,11 @@ test('all21 migrations accept preserved seed plus new QA tenant; subsequent retr
   const before = await snapshot();
   await bootstrap.addQaAccountToSeededDatabase(first, credentials);
   const migrations = await readiness.loadMigrations();
-  assert.equal((await readiness.applyMigrations(first, migrations)).applied.length, 21);
+  assert.equal((await readiness.applyMigrations(first, migrations)).applied.length, migrations.length);
   const env = { FAME_MARKET_ACCOUNT_ID: credentials.accountId, FAME_SEASON_ID: '2026-2027', FAME_BOOTH_CAPACITY: '30' };
   const report = await first.begin('READ ONLY', tx => readiness.inspectSchema(tx, migrations, env));
   assert.equal(report.ready, true);
-  assert.equal(report.appliedCount, 21);
+  assert.equal(report.appliedCount, migrations.length);
   const after = await snapshot();
   after.accounts = after.accounts.filter(a => a.id !== credentials.accountId);
   assert.deepEqual(after, before);

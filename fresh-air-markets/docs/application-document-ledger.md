@@ -100,3 +100,28 @@ only the exact delivery envelope, an outbox delivery worker, migrations 001,
 do not send email, update a HighLevel opportunity, or expose a document
 publicly; those downstream mappings need explicit implementation and QA
 evidence before L08 can be marked green.
+
+## Staff upload path (no external transfer worker)
+
+Production has no HighLevel document transfer worker or malware scanner yet.
+Until one exists, market staff upload the vendor's certificate of insurance
+and food license themselves from the application review page:
+
+- `POST /api/admin/applications/{id}/documents` (multipart `kind` + `file`)
+  streams the file through `transferPrivateApplicationDocument` into the
+  PostgreSQL-backed private store added by migration
+  `022-private-document-objects.sql`, binds it to the exact market-owned
+  application as the next immutable version, and records a validation event
+  whose reason is the fixed `MANAGER_UPLOAD_SCAN_REASON` text. That wording
+  marks the document as admitted on the strength of the signed-in staff
+  session plus the type, size and file-signature checks, not a scanner.
+- `GET /api/admin/applications/{id}/documents` lists versions and states
+  without storage keys. `GET /api/admin/documents/{id}/file` returns the bytes
+  to the signed-in market with `no-store`, `nosniff` and a sandboxed CSP.
+- The existing `PATCH /api/admin/documents/{id}/review` records the decision.
+  Final reservation still requires an approved current insurance document.
+
+Vercel serverless functions cap request bodies at about 4.5 MB, so a larger
+PDF must be compressed before upload even though the ledger allows 10 MiB.
+Identical bytes uploaded twice bind to the existing version and leave one
+stored object; every rejected or failed upload removes its object.

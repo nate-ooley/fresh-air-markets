@@ -21,7 +21,7 @@ function harness() {
   const filename = path.resolve(__dirname, '../src/components/ApplicationReviewPanel.tsx');
   const mod = new Module(filename, module); mod.filename = filename; mod.paths = module.paths;
   mod.require = id => id === 'react' ? react : id === 'next/navigation' ? { useRouter: () => router }
-    : id === './FinalReservationPanel' ? { __esModule: true, default: () => null } : require(id);
+    : id === './FinalReservationPanel' || id === './ApplicationDocumentsPanel' ? { __esModule: true, default: () => null } : require(id);
   mod._compile(ts.transpileModule(fs.readFileSync(filename, 'utf8'), {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX },
   }).outputText, filename);

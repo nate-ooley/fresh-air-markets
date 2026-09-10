@@ -74,7 +74,7 @@ See `.env.example`. Summary:
 
 | Variable | Purpose | Default |
 | --- | --- | --- |
-| `DATABASE_URL` | Postgres (Neon) connection string. Base tables auto-create on first request; the demo tenant is seeded only outside Production. Migrations 001–021 are applied by the readiness runner. | unset → demo mode |
+| `DATABASE_URL` | Postgres (Neon) connection string. Base tables auto-create on first request; the demo tenant is seeded only outside Production. Migrations 001–022 are applied by the readiness runner. | unset → demo mode |
 | `AUTH_SECRET` | Signs session cookies and limiter/email tokens. Production requires a private value of at least 32 characters; the public demo key is rejected. | dev fallback only |
 | `GHL_API_TOKEN` | GHL Private Integration token (contacts plus `opportunities.readonly` / `opportunities.write` for L06) | unset → GHL skipped |
 | `GHL_LOCATION_ID` | GHL location (sub-account) id | unset → GHL skipped |
@@ -89,7 +89,7 @@ See `.env.example`. Summary:
 4. Deploy.
 
 For a **Production** database (Neon branch connected to the Production
-environment, manager account, migrations 001–021, readiness check) follow
+environment, manager account, migrations 001–022, readiness check) follow
 [`docs/production-database-bringup.md`](docs/production-database-bringup.md).
 Production never seeds the public demo tenant and rejects the demo login.
 

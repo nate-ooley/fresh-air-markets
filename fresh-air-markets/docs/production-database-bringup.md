@@ -15,7 +15,7 @@ runbooks are complete.
 - Production serves the `main` branch (commit `5d27887`, "First Stage"). PR #1
   (`codex/vendor-booking-validation`) must be merged before any of the
   application, reservation or payment routes exist in Production.
-- Without migrations 001–021, the public vendor inquiry endpoint answers 503
+- Without migrations 001–022, the public vendor inquiry endpoint answers 503
   because the persistent rate limiter table (migration 002) is missing, and
   every application/reservation/payment route answers 503.
 
@@ -84,7 +84,7 @@ node scripts/bootstrap-qa-account.mjs create-production-manager --production \
   This deletes only the recognized demo account, its booths, bookings, dates
   and inquiry receipts. It refuses anything that is not the exact demo identity.
 
-## 4. Apply migrations 001–021
+## 4. Apply migrations 001–022
 
 ```sh
 node scripts/database-readiness.mjs plan

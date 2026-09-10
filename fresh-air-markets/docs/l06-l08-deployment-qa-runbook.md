@@ -95,7 +95,7 @@ node scripts/database-readiness.mjs check --qa --expected-host=YOUR_QA_NEON_HOST
 
 Replace the host placeholder with the verified QA endpoint hostname; keep the
 connection string private. The reviewed sequence is **all 21 numbered
-migrations, 001–021**, including the inquiry, reservation, payment, and field
+migrations, 001–022**, including the inquiry, reservation, payment, and field
 receipt migrations. Base portal tables and the actual private account must
 already exist. The runner does not create a customer account or repair a
 placeholder database URL.

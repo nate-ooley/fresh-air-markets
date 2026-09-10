@@ -97,11 +97,11 @@ test('the full reviewed migration chain accepts bootstrapped schema and exact QA
   await bootstrap.createQaAccount(first, credentials);
   const migrations = await readiness.loadMigrations();
   const applied = await readiness.applyMigrations(first, migrations);
-  assert.equal(applied.applied.length, 21);
+  assert.equal(applied.applied.length, migrations.length);
   const config = { FAME_MARKET_ACCOUNT_ID: credentials.accountId, FAME_SEASON_ID: '2026-2027', FAME_BOOTH_CAPACITY: '30' };
   const result = await first.begin('READ ONLY', tx => readiness.inspectSchema(tx, migrations, config));
   assert.equal(result.ready, true);
-  assert.equal(result.appliedCount, 21);
+  assert.equal(result.appliedCount, migrations.length);
   const before = await first`SELECT * FROM accounts`;
   assert.equal((await bootstrap.createQaAccount(first, credentials)).status, 'verified_existing');
   assert.deepEqual(await first`SELECT * FROM accounts`, before);
@@ -153,7 +153,7 @@ test('production manager adopts portal-created base tables, reports a seeded dem
 test('production manager schema accepts the complete migration chain and production readiness flags a leftover demo', async () => {
   await bootstrap.createProductionManager(first, production);
   const migrations = await readiness.loadMigrations();
-  assert.equal((await readiness.applyMigrations(first, migrations)).applied.length, 21);
+  assert.equal((await readiness.applyMigrations(first, migrations)).applied.length, migrations.length);
   const config = { FAME_MARKET_ACCOUNT_ID: production.accountId, FAME_SEASON_ID: '2026-2027', FAME_BOOTH_CAPACITY: '120' };
   const ready = await first.begin('READ ONLY', tx => readiness.inspectSchema(tx, migrations, config, { production: true }));
   assert.equal(ready.ready, true);
@@ -164,7 +164,7 @@ test('production manager schema accepts the complete migration chain and product
   const qaView = await first.begin('READ ONLY', tx => readiness.inspectSchema(tx, migrations, config));
   assert.equal(qaView.ready, true);
   assert.deepEqual(await bootstrap.removeDemoTenant(first), { status: 'demo_removed', removed: { accounts: 1, booths: 1, bookings: 1 } });
-  assert.equal((await first`SELECT count(*)::int AS count FROM fame_schema_migrations`)[0].count, 21);
+  assert.equal((await first`SELECT count(*)::int AS count FROM fame_schema_migrations`)[0].count, migrations.length);
 });
 
 test('readiness check names a missing base schema explicitly', async () => {

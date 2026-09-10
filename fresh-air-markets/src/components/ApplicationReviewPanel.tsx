@@ -3,6 +3,7 @@
 import { type FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import FinalReservationPanel from "./FinalReservationPanel";
+import ApplicationDocumentsPanel from "./ApplicationDocumentsPanel";
 
 type ReviewAction = "approve" | "request_changes" | "decline";
 type ReviewState = "unreviewed" | "needs_review" | "changes_requested" | "approved" | "declined";
@@ -499,6 +500,8 @@ export default function ApplicationReviewPanel({ applicationId }: { applicationI
                   </button>
                 </div>
               </form>
+
+              <ApplicationDocumentsPanel applicationId={application.id} />
 
               {application.reviewState === "approved" && application.sourceEventId && application.identitySnapshot && (
                 <FinalReservationPanel
