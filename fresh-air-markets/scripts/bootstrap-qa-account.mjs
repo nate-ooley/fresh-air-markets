@@ -324,11 +324,18 @@ async function verifySeededSchema(tx) {
     FROM pg_constraint k JOIN pg_class c ON c.oid = k.conrelid JOIN pg_namespace n ON n.oid = c.relnamespace
     LEFT JOIN pg_class f ON f.oid = k.confrelid LEFT JOIN pg_namespace fn ON fn.oid = f.relnamespace
     WHERE n.nspname = current_schema()`;
-  for (const table of tables) {
+  validateSeededConstraints(constraints);
+}
+
+/** PostgreSQL18 also catalogs NOT NULL; column guards verify it independently. */
+export function validateSeededConstraints(constraints) {
+  for (const table of Object.keys(SEEDED_CONSTRAINTS)) {
     const actual = constraints.filter(row => row.table_name === table);
+    const requiredColumns = new Set(SEEDED_COLUMNS[table].split(' ').map(column => column.split(':')[0]));
     if (actual.some(row => !row.valid || row.deferred || (row.kind === 'f'
-      && (!row.same_schema || row.update_action !== 'a' || row.match_type !== 's')))) fail('qa_seed_schema_not_recognized');
-    const signatures = actual.map(row => row.kind === 'f'
+      && (!row.same_schema || row.update_action !== 'a' || row.match_type !== 's'))
+      || (row.kind === 'n' && (!requiredColumns.has(row.columns) || row.reference_table != null)))) fail('qa_seed_schema_not_recognized');
+    const signatures = actual.filter(row => row.kind !== 'n').map(row => row.kind === 'f'
       ? `f:${row.columns}:${row.reference_table}:${row.reference_columns}:${row.delete_action}` : `${row.kind}:${row.columns}`).sort();
     if (JSON.stringify(signatures) !== JSON.stringify([...SEEDED_CONSTRAINTS[table]].sort())) fail('qa_seed_schema_not_recognized');
   }

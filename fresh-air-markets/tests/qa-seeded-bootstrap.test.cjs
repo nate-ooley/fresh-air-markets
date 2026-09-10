@@ -76,3 +76,36 @@ test('refuses altered totals/dates, duplicates and orphaned references', async (
     assert.throws(() => validateSeededRows(rows), /qa_seed_data_not_recognized/);
   }
 });
+
+test('PostgreSQL18 NOT NULL catalog rows preserve strict key and constraint validation', async () => {
+  const { validateSeededConstraints } = await mod;
+  const keys = {
+    accounts: ['p:id', 'u:email', 'u:slug'], booths: ['p:id'],
+    bookings: ['p:id', 'f:booth_id:booths:id:a'],
+    booking_dates: ['p:booking_id,date', 'f:booking_id:bookings:id:c'],
+    inquiry_requests: ['p:market_id,request_key', 'f:booking_id:bookings:id:a'],
+  };
+  const olderCatalog = Object.entries(keys).flatMap(([table_name, signatures]) => signatures.map(signature => {
+    const [kind, columns, reference_table = null, reference_columns = null, delete_action = null] = signature.split(':');
+    return { table_name, kind, columns, reference_table, reference_columns, delete_action,
+      valid: true, deferred: false, same_schema: true, update_action: 'a', match_type: 's' };
+  }));
+  const seed = seededRows();
+  const columns = { accounts: Object.keys(seed.accounts[0]), booths: Object.keys(seed.booths[0]),
+    bookings: Object.keys(seed.bookings[0]), booking_dates: Object.keys(seed.dates[0]),
+    inquiry_requests: ['market_id', 'request_key', 'payload_hash', 'booking_id', 'created_at'] };
+  const notNullRows = Object.entries(columns).flatMap(([table_name, names]) => names.map(columns =>
+    ({ table_name, kind: 'n', columns, valid: true, deferred: false, reference_table: null })));
+  const modernCatalog = [...olderCatalog, ...notNullRows];
+  assert.doesNotThrow(() => validateSeededConstraints(olderCatalog));
+  assert.doesNotThrow(() => validateSeededConstraints(modernCatalog));
+  for (const invalid of [{ ...notNullRows[0], valid: false }, { ...notNullRows[0], deferred: true },
+    { ...notNullRows[0], columns: 'unknown_column' }, { ...notNullRows[0], columns: 'id,email' },
+    { ...notNullRows[0], kind: 'c' }, { ...notNullRows[0], kind: 'x' }]) {
+    assert.throws(() => validateSeededConstraints([...modernCatalog, invalid]), /qa_seed_schema_not_recognized/);
+  }
+  assert.throws(() => validateSeededConstraints(modernCatalog.filter(row => !(row.kind === 'u' && row.columns === 'email'))),
+    /qa_seed_schema_not_recognized/);
+  assert.throws(() => validateSeededConstraints(modernCatalog.filter(row => !(row.kind === 'f' && row.table_name === 'bookings'))),
+    /qa_seed_schema_not_recognized/);
+});

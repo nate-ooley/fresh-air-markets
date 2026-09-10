@@ -48,6 +48,11 @@ async function snapshot() {
 
 test('seeded inspection is read-only and ordinary empty-only create still refuses seeded data', async () => {
   const before = await snapshot();
+  const [{ version, not_null_count }] = await first`SELECT current_setting('server_version_num')::int AS version,
+    (SELECT count(*)::int FROM pg_constraint k JOIN pg_namespace n ON n.oid = k.connamespace
+      WHERE n.nspname = current_schema() AND k.contype = 'n') AS not_null_count`;
+  if (version >= 180000) assert.ok(not_null_count > 0, 'PG18 fixture must exercise its NOT NULL catalog entries');
+  else assert.equal(not_null_count, 0);
   const readonly = { begin: (mode, fn) => { assert.equal(mode, 'READ ONLY'); return first.begin(mode, fn); } };
   assert.equal((await bootstrap.inspectSeededQaDatabase(readonly)).recognizedSeed, true);
   await assert.rejects(bootstrap.createQaAccount(first, credentials), /qa_existing_account_mismatch/);

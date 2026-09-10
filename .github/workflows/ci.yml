@@ -14,11 +14,16 @@ concurrency:
 
 jobs:
   test-and-build:
+    name: PostgreSQL ${{ matrix.postgres }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        postgres: [17, 18]
     services:
       postgres:
-        image: postgres:17
+        image: postgres:${{ matrix.postgres }}
         env:
           POSTGRES_USER: qa
           POSTGRES_PASSWORD: isolated-ci-only
