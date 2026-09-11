@@ -28,7 +28,6 @@ export default function HomePage() {
             </div>
             <div className="mt-4 flex gap-4 text-sm text-white/80">
               <a href={`tel:${MARKET.phoneHref}`} className="underline">Call Now</a>
-              <a href={`sms:${MARKET.phoneHref}`} className="underline">Text Us</a>
             </div>
           </div>
         </section>
@@ -67,8 +66,7 @@ export default function HomePage() {
               <h2 className="font-display text-3xl text-navy sm:text-4xl">Get in Touch</h2>
               <p className="mt-4 text-ink/70">Whether you&rsquo;re interested in becoming a vendor, registering as a non-profit, or just want to say hello, we&rsquo;d love to hear from you!</p>
               <div className="mt-8 space-y-6">
-                <div><p className="font-semibold text-navy">Call or Text Us</p><p className="mt-1 text-lg">{MARKET.phone}</p>
-                  <p className="text-sm"><a href={`tel:${MARKET.phoneHref}`} className="underline">Call</a> • <a href={`sms:${MARKET.phoneHref}`} className="underline">Text</a></p></div>
+                <div><p className="font-semibold text-navy">Call Us</p><p className="mt-1 text-lg"><a href={`tel:${MARKET.phoneHref}`} className="underline">{MARKET.phone}</a></p></div>
                 <div><p className="font-semibold text-navy">Email Us</p><p className="mt-1 text-sm text-ink/70">Use the form and we&rsquo;ll reply by email.</p></div>
               </div>
               <Image src="/site/produce.png" alt="Fresh produce" width={1408} height={768} className="mt-8 hidden rounded-3xl shadow-lg lg:block" sizes="40vw" />
