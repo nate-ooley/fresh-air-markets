@@ -102,8 +102,13 @@ const only=(r.blockers||[]).filter(b=>b!=='booth_capacity_invalid');
 if (r.blockers?.includes('booth_capacity_invalid')) console.log('   (capacity could not be read here; it is checked by the deployed app, not this script)');
 process.exit(only.length?2:0)"
 
-echo "== 6/6 redeploying Production so the new variables take effect"
-npx vercel redeploy --prod >/dev/null 2>&1 || npx vercel --prod >/dev/null 2>&1 || echo "   (redeploy from the Vercel dashboard if this line printed)"
+if [ "$EXISTING" = "1" ]; then
+  echo "== 6/6 no new variables; no redeploy needed"
+else
+  # Never deploy from this working copy. A git push (or the dashboard's Redeploy)
+  # is what puts the new FAME_MARKET_ACCOUNT_ID into the running deployment.
+  echo "== 6/6 redeploy Production once: push any commit, or Vercel dashboard > Deployments > Redeploy"
+fi
 
 rm -f .env.production.local
 echo
