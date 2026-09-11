@@ -1,0 +1,57 @@
+# Fresh Air Markets portal — status and handover (September 11, 2026)
+
+## Live today
+
+Site: https://freshairmarketsandevents.com (staff sign in at `/login`).
+Hosting: Vercel project `farmers-market`. Database: Neon PostgreSQL, migrations 001–025.
+Payments: Square production, merchant ML16MNPG8Z0R5, webhook on the custom domain.
+Email: Resend from `hello@freshairmarketsandevents.com` (domain verified).
+Scheduler: GitHub Actions every 5 minutes, releases unpaid 48-hour holds.
+
+Proven end to end on production with a real $40 card payment:
+apply → staff approve → insurance uploaded and approved → reservation →
+Square checkout → private vendor link → payment → webhook marks paid →
+vendor and staff confirmation emails.
+
+Also live: vendor upload of insurance right after applying, 1–4 booths per
+market day, contact form and newsletter, staff password reset by emailed link,
+an admin endpoint that keeps Square's webhook URL aligned with the site.
+
+## Before handing to the client's market manager
+
+1. Switch the staff account to the manager's email (login, reset mailbox,
+   reply-to, staff notifications). Needs the manager's address.
+2. Refund the $40 test payment in Square (Nathan).
+3. Decide on the seven test applications: leave them (all named as tests) or
+   approve a one-off database cleanup to remove them. Approved applications
+   cannot be declined through the app.
+4. Rotate the Neon database password and update `DATABASE_URL` in Vercel.
+5. Confirm season settings: season 2026-2027, 50 booths, the Saturday date
+   list, $40 per booth per date.
+6. Client confirms the payout bank in Square.
+7. Move Vercel from Hobby to Pro (Hobby is for non-commercial use).
+8. Turn off old HighLevel workflows and delete HighLevel test contacts.
+9. Hand over: sign-in address, `docs/CHANGES-2026-09-10.md` (architecture),
+   `docs/vendor-emails.md` (every email and its trigger).
+
+## Next work, in order
+
+1. **HighLevel vendor import** (~10 vendors): one-time script that creates
+   them as approved applications with their dates and booths, attaches
+   insurance, reserves, creates checkout and sends the payment email.
+   Needs Nathan's spreadsheet export and the insurance files or an OK to
+   record the HighLevel approval.
+2. **Staff users**: individual logins, owner/manager roles, invitations.
+3. **Market roster report**: vendors per date grouped by category with booth
+   counts, pending-payment section, spreadsheet download, season overview.
+4. **"Add a vendor" staff screen** for walk-ups and phone applications.
+
+## Later improvements
+
+- Archive or withdraw an approved application or reservation.
+- More vendor emails: document decision, hold expired, market-day reminder,
+  booth assignment and Vendor Pass (the payment email promises these).
+- "Payment received" on the return-from-Square page without a session.
+- Retire the old booth-map dashboard (reads demo tables).
+- Re-add "Text Us" once A2P approval arrives.
+- Remove dormant HighLevel code once the client confirms it is gone for good.
