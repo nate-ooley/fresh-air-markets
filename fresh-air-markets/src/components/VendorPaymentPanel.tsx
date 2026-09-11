@@ -12,6 +12,7 @@ export default function VendorPaymentPanel() {
   const initialized = useRef(false);
   const actionLock = useRef(false);
   const loadLock = useRef(false);
+  const returnedRef = useRef(false);
   const [hasInvitation, setHasInvitation] = useState(false);
   const [reservation, setReservation] = useState<VendorPaymentView | null>(null);
   const [loading, setLoading] = useState(true);
@@ -32,7 +33,9 @@ export default function VendorPaymentPanel() {
       if (!response.ok || !record) {
         setReservation(null);
         setError(response.status === 401
-          ? "Open the private reservation link provided by the market. If you already used it on another device, ask the market for a new link."
+          ? (returnedRef.current
+            ? "Thanks for visiting Square. If your payment went through, a confirmation email is on its way. To see your reservation status here, open the private link from your payment email on this device."
+            : "Open the private reservation link provided by the market. If you already used it on another device, ask the market for a new link.")
           : "Your reservation is temporarily unavailable. Please try again before making another payment.");
         return;
       }
@@ -49,7 +52,8 @@ export default function VendorPaymentPanel() {
     initialized.current = true;
     invitation.current = invitationFromFragment(window.location.hash);
     const hadFragment = Boolean(window.location.hash);
-    setReturned(new URLSearchParams(window.location.search).get("returned") === "1");
+    returnedRef.current = new URLSearchParams(window.location.search).get("returned") === "1";
+    setReturned(returnedRef.current);
     // Clear bearer material before any fetch, navigation, or external checkout.
     window.history.replaceState(null, "", window.location.pathname);
     if (invitation.current) {

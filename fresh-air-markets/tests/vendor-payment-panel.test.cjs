@@ -218,6 +218,25 @@ test('returned=1 only reads current server status and never infers paid or autom
   assert.equal(calls.some(call => call.options.method === 'POST'), false);
 }));
 
+test('returning from Square without a vendor session explains that payment may still have gone through and points back to the private link', async () => browserBoundary('?returned=1', async ({ panel, calls, respond }) => {
+  respond(() => json({ error: 'unauthorized' }, 401));
+  panel.flushEffects();
+  await flush(); panel.render();
+  assert.equal(calls.length, 1);
+  assert.match(panel.text(), /a confirmation email is on its way/);
+  assert.match(panel.text(), /open the private link from your payment email/);
+  assert.doesNotMatch(panel.text(), /Payment received/);
+  assert.equal(panel.checkoutLinks().length, 0);
+}));
+
+test('opening the page cold without a session still asks for the private link', async () => browserBoundary('', async ({ panel, respond }) => {
+  respond(() => json({ error: 'unauthorized' }, 401));
+  panel.flushEffects();
+  await flush(); panel.render();
+  assert.match(panel.text(), /Open the private reservation link provided by the market/);
+  assert.doesNotMatch(panel.text(), /confirmation email is on its way/);
+}));
+
 test('paid, expired, deadline-reached and nonprofit results never render a payment checkout link', async () => {
   const variants = [
     { ...pendingReservation, status: 'paid', checkoutUrl: null },
