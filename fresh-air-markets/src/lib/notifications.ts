@@ -44,6 +44,16 @@ export async function notifyApplicationReceived(input: {
   return outcome(result);
 }
 
+/** True when the vendor already attached at least one current document (uploaded during or after applying). */
+async function hasCurrentDocument(applicationId: string, marketId: string, sql: Sql): Promise<boolean> {
+  try {
+    const [row] = await sql<{ n: number }[]>`
+      SELECT count(*)::int AS n FROM fame_application_documents
+      WHERE application_id = ${applicationId} AND market_id = ${marketId} AND is_current`;
+    return (row?.n ?? 0) > 0;
+  } catch { return false; }
+}
+
 export async function notifyApplicationDecision(input: {
   applicationId: string; marketId: string; action: "approve" | "request_changes" | "decline"; reason: string;
 }, sql?: Sql): Promise<NotificationOutcome> {
@@ -52,7 +62,8 @@ export async function notifyApplicationDecision(input: {
     const db = sql ?? configuredClient();
     const contact = await applicantContact(input.applicationId, input.marketId, db);
     if (!contact) return "not_sent";
-    const content = input.action === "approve" ? applicationApprovedEmail(contact)
+    const documentsOnFile = input.action === "approve" && await hasCurrentDocument(input.applicationId, input.marketId, db);
+    const content = input.action === "approve" ? applicationApprovedEmail({ ...contact, documentsOnFile })
       : input.action === "request_changes" ? applicationChangesRequestedEmail({ name: contact.name, reason: input.reason })
       : applicationDeclinedEmail({ name: contact.name, reason: input.reason });
     const kind = input.action === "approve" ? "application_approved" : input.action === "request_changes" ? "application_changes_requested" : "application_declined";

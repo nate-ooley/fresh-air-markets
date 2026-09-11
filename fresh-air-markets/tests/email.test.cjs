@@ -50,6 +50,10 @@ test('templates carry the essentials and escape HTML', () => {
   assert.match(changes.text, /Add <b>insurance<\/b> & license/);
   assert.match(changes.html, /Add &lt;b&gt;insurance&lt;\/b&gt; &amp; license/);
   assert.match(templates.applicationApprovedEmail({ name: 'Rosa', businessName: 'Sunrise Farms' }).text, /Sunrise Farms/);
+  assert.match(templates.applicationApprovedEmail({ name: 'Rosa', businessName: 'Sunrise Farms' }).text, /reply to this email with your certificate of insurance/);
+  assert.match(templates.applicationApprovedEmail({ name: 'Rosa', businessName: 'Sunrise Farms', documentsOnFile: true }).text, /We have the documents you uploaded/);
+  assert.doesNotMatch(templates.applicationApprovedEmail({ name: 'Rosa', businessName: 'Sunrise Farms', documentsOnFile: true }).text, /reply to this email with your certificate/);
+  assert.match(templates.applicationReceivedEmail({ name: 'Rosa', businessName: 'Sunrise Farms' }).text, /attached your certificate of insurance .* on the confirmation page/);
   assert.match(templates.paymentReceivedEmail({ name: 'Rosa', totalCents: 8000 }).text, /\$80\.00/);
   assert.match(templates.staffNewApplicationEmail({ name: 'Rosa', businessName: 'Sunrise Farms', email: 'r@example.com', type: 'Vendor', applicationId: 'abc', origin: 'https://p' }).text, /https:\/\/p\/applications\/abc/);
   assert.match(templates.staffContactMessageEmail({ name: 'Pat', email: 'p@example.com', phone: '', topic: 'general', message: 'Hello', origin: 'https://p' }).subject, /Pat/);

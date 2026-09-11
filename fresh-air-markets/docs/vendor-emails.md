@@ -20,7 +20,9 @@ Wording lives in `src/lib/email-templates.ts`; triggers in `src/lib/notification
 >
 > Thanks for applying to the North Port Farmer's Market with {business name}. Market staff review every application and will reply to this email address with a decision.
 >
-> If approved, we'll ask for any required documents (such as proof of insurance), confirm your dates and booth count, and send a payment request. Payment is due within 48 hours of that request.
+> If you attached your certificate of insurance (and food license, if you sell food) on the confirmation page, we have it. If not, you can reply to this email with it as a PDF, PNG or JPEG.
+>
+> If approved, we'll confirm your dates and booth count and send a payment request. Payment is due within 48 hours of that request.
 
 ### 2. Application approved
 **Trigger:** staff click **Approve** on the application page.
@@ -30,7 +32,9 @@ Wording lives in `src/lib/email-templates.ts`; triggers in `src/lib/notification
 >
 > Good news: your application for {business name} has been approved.
 >
-> Next step: reply to this email with your certificate of insurance (PDF, PNG or JPEG) and, if you sell food, your food license or permit. Once those are approved we'll confirm your market dates and booth count and send your payment request.
+> *If the vendor already uploaded a document:* We have the documents you uploaded with your application. Once market staff have checked them we'll confirm your market dates and booth count and send your payment request.
+>
+> *Otherwise:* Next step: reply to this email with your certificate of insurance (PDF, PNG or JPEG) and, if you sell food, your food license or permit. Once those are approved we'll confirm your market dates and booth count and send your payment request.
 
 ### 3. Changes requested
 **Trigger:** staff click **Request changes** and type a reason.

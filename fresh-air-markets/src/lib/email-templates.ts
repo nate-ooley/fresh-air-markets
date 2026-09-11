@@ -33,15 +33,18 @@ export function applicationReceivedEmail(input: { name: string; businessName: st
   return { subject: `We received your ${MARKET} application`, ...wrap([
     `Hi ${input.name},`,
     `Thanks for applying to the ${MARKET}${input.businessName ? ` with ${input.businessName}` : ""}. Market staff review every application and will reply to this email address with a decision.`,
-    "If approved, we'll ask for any required documents (such as proof of insurance), confirm your dates and booth count, and send a payment request. Payment is due within 48 hours of that request.",
+    "If you attached your certificate of insurance (and food license, if you sell food) on the confirmation page, we have it. If not, you can reply to this email with it as a PDF, PNG or JPEG.",
+    "If approved, we'll confirm your dates and booth count and send a payment request. Payment is due within 48 hours of that request.",
   ]) };
 }
 
-export function applicationApprovedEmail(input: { name: string; businessName: string }): EmailContent {
+export function applicationApprovedEmail(input: { name: string; businessName: string; documentsOnFile?: boolean }): EmailContent {
   return { subject: `Your ${MARKET} application is approved`, ...wrap([
     `Hi ${input.name},`,
     `Good news: your application${input.businessName ? ` for ${input.businessName}` : ""} has been approved.`,
-    "Next step: reply to this email with your certificate of insurance (PDF, PNG or JPEG) and, if you sell food, your food license or permit. Once those are approved we'll confirm your market dates and booth count and send your payment request.",
+    input.documentsOnFile
+      ? "We have the documents you uploaded with your application. Once market staff have checked them we'll confirm your market dates and booth count and send your payment request."
+      : "Next step: reply to this email with your certificate of insurance (PDF, PNG or JPEG) and, if you sell food, your food license or permit. Once those are approved we'll confirm your market dates and booth count and send your payment request.",
   ]) };
 }
 
