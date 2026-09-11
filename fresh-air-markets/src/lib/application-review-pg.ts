@@ -213,7 +213,7 @@ function sourceVendorCategory(source: Record<string, unknown>): string | null {
  * vendorCategory, and message or mission. HighLevel custom-field IDs must be
  * normalized into those explicit names by the handoff sender.
  */
-function reviewIdentitySnapshot(value: unknown): ApplicationReviewIdentitySnapshot | null {
+export function reviewIdentitySnapshot(value: unknown): ApplicationReviewIdentitySnapshot | null {
   const envelope = objectValue(value);
   const source = objectValue(envelope?.snapshot);
   if (!source) return null;

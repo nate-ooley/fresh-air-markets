@@ -16,8 +16,8 @@ vendor and staff confirmation emails.
 Also live: vendor upload of insurance right after applying, 1–4 booths per
 market day, contact form and newsletter, staff password reset by emailed link,
 an admin endpoint that keeps Square's webhook URL aligned with the site,
-and staff accounts: the owner invites managers from `/staff`, each with
-their own password and a Remove button.
+staff accounts (the owner invites managers from `/staff`), and the market
+roster at `/roster` with a per-date spreadsheet download.
 
 ## Before handing to the client's market manager
 
@@ -44,9 +44,7 @@ their own password and a Remove button.
    insurance, reserves, creates checkout and sends the payment email.
    Needs Nathan's spreadsheet export and the insurance files or an OK to
    record the HighLevel approval.
-2. **Market roster report**: vendors per date grouped by category with booth
-   counts, pending-payment section, spreadsheet download, season overview.
-3. **"Add a vendor" staff screen** for walk-ups and phone applications.
+2. **"Add a vendor" staff screen** for walk-ups and phone applications.
 
 ## Later improvements
 

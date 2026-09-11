@@ -140,6 +140,7 @@ export default function ApplicationReviewList() {
             <h1 className="font-display text-2xl text-pine-deep">Applications</h1>
           </div>
           <nav className="flex items-center gap-3 text-sm font-semibold text-pine">
+            <a href="/roster" className="rounded-full px-3 py-2 hover:bg-pine/10">Roster</a>
             <a href="/messages" className="rounded-full px-3 py-2 hover:bg-pine/10">Messages</a>
             <a href="/staff" className="rounded-full px-3 py-2 hover:bg-pine/10">Staff</a>
             <button type="button" onClick={() => void signOut()} className="rounded-full px-4 py-2 hover:bg-pine/10">Sign out</button>

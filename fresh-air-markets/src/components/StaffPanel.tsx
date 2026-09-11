@@ -66,6 +66,7 @@ export default function StaffPanel() {
           </div>
           <nav className="flex items-center gap-4 text-sm font-semibold text-pine">
             <Link href="/applications" className="hover:underline">Applications</Link>
+            <Link href="/roster" className="hover:underline">Roster</Link>
             <Link href="/messages" className="hover:underline">Messages</Link>
           </nav>
         </div>

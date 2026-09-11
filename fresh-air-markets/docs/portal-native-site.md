@@ -107,3 +107,16 @@ ends their access immediately.
   an owner row created on the spot.
 - Password reset works per person. Resetting the owner also updates the legacy
   account password so the two never diverge.
+
+## Market roster
+
+`/roster` shows, for one market Saturday, every vendor with a live final
+reservation on that date: confirmed (paid, or a non-profit with no payment
+due) grouped by vendor category with booth counts, then a separate "waiting on
+payment" list with each due time, plus totals against the booth capacity and a
+season-at-a-glance table. **Download spreadsheet** returns the same date as
+CSV (`GET /api/admin/roster?date=YYYY-MM-DD&format=csv`) for printing or the
+check-in sheet. The data comes from `fame_reservations` (dates, booths,
+state), `fame_reservation_finalizations` (category) and the application's
+latest snapshot (business, contact); expired, cancelled and declined
+reservations are excluded. Read-only; any signed-in staff member can use it.
