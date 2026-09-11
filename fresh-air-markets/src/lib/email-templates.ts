@@ -102,3 +102,11 @@ export function staffContactMessageEmail(input: { name: string; email: string; p
     `All messages: ${input.origin}/messages`,
   ]) };
 }
+
+export function passwordResetEmail(input: { name: string; link: string; minutes: number }): EmailContent {
+  return { subject: `Reset your ${ORG} staff password`, ...wrap([
+    `Hi ${input.name},`,
+    `Someone asked to reset the password for your market staff account. Use this link within ${input.minutes} minutes: ${input.link}`,
+    `The link works once. If you did not ask for this, ignore this email and your password stays the same.`,
+  ]) };
+}

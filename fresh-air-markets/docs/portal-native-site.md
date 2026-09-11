@@ -70,3 +70,16 @@ send is recorded as skipped and nothing else changes.
 DNS is verified, `onboarding@resend.dev` delivers only to the Resend account
 owner's own address. Sends are best-effort (no retry queue): the response and
 the log say `sent`, `failed` or `not_sent`.
+
+## Staff password reset
+
+Staff who forget their password use **Forgot your password?** on `/login`.
+`POST /api/auth/forgot-password` answers the same way for any email, and only
+accounts that exist receive an email from the configured sender with a link
+to `/reset-password#token=…`. The token is 32 random bytes; only its SHA-256
+is stored in `fame_password_resets` (migration 025) with a 30-minute expiry.
+`POST /api/auth/reset-password` spends the token and replaces the password in
+one transaction, so a link works exactly once, and a newer request supersedes
+older unused links. Both routes use the shared per-IP and per-email limiter.
+Passwords must be 12–200 characters. Existing signed-in sessions are not
+revoked by a reset; they expire on their own within seven days.
