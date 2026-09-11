@@ -29,8 +29,8 @@ roster at `/roster` with a per-date spreadsheet download.
    approve a one-off database cleanup to remove them. Approved applications
    cannot be declined through the app.
 4. Rotate the Neon database password and update `DATABASE_URL` in Vercel.
-5. Confirm season settings: season 2026-2027, 50 booths, the Saturday date
-   list, $40 per booth per date.
+5. Confirm season settings: season 2026-2027, 55 vendor booths plus 4 food
+   truck spaces per date, the Saturday date list, $40 per booth per date.
 6. Client confirms the payout bank in Square.
 7. Move Vercel from Hobby to Pro (Hobby is for non-commercial use).
 8. Turn off old HighLevel workflows and delete HighLevel test contacts.

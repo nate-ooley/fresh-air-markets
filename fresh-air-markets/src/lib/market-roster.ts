@@ -1,5 +1,6 @@
 import postgres from "postgres";
 import { reviewIdentitySnapshot } from "./application-review-pg";
+import { FOOD_TRUCK_CAPACITY } from "./vendor-booking-rules";
 
 /**
  * Market roster: who is coming on each market date, how many booths they
@@ -86,12 +87,25 @@ export async function loadMarketRoster(marketId: string, sql: Sql = configuredCl
 }
 
 export interface RosterGroup { category: string; vendors: RosterVendor[]; booths: number }
+export interface DayTotals {
+  confirmedVendors: number;
+  /** Vendor booths, food trucks excluded. */
+  confirmedBooths: number;
+  confirmedFoodTrucks: number;
+  pendingVendors: number;
+  pendingBooths: number;
+  pendingFoodTrucks: number;
+}
 export interface DayRoster {
   date: string;
   confirmed: RosterGroup[];
   pending: RosterGroup[];
-  totals: { confirmedVendors: number; confirmedBooths: number; pendingVendors: number; pendingBooths: number };
+  totals: DayTotals;
 }
+
+const isFoodTruck = (v: RosterVendor) => v.category === "Food Truck";
+const vendorBooths = (list: RosterVendor[]) => list.filter(v => !isFoodTruck(v)).reduce((s, v) => s + v.booths, 0);
+const foodTrucks = (list: RosterVendor[]) => list.filter(isFoodTruck).length;
 
 function grouped(vendors: RosterVendor[]): RosterGroup[] {
   const map = new Map<string, RosterVendor[]>();
@@ -116,26 +130,43 @@ export function rosterForDate(vendors: RosterVendor[], date: string): DayRoster 
     pending: grouped(pendingList),
     totals: {
       confirmedVendors: confirmedList.length,
-      confirmedBooths: confirmedList.reduce((s, v) => s + v.booths, 0),
+      confirmedBooths: vendorBooths(confirmedList),
+      confirmedFoodTrucks: foodTrucks(confirmedList),
       pendingVendors: pendingList.length,
-      pendingBooths: pendingList.reduce((s, v) => s + v.booths, 0),
+      pendingBooths: vendorBooths(pendingList),
+      pendingFoodTrucks: foodTrucks(pendingList),
     },
   };
 }
 
-export interface SeasonDay { date: string; confirmedVendors: number; confirmedBooths: number; pendingBooths: number; capacity: number; openBooths: number }
+export interface SeasonDay {
+  date: string;
+  confirmedVendors: number;
+  confirmedBooths: number;
+  pendingBooths: number;
+  capacity: number;
+  openBooths: number;
+  foodTrucks: number;
+  pendingFoodTrucks: number;
+  foodTruckCapacity: number;
+  openFoodTrucks: number;
+}
 
-/** Booth counts per market date across the season. */
-export function seasonOverview(vendors: RosterVendor[], dates: readonly string[], capacity: number): SeasonDay[] {
+/** Vendor booth and food truck counts per market date across the season. */
+export function seasonOverview(vendors: RosterVendor[], dates: readonly string[], capacity: number, foodTruckCapacity = FOOD_TRUCK_CAPACITY): SeasonDay[] {
   return dates.map(date => {
-    const day = rosterForDate(vendors, date);
+    const { totals } = rosterForDate(vendors, date);
     return {
       date,
-      confirmedVendors: day.totals.confirmedVendors,
-      confirmedBooths: day.totals.confirmedBooths,
-      pendingBooths: day.totals.pendingBooths,
+      confirmedVendors: totals.confirmedVendors,
+      confirmedBooths: totals.confirmedBooths,
+      pendingBooths: totals.pendingBooths,
       capacity,
-      openBooths: Math.max(0, capacity - day.totals.confirmedBooths - day.totals.pendingBooths),
+      openBooths: Math.max(0, capacity - totals.confirmedBooths - totals.pendingBooths),
+      foodTrucks: totals.confirmedFoodTrucks,
+      pendingFoodTrucks: totals.pendingFoodTrucks,
+      foodTruckCapacity,
+      openFoodTrucks: Math.max(0, foodTruckCapacity - totals.confirmedFoodTrucks - totals.pendingFoodTrucks),
     };
   });
 }

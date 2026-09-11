@@ -6,9 +6,9 @@ import Link from "next/link";
 interface Vendor { reservationId: string; applicationId: string; businessName: string; vendorName: string; email: string; phone: string; applicantType: string; category: string; booths: number; status: "paid" | "confirmed" | "pending"; paymentDueAt: string | null }
 interface Group { category: string; vendors: Vendor[]; booths: number }
 interface Roster {
-  date: string; dates: string[]; capacity: number;
-  day: { confirmed: Group[]; pending: Group[]; totals: { confirmedVendors: number; confirmedBooths: number; pendingVendors: number; pendingBooths: number } };
-  season: { date: string; confirmedVendors: number; confirmedBooths: number; pendingBooths: number; capacity: number; openBooths: number }[];
+  date: string; dates: string[]; capacity: number; foodTruckCapacity: number;
+  day: { confirmed: Group[]; pending: Group[]; totals: { confirmedVendors: number; confirmedBooths: number; confirmedFoodTrucks: number; pendingVendors: number; pendingBooths: number; pendingFoodTrucks: number } };
+  season: { date: string; confirmedVendors: number; confirmedBooths: number; pendingBooths: number; capacity: number; openBooths: number; foodTrucks: number; pendingFoodTrucks: number; foodTruckCapacity: number; openFoodTrucks: number }[];
 }
 
 const long = (date: string) => new Intl.DateTimeFormat("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric", timeZone: "UTC" }).format(new Date(`${date}T12:00:00Z`));
@@ -87,11 +87,12 @@ export default function RosterPanel() {
                 </label>
                 <a href={`/api/admin/roster?date=${encodeURIComponent(roster.date)}&format=csv`} className="rounded-full bg-pine px-5 py-2 text-sm font-semibold text-cream hover:bg-leaf">Download spreadsheet</a>
               </div>
-              <dl className="mt-6 grid grid-cols-2 gap-4 text-sm sm:grid-cols-4">
+              <dl className="mt-6 grid grid-cols-2 gap-4 text-sm sm:grid-cols-5">
                 <div><dt className="text-ink/55">Confirmed vendors</dt><dd className="mt-1 text-2xl font-bold text-pine">{roster.day.totals.confirmedVendors}</dd></div>
-                <div><dt className="text-ink/55">Confirmed booths</dt><dd className="mt-1 text-2xl font-bold text-pine">{roster.day.totals.confirmedBooths} <span className="text-sm font-normal text-ink/50">of {roster.capacity}</span></dd></div>
+                <div><dt className="text-ink/55">Vendor booths</dt><dd className="mt-1 text-2xl font-bold text-pine">{roster.day.totals.confirmedBooths} <span className="text-sm font-normal text-ink/50">of {roster.capacity}</span></dd></div>
+                <div><dt className="text-ink/55">Food trucks</dt><dd className="mt-1 text-2xl font-bold text-pine">{roster.day.totals.confirmedFoodTrucks} <span className="text-sm font-normal text-ink/50">of {roster.foodTruckCapacity}</span></dd></div>
                 <div><dt className="text-ink/55">Pending vendors</dt><dd className="mt-1 text-2xl font-bold text-clay">{roster.day.totals.pendingVendors}</dd></div>
-                <div><dt className="text-ink/55">Pending booths</dt><dd className="mt-1 text-2xl font-bold text-clay">{roster.day.totals.pendingBooths}</dd></div>
+                <div><dt className="text-ink/55">Pending booths</dt><dd className="mt-1 text-2xl font-bold text-clay">{roster.day.totals.pendingBooths}{roster.day.totals.pendingFoodTrucks > 0 && <span className="text-sm font-normal text-ink/50"> + {roster.day.totals.pendingFoodTrucks} truck{roster.day.totals.pendingFoodTrucks === 1 ? "" : "s"}</span>}</dd></div>
               </dl>
               {loading && <p role="status" className="mt-4 text-sm text-ink/60">Updating…</p>}
             </section>
@@ -109,7 +110,7 @@ export default function RosterPanel() {
               <h2 className="font-semibold text-pine-deep">Season at a glance</h2>
               <div className="mt-4 overflow-x-auto">
                 <table className="w-full text-left text-sm">
-                  <thead className="text-xs uppercase tracking-wide text-ink/50"><tr><th className="py-2 pr-4">Date</th><th className="py-2 pr-4 text-right">Vendors</th><th className="py-2 pr-4 text-right">Booths confirmed</th><th className="py-2 pr-4 text-right">Pending</th><th className="py-2 text-right">Open</th></tr></thead>
+                  <thead className="text-xs uppercase tracking-wide text-ink/50"><tr><th className="py-2 pr-4">Date</th><th className="py-2 pr-4 text-right">Vendors</th><th className="py-2 pr-4 text-right">Booths confirmed</th><th className="py-2 pr-4 text-right">Pending</th><th className="py-2 pr-4 text-right">Open booths</th><th className="py-2 text-right">Food trucks</th></tr></thead>
                   <tbody>
                     {roster.season.map(day => (
                       <tr key={day.date} className={`border-t border-pine/10 ${day.date === roster.date ? "bg-parchment/60" : ""}`}>
@@ -117,7 +118,8 @@ export default function RosterPanel() {
                         <td className="py-2 pr-4 text-right">{day.confirmedVendors}</td>
                         <td className="py-2 pr-4 text-right">{day.confirmedBooths} / {day.capacity}</td>
                         <td className="py-2 pr-4 text-right text-clay">{day.pendingBooths}</td>
-                        <td className="py-2 text-right">{day.openBooths}</td>
+                        <td className="py-2 pr-4 text-right">{day.openBooths}</td>
+                        <td className="py-2 text-right">{day.foodTrucks}{day.pendingFoodTrucks ? ` (+${day.pendingFoodTrucks})` : ""} / {day.foodTruckCapacity}</td>
                       </tr>
                     ))}
                   </tbody>

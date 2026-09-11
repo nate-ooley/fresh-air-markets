@@ -41,7 +41,8 @@ test('the roster needs a session and a matching market, defaults to the next mar
   const body = await ok.json();
   assert.equal(body.date, '2026-10-03');
   assert.equal(body.capacity, 50);
-  assert.deepEqual(body.day.totals, { confirmedVendors: 1, confirmedBooths: 2, pendingVendors: 0, pendingBooths: 0 });
+  assert.equal(body.foodTruckCapacity, 4);
+  assert.deepEqual(body.day.totals, { confirmedVendors: 1, confirmedBooths: 2, confirmedFoodTrucks: 0, pendingVendors: 0, pendingBooths: 0, pendingFoodTrucks: 0 });
   assert.equal(body.season.length, body.dates.length);
   const defaulted = await loadRoute().GET(get());
   assert.equal(defaulted.status, 200);

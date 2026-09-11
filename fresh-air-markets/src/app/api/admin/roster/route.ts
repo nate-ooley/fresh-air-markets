@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getSessionAccountId } from "@/lib/auth";
 import { freshAirFinalReservationConfig } from "@/lib/final-reservation-pg";
 import { loadMarketRoster, rosterCsv, rosterForDate, seasonOverview, validRosterDate } from "@/lib/market-roster";
+import { FOOD_TRUCK_CAPACITY } from "@/lib/vendor-booking-rules";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -36,7 +37,7 @@ export async function GET(request: NextRequest) {
     });
   }
   return NextResponse.json({
-    date, dates, capacity: config.boothCapacity,
+    date, dates, capacity: config.boothCapacity, foodTruckCapacity: FOOD_TRUCK_CAPACITY,
     day: rosterForDate(vendors, date),
     season: seasonOverview(vendors, dates, config.boothCapacity),
   }, { headers });

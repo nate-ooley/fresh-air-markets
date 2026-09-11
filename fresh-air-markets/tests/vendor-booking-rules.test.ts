@@ -142,3 +142,19 @@ test("malformed inventory and oversized totals fail closed", () => {
   assert.throws(() => checkVendorBooking(calendar, { ...base, boothsPerMarket: Number.MAX_SAFE_INTEGER }, empty));
   assert.throws(() => checkVendorBooking({ ...calendar, dates: [...dates, dates[0]] }, base, empty));
 });
+
+test("food trucks have their own four spaces and never consume or count against vendor booths", () => {
+  // A full vendor floor still admits a food truck.
+  const fullFloor = empty.map(row => ({ ...row, booths: 20, foodTrucks: 0 }));
+  assert.equal(checkVendorBooking(calendar, { ...base, vendorCategory: "Food Truck" }, fullFloor).allDatesAvailable, true);
+  assert.equal(checkVendorBooking(calendar, base, fullFloor).allDatesAvailable, false);
+  // Four trucks holding four booths leave all 20 vendor booths free.
+  const trucksOnly = empty.map(row => ({ ...row, booths: 4, foodTrucks: 4, foodTruckBooths: 4 }));
+  assert.equal(checkVendorBooking(calendar, { ...base, boothsPerMarket: 20 }, trucksOnly).allDatesAvailable, true);
+  assert.equal(checkVendorBooking(calendar, { ...base, boothsPerMarket: 21 }, trucksOnly).allDatesAvailable, false);
+  assert.equal(checkVendorBooking(calendar, { ...base, vendorCategory: "Food Truck" }, trucksOnly).availability[0].reasons[0], "Food truck limit reached (4)");
+  // Without an explicit truck booth count, each truck is assumed to hold one booth.
+  const implied = empty.map(row => ({ ...row, booths: 19, foodTrucks: 2 }));
+  assert.equal(checkVendorBooking(calendar, { ...base, boothsPerMarket: 3 }, implied).allDatesAvailable, true);
+  assert.equal(checkVendorBooking(calendar, { ...base, boothsPerMarket: 4 }, implied).allDatesAvailable, false);
+});

@@ -103,6 +103,7 @@ interface ExistingFinalizationRow {
 interface OccupancyRow {
   booths: number | string;
   food_trucks: number | string;
+  food_truck_booths: number | string;
   nonprofits: number | string;
 }
 
@@ -220,11 +221,12 @@ async function occupancyForDate(
   tx: QuerySql,
   marketId: string,
   date: string,
-): Promise<{ date: string; booths: number; foodTrucks: number; nonprofits: number }> {
+): Promise<{ date: string; booths: number; foodTrucks: number; foodTruckBooths: number; nonprofits: number }> {
   const [row] = await tx<OccupancyRow[]>`
     SELECT
       COALESCE(SUM(a.booth_quantity), 0)::int AS booths,
       COALESCE(COUNT(*) FILTER (WHERE f.vendor_category = 'Food Truck'), 0)::int AS food_trucks,
+      COALESCE(SUM(a.booth_quantity) FILTER (WHERE f.vendor_category = 'Food Truck'), 0)::int AS food_truck_booths,
       COALESCE(COUNT(*) FILTER (WHERE f.applicant_type = 'Non-Profit Organization'), 0)::int AS nonprofits
     FROM fame_reservation_allocations a
     JOIN fame_reservations r
@@ -238,6 +240,7 @@ async function occupancyForDate(
     date,
     booths: Number(row?.booths ?? 0),
     foodTrucks: Number(row?.food_trucks ?? 0),
+    foodTruckBooths: Number(row?.food_truck_booths ?? 0),
     nonprofits: Number(row?.nonprofits ?? 0),
   };
 }

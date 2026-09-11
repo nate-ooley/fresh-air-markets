@@ -113,8 +113,8 @@ ends their access immediately.
 `/roster` shows, for one market Saturday, every vendor with a live final
 reservation on that date: confirmed (paid, or a non-profit with no payment
 due) grouped by vendor category with booth counts, then a separate "waiting on
-payment" list with each due time, plus totals against the booth capacity and a
-season-at-a-glance table. **Download spreadsheet** returns the same date as
+payment" list with each due time, plus totals against the vendor booth capacity (`FAME_BOOTH_CAPACITY`, 55)
+and the separate four food truck spaces, and a season-at-a-glance table. **Download spreadsheet** returns the same date as
 CSV (`GET /api/admin/roster?date=YYYY-MM-DD&format=csv`) for printing or the
 check-in sheet. The data comes from `fame_reservations` (dates, booths,
 state), `fame_reservation_finalizations` (category) and the application's

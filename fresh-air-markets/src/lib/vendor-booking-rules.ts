@@ -17,10 +17,17 @@ export interface BookingRequest {
 
 export interface Occupancy {
   date: string;
+  /** All booths held on the date, food trucks included. */
   booths: number;
+  /** Food truck reservations on the date. */
   foodTrucks: number;
+  /** Booths those food trucks hold; assumed one each when omitted. */
+  foodTruckBooths?: number;
   nonprofits: number;
 }
+
+/** Food trucks have their own spaces, separate from the vendor booth count. */
+export const FOOD_TRUCK_CAPACITY = 4;
 
 export interface DocumentState {
   applicationStatus: string;
@@ -109,6 +116,7 @@ export function checkVendorBooking(
     if (!isDate(row.date) || byDate.has(row.date)) throw new Error("Invalid or duplicate occupancy date.");
     integer(row.booths, 0, "Occupied booths");
     integer(row.foodTrucks, 0, "Food truck count");
+    if (row.foodTruckBooths !== undefined) integer(row.foodTruckBooths, 0, "Food truck booths");
     integer(row.nonprofits, 0, "Nonprofit count");
     byDate.set(row.date, row);
   }
@@ -117,8 +125,11 @@ export function checkVendorBooking(
     const current = byDate.get(date);
     if (!current) throw new Error(`Missing occupancy for ${date}.`);
     const reasons: string[] = [];
-    if (current.booths + request.boothsPerMarket > calendar.boothCapacity) reasons.push("Not enough booth spaces");
-    if (isFoodTruck && current.foodTrucks >= 4) reasons.push("Food truck limit reached (4)");
+    // Vendor booths and food truck spaces are separate pools: a food truck
+    // never takes a vendor booth, and vendor booths never take truck spaces.
+    const vendorBooths = Math.max(0, current.booths - (current.foodTruckBooths ?? current.foodTrucks));
+    if (!isFoodTruck && vendorBooths + request.boothsPerMarket > calendar.boothCapacity) reasons.push("Not enough booth spaces");
+    if (isFoodTruck && current.foodTrucks >= FOOD_TRUCK_CAPACITY) reasons.push(`Food truck limit reached (${FOOD_TRUCK_CAPACITY})`);
     if (isNonprofit && current.nonprofits >= 1) reasons.push("Featured nonprofit slot filled (1)");
     return { date, available: reasons.length === 0, reasons };
   });
