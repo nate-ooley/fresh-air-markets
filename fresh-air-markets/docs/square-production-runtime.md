@@ -24,3 +24,18 @@ Migration `016-square-production-environment-fences.sql` permits Production reco
 Before launch: verify database migration, private account, complete vendor invitation/reservation/payment UI, domain routing, all native HighLevel workflow and email acceptance, and Square Sandbox end-to-end acceptance. Then the owner can enter production credentials and enable the explicit production toggle. No live settings, provider calls or charges were changed during implementation.
 
 Official provider references: [environment-specific credentials](https://developer.squareup.com/docs/build-basics/access-tokens), [create payment link and response URL](https://developer.squareup.com/reference/square/checkout/create-payment-link), [Sandbox link example](https://developer.squareup.com/docs/checkout-api/manage-checkout), [link cancellation proof](https://developer.squareup.com/reference/square/checkout-api/DeletePaymentLink).
+
+## Keeping the Square webhook URL in sync
+
+Square delivers payment events only to the `notification_url` stored on its
+webhook subscription, and the checkout route refuses to run unless
+`SQUARE_WEBHOOK_URL` equals `/api/payments/square/webhook` on
+`FAME_VENDOR_PORTAL_ORIGIN`. After changing the portal origin, a signed-in
+production manager can compare and fix Square's side without the Developer
+console:
+
+- `GET /api/admin/square/webhook` reports the subscription Square holds for the
+  portal path and whether it matches `SQUARE_WEBHOOK_URL`.
+- `POST /api/admin/square/webhook` (same origin) rewrites that subscription's
+  URL to `SQUARE_WEBHOOK_URL`. It never creates, deletes or re-keys
+  subscriptions; the signature key is unchanged.

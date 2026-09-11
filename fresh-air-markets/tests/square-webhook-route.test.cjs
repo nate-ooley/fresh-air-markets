@@ -4,153 +4,65 @@ const fs = require('node:fs');
 const path = require('node:path');
 const Module = require('node:module');
 const ts = require('typescript');
+const { NextRequest } = require('next/server');
 
-function loadRoute({ checkout, webhook, handle, persist, qaSupport, qaSigner, qaRollback } = {}) {
-  const filename = path.resolve(__dirname, '../src/app/api/payments/square/webhook/route.ts');
-  const compiled = ts.transpileModule(fs.readFileSync(filename, 'utf8'), {
-    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
-  }).outputText;
+const NEW = 'https://freshairmarketsandevents.com/api/payments/square/webhook';
+const production = {
+  VERCEL: '1', VERCEL_ENV: 'production', FAME_MARKET_ACCOUNT_ID: 'fame-market', FAME_VENDOR_PORTAL_ORIGIN: 'https://freshairmarketsandevents.com',
+  SQUARE_ENVIRONMENT: 'production', SQUARE_ALLOW_LIVE_PAYMENTS: 'true', SQUARE_ACCESS_TOKEN: 'tok', SQUARE_LOCATION_ID: 'L1', SQUARE_MERCHANT_ID: 'M1',
+  SQUARE_WEBHOOK_SIGNATURE_KEY: 'sig', SQUARE_WEBHOOK_URL: NEW,
+};
+
+function loadRoute({ session = 'fame-market', sync } = {}) {
+  const filename = path.resolve(__dirname, '../src/app/api/admin/square/webhook/route.ts');
+  const compiled = ts.transpileModule(fs.readFileSync(filename, 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
   const mod = new Module(filename, module);
-  mod.filename = filename;
-  mod.paths = module.paths;
+  mod.filename = filename; mod.paths = module.paths;
   mod.require = (id) => {
-    if (id === '@/lib/square') return {
-      squarePaymentRuntimeConfig: checkout || (() => ({ environment: 'sandbox', accessToken: 'qa', locationId: 'location' })),
-      squareWebhookConfig: webhook || (() => ({ webhookSignatureKey: 'key', webhookUrl: 'https://unit-test.invalid/webhook' })),
-    };
-    if (id === '@/lib/square-webhook') return { handleSquarePaymentWebhook: handle || (async (_request, _config, write) => {
-      await write({ eventId: 'qa-event' });
-      return Response.json({ status: 'paid' });
-    }) };
-    if (id === '@/lib/square-webhook-pg') return { persistSquarePaymentWebhook: persist || (async () => ({ kind: 'paid' })) };
-    if (id === '@/lib/square-qa-faults') return {
-      QA_SIGNER_HEADER: 'x-fame-square-qa-signer',
-      squareQaSupportConfig: qaSupport || (() => null),
-      squareQaSignerAuthorization: qaSigner || (() => 'absent'),
-      squareQaWebhookRollbackEventId: qaRollback || (() => null),
-    };
-    if (id === '@/lib/notifications') return { notifyPaymentReceived: async () => 'not_sent' };
+    if (id === '@/lib/auth') return { getSessionAccountId: async () => session };
+    if (id === '@/lib/seed') return { DEMO_MARKET_ID: 'demo-market' };
+    if (id === '@/lib/square-webhook-subscription') return { syncSquareWebhookSubscription: sync };
+    if (id.startsWith('@/lib/')) return require('../.test-build/' + id.slice(6) + '.js');
     return require(id);
   };
   mod._compile(compiled, filename);
   return mod.exports;
 }
 
-async function withDatabase(fn) {
-  const original = process.env.DATABASE_URL;
-  process.env.DATABASE_URL = 'postgres://qa/unused';
-  try { await fn(); } finally {
-    if (original === undefined) delete process.env.DATABASE_URL;
-    else process.env.DATABASE_URL = original;
-  }
+function withEnv(patch, run) {
+  const saved = { ...process.env };
+  for (const key of Object.keys(process.env)) if (key.startsWith('SQUARE_') || key.startsWith('FAME_') || key.startsWith('VERCEL')) delete process.env[key];
+  Object.assign(process.env, patch);
+  return run().finally(() => { for (const key of Object.keys(process.env)) delete process.env[key]; Object.assign(process.env, saved); });
 }
 
-test('Square webhook route refuses missing durable storage before reading configuration or a body', async () => {
-  const original = process.env.DATABASE_URL;
-  delete process.env.DATABASE_URL;
-  try {
-    let configCalls = 0;
-    const route = loadRoute({ checkout: () => { configCalls++; throw new Error('must not run'); } });
-    const response = await route.POST(new Request('https://unit-test.invalid/webhook', { method: 'POST' }));
-    assert.equal(response.status, 503);
-    assert.equal(configCalls, 0);
-  } finally {
-    if (original === undefined) delete process.env.DATABASE_URL;
-    else process.env.DATABASE_URL = original;
-  }
-});
+const request = (method, headers = {}) => new NextRequest('https://freshairmarketsandevents.com/api/admin/square/webhook', { method, headers });
 
-test('Square webhook route passes only the fixed configured identity and persistence callback to the verified raw-body boundary', async () => {
-  await withDatabase(async () => {
-    let supplied;
-    let persisted;
-    const route = loadRoute({
-      handle: async (_request, config, write) => {
-        supplied = config;
-        persisted = await write({ eventId: 'qa-event', merchantId: 'qa-merchant' });
-        return Response.json({ status: 'paid' });
-      },
-      persist: async (event, config) => ({ ...event, config }),
-    });
-    const response = await route.POST(new Request('https://attacker.invalid/', { method: 'POST', body: '{"host":"attacker"}' }));
-    assert.equal(response.status, 200);
-    assert.deepEqual(supplied, { webhookSignatureKey: 'key', webhookUrl: 'https://unit-test.invalid/webhook' });
-    assert.deepEqual(persisted, { eventId: 'qa-event', merchantId: 'qa-merchant', config: { environment: 'sandbox' } });
+test('webhook status and sync require the production manager session and a same-origin browser request', () => withEnv(production, async () => {
+  let calls = [];
+  const sync = async (config, expected, options) => { calls.push([config.accessToken, expected, options.apply]); return { expectedUrl: expected, subscription: null, inSync: false, updated: false, candidates: 0 }; };
+  assert.equal((await loadRoute({ session: null, sync }).GET(request('GET'))).status, 401);
+  assert.equal((await loadRoute({ session: 'demo-market', sync }).GET(request('GET'))).status, 403);
+  assert.equal((await loadRoute({ session: 'other-market', sync }).GET(request('GET'))).status, 403);
+  assert.equal((await loadRoute({ sync }).POST(request('POST', { origin: 'https://evil.example' }))).status, 403);
+  assert.equal((await loadRoute({ sync }).POST(request('POST', { 'sec-fetch-site': 'cross-site' }))).status, 403);
+  assert.equal(calls.length, 0);
+  const status = await loadRoute({ sync }).GET(request('GET'));
+  assert.equal(status.status, 200);
+  const apply = await loadRoute({ sync }).POST(request('POST', { origin: 'https://freshairmarketsandevents.com' }));
+  assert.equal(apply.status, 200);
+  assert.deepEqual(calls, [['tok', NEW, false], ['tok', NEW, true]]);
+}));
+
+test('webhook sync refuses outside production and answers 503 when Square is unreachable', async () => {
+  const sync = async () => { throw new Error('boom'); };
+  await withEnv({ ...production, VERCEL_ENV: 'preview' }, async () => {
+    assert.equal((await loadRoute({ sync }).POST(request('POST'))).status, 403);
   });
-});
-
-test('Square webhook route blocks disabled production, malformed configuration, and persistence diagnostics', async () => {
-  await withDatabase(async () => {
-    let calls = 0;
-    const production = loadRoute({
-      checkout: () => { throw new Error('Live Square payments are disabled.'); },
-      handle: async () => { calls++; throw new Error('must not run'); },
-    });
-    assert.equal((await production.POST(new Request('https://unit-test.invalid/', { method: 'POST' }))).status, 503);
-    assert.equal(calls, 0);
-
-    const broken = loadRoute({ checkout: () => { throw new Error('private access token'); } });
-    const body = await (await broken.POST(new Request('https://unit-test.invalid/', { method: 'POST' }))).json();
-    assert.deepEqual(body, { error: 'Square payment processing is not configured.' });
-
-    let runtimeCalls = 0;
-    const previewGateFailure = loadRoute({
-      checkout: () => { throw new Error('not Preview'); },
-      handle: async () => { runtimeCalls++; return Response.json({ status: 'paid' }); },
-    });
-    assert.equal((await previewGateFailure.POST(new Request('https://unit-test.invalid/', { method: 'POST' }))).status, 503);
-    assert.equal(runtimeCalls, 0);
-
-    const unsafeQaControl = loadRoute({
-      qaSupport: () => { throw new Error('QA controls are not permitted here'); },
-      handle: async () => { calls++; throw new Error('must not run'); },
-    });
-    assert.equal((await unsafeQaControl.POST(new Request('https://unit-test.invalid/', { method: 'POST' }))).status, 503);
-    assert.equal(calls, 0);
+  await withEnv(production, async () => {
+    assert.equal((await loadRoute({ sync }).POST(request('POST'))).status, 503);
   });
-});
-
-test('Square webhook rollback is available only to the configured Preview QA signer', async () => {
-  await withDatabase(async () => {
-    let writes = 0;
-    const denied = loadRoute({
-      qaSupport: () => ({ fault: { kind: 'webhook', mode: 'webhook_rollback', eventId: 'qa-event' }, signerSecret: 'private' }),
-      qaSigner: () => 'unauthorized',
-      handle: async () => { writes++; return Response.json({ status: 'paid' }); },
-    });
-    const deniedResponse = await denied.POST(new Request('https://unit-test.invalid/webhook', {
-      method: 'POST', headers: { 'x-fame-square-qa-signer': 'wrong' }, body: '{}',
-    }));
-    assert.equal(deniedResponse.status, 401);
-    assert.equal(writes, 0);
-
-    let persisted;
-    const authorized = loadRoute({
-      qaSupport: () => ({ fault: { kind: 'webhook', mode: 'webhook_rollback', eventId: 'qa-event' }, signerSecret: 'private' }),
-      qaSigner: () => 'authorized',
-      qaRollback: () => 'qa-event',
-      handle: async (_request, _config, write) => {
-        persisted = await write({ eventId: 'qa-event' });
-        return Response.json({ status: 'paid' });
-      },
-      persist: async (_event, config) => config,
-    });
-    assert.equal((await authorized.POST(new Request('https://unit-test.invalid/webhook', { method: 'POST', body: '{}' }))).status, 200);
-    assert.deepEqual(persisted, { environment: 'sandbox', qaRollbackEventId: 'qa-event' });
-  });
-});
-
-
-test('enabled production webhook carries pinned merchant/location and production environment into durable reconciliation', async () => {
-  await withDatabase(async () => {
-    let written;
-    const route = loadRoute({
-      checkout: () => ({ environment: 'production', accessToken: 'never-output', locationId: 'live-location', merchantId: 'live-merchant' }),
-      handle: async (_request, _config, write) => { await write({ eventId: 'event-live' }); return Response.json({ status: 'paid' }); },
-      persist: async (event, config) => { written = { event, config }; return { kind: 'paid' }; },
-    });
-    const result = await route.POST(new Request('https://freshairmarketsandevents.com/api/payments/square/webhook', { method: 'POST' }));
-    assert.equal(result.status, 200);
-    assert.deepEqual(written, { event: { eventId: 'event-live' }, config: { environment: 'production', merchantId: 'live-merchant', locationId: 'live-location' } });
+  await withEnv({ ...production, SQUARE_WEBHOOK_URL: undefined }, async () => {
+    assert.equal((await loadRoute({ sync: async () => ({}) }).GET(request('GET'))).status, 503);
   });
 });
