@@ -70,7 +70,7 @@ export FAME_MARKET_ACCOUNT_ID="$ACCOUNT_ID"
 npx vercel env rm FAME_MARKET_ACCOUNT_ID production --yes >/dev/null 2>&1 || true
 printf '%s' "$ACCOUNT_ID" | npx vercel env add FAME_MARKET_ACCOUNT_ID production >/dev/null
 
-echo "== 5/6 applying migrations 001-022 and checking readiness"
+echo "== 5/6 applying migrations 001-023 and checking readiness"
 node scripts/database-readiness.mjs apply --production --expected-host="$HOST" > "$CRED_DIR/apply.json" || { cat "$CRED_DIR/apply.json"; exit 1; }
 node scripts/database-readiness.mjs check --production --expected-host="$HOST" > "$CRED_DIR/check.json" || true
 node -e "

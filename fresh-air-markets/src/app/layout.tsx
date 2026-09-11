@@ -6,9 +6,9 @@ const fraunces = Fraunces({ subsets: ["latin"], variable: "--font-fraunces" });
 const inter = Inter({ subsets: ["latin"], variable: "--font-inter" });
 
 export const metadata: Metadata = {
-  title: "Fresh Air Markets & Events — Vendor Portal",
+  title: "Fresh Air Markets and Events — Southwest Florida Community Markets",
   description:
-    "Apply to join the North Port Farmer’s Market and access market staff tools.",
+    "North Port Farmer’s Market every Saturday 9am–1pm at US 41 & Sumter. Local vendors, food trucks, live entertainment. Apply to be a vendor or non-profit.",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

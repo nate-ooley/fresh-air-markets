@@ -6,7 +6,7 @@ source receipt, queues one internal notification, and queues a separate exact
 HighLevel agreement-status custom-field update only after a document has been bound to the
 exact portal application that received it.
 
-Apply all migrations 001–022 to the reviewed database in numeric order, with
+Apply all migrations 001–023 to the reviewed database in numeric order, with
 old stage-writing workers paused during migration 021.
 
 Set these private server variables in the verified deployment:

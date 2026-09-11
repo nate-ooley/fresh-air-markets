@@ -39,7 +39,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ slu
   if (account.id === process.env.FAME_MARKET_ACCOUNT_ID?.trim()) {
     return NextResponse.json({
       error: "Use the Fresh Air Markets vendor application form.",
-      applicationUrl: "https://freshairmarketsandevents.com/vendors",
+      applicationUrl: "/apply",
     }, { status: 410, headers: { "Cache-Control": "no-store" } });
   }
 

@@ -99,7 +99,7 @@ test('configured Fresh Air intake redirects to the existing application without 
     const response = await route.POST(request('POST', { ...inquiry, marketId: 'other-market' }), params);
     assert.equal(response.status, 410);
     assert.equal(response.headers.get('cache-control'), 'no-store');
-    assert.equal((await response.json()).applicationUrl, 'https://freshairmarketsandevents.com/vendors');
+    assert.equal((await response.json()).applicationUrl, '/apply');
     assert.equal(calls.lookups, 1);
     assert.equal(calls.writes + calls.crm, 0);
   });

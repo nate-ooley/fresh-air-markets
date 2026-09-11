@@ -301,7 +301,7 @@ test('legacy subscription signup cannot create accounts, sessions, or CRM events
     }));
     assert.equal(response.status, 410);
     assert.equal(response.headers.get('set-cookie'), null);
-    assert.equal((await response.json()).applicationUrl, 'https://freshairmarketsandevents.com/vendors');
+    assert.equal((await response.json()).applicationUrl, '/apply');
   }
   assert.equal(effects, 0);
 });

@@ -46,7 +46,7 @@ merchant, location, order, amount and reservation before the page says paid.
 
 ## Required release work
 
-- Apply and verify migrations 001–022 on the reviewed Preview database, including
+- Apply and verify migrations 001–023 on the reviewed Preview database, including
   the private Fresh Air account and confirmed overall booth capacity.
 - Set `FAME_VENDOR_PORTAL_ORIGIN` as **Config** to the exact Preview HTTPS origin
   used for testing. Production must use `https://freshairmarketsandevents.com`.

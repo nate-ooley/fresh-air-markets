@@ -9,6 +9,6 @@ export async function POST(req: NextRequest) {
   if (!body) return NextResponse.json({ error: "A JSON object body is required." }, { status: 400 });
   return NextResponse.json({
     error: "Public market account signup is closed. Use the vendor application form.",
-    applicationUrl: "https://freshairmarketsandevents.com/vendors",
+    applicationUrl: "/apply",
   }, { status: 410 });
 }

@@ -1,6 +1,6 @@
 import { redirect } from "next/navigation";
 
-// Old public signup links must lead vendors to the existing application form.
+// Old public signup links lead vendors to the in-app application form.
 export default function SignupPage() {
-  redirect("https://freshairmarketsandevents.com/vendors");
+  redirect("/apply");
 }
