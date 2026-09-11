@@ -20,6 +20,7 @@ export default function ApplyForm({ dates, categories, fullSeasonLabel, maxBooth
   const [booths, setBooths] = useState(1);
   const [busy, setBusy] = useState(false);
   const [done, setDone] = useState<"captured" | "duplicate" | null>(null);
+  const [uploadToken, setUploadToken] = useState<string | null>(null);
   const [errors, setErrors] = useState<string[]>([]);
   const vendor = type === "Vendor";
   const months = useMemo(() => {
@@ -50,6 +51,7 @@ export default function ApplyForm({ dates, categories, fullSeasonLabel, maxBooth
       const response = await fetch("/api/apply", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
       const payload = await response.json().catch(() => null);
       if (!response.ok) { setErrors(Array.isArray(payload?.errors) ? payload.errors : [typeof payload?.error === "string" ? payload.error : "Your application could not be submitted."]); return; }
+      setUploadToken(typeof payload?.uploadToken === "string" ? payload.uploadToken : null);
       setDone(payload?.status === "duplicate" ? "duplicate" : "captured");
       window.scrollTo({ top: 0, behavior: "smooth" });
     } catch { setErrors(["Your application could not be submitted. Please try again."]); }
@@ -63,8 +65,9 @@ export default function ApplyForm({ dates, categories, fullSeasonLabel, maxBooth
         <p className="mt-3 text-ink/70">
           {done === "duplicate"
             ? "Nothing changed since your last submission, so we kept your original application on file."
-            : "Thank you! Market staff will review your application and reply by email with a decision. If approved, you'll be asked for any required documents, then you'll confirm your dates and receive a payment request."}
+            : "Thank you! Market staff will review your application and reply by email with a decision. Once approved and your documents are on file, you'll confirm your dates and receive a payment request."}
         </p>
+        {uploadToken && <DocumentUploads token={uploadToken} vendor={vendor} />}
         <Link href="/" className="mt-6 inline-block rounded-full bg-sky px-6 py-3 font-semibold text-white">Back to the market</Link>
       </div>
     );
@@ -163,5 +166,51 @@ export default function ApplyForm({ dates, categories, fullSeasonLabel, maxBooth
       )}
       <button type="submit" disabled={busy} className="w-full rounded-full bg-sky px-6 py-4 text-lg font-semibold text-white shadow hover:bg-navy disabled:opacity-50 sm:w-auto">{busy ? "Submitting…" : "Submit Application"}</button>
     </form>
+  );
+}
+
+
+type UploadState = { status: "idle" | "busy" | "done" | "error"; message: string };
+
+/** Optional post-submit uploads; the token is scoped to this application and expires in two hours. */
+function DocumentUploads({ token, vendor }: { token: string; vendor: boolean }) {
+  const [state, setState] = useState<Record<string, UploadState>>({});
+  const kinds = vendor
+    ? [{ kind: "insurance", label: "Certificate of insurance", note: "Required before dates can be reserved." },
+       { kind: "food_license", label: "Food license or permit", note: "Only if you sell food or drinks." }]
+    : [{ kind: "insurance", label: "Certificate of insurance", note: "If your organization carries one." }];
+  const upload = async (kind: string, file: File | null) => {
+    if (!file) return;
+    setState(s => ({ ...s, [kind]: { status: "busy", message: `Uploading ${file.name}…` } }));
+    try {
+      const form = new FormData();
+      form.set("token", token); form.set("kind", kind); form.set("file", file, file.name);
+      const response = await fetch("/api/apply/documents", { method: "POST", body: form, cache: "no-store" });
+      const payload = await response.json().catch(() => null);
+      if (!response.ok) throw new Error(typeof payload?.error === "string" ? payload.error : "The file was not accepted.");
+      setState(s => ({ ...s, [kind]: { status: "done", message: payload?.duplicate ? "Already on file." : `Received ${file.name}. Staff will review it.` } }));
+    } catch (err) {
+      setState(s => ({ ...s, [kind]: { status: "error", message: err instanceof Error ? err.message : "The file was not accepted." } }));
+    }
+  };
+  return (
+    <div className="mt-6 rounded-2xl border border-navy/10 bg-parchment/40 p-5">
+      <h3 className="font-semibold text-navy">Save a step: upload your documents now</h3>
+      <p className="mt-1 text-sm text-ink/65">PDF, PNG or JPEG up to 10 MB. You can also send them later by replying to your confirmation email.</p>
+      <div className="mt-4 space-y-4">
+        {kinds.map(item => {
+          const current = state[item.kind] ?? { status: "idle", message: "" };
+          return (
+            <div key={item.kind}>
+              <label className={LABEL}>{item.label}
+                <input type="file" accept=".pdf,.png,.jpg,.jpeg,application/pdf,image/png,image/jpeg" disabled={current.status === "busy" || current.status === "done"}
+                  onChange={e => void upload(item.kind, e.target.files?.[0] ?? null)} className={`mt-1 block ${FIELD}`} />
+              </label>
+              <p className={`mt-1 text-sm ${current.status === "error" ? "text-clay" : current.status === "done" ? "text-navy" : "text-ink/55"}`}>{current.message || item.note}</p>
+            </div>
+          );
+        })}
+      </div>
+    </div>
   );
 }

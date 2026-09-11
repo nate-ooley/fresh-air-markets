@@ -34,6 +34,8 @@ function configuredClient(): Sql {
  */
 export const MANAGER_UPLOAD_SCAN_REASON =
   "Uploaded by signed-in market staff; type, size and file signature verified. No external malware scanner is configured.";
+export const APPLICANT_UPLOAD_SCAN_REASON =
+  "Uploaded by the applicant with a signed application token; type, size and file signature verified. No external malware scanner is configured.";
 
 export interface ManagerDocumentUploadInput {
   applicationId: string;
@@ -43,6 +45,8 @@ export interface ManagerDocumentUploadInput {
   filename: string;
   declaredContentType: string;
   body: PrivateDocumentByteSource;
+  /** Who is uploading; recorded in the source id and validation reason. */
+  actor?: "staff" | "applicant";
 }
 
 export type ManagerDocumentUploadResult =
@@ -84,7 +88,8 @@ export async function uploadApplicationDocumentAsManager(
   if (!application) return { kind: "not_found" };
 
   const uploadId = randomUUID();
-  const sourceId = `manager-upload:${uploadId}`;
+  const actor = input.actor ?? "staff";
+  const sourceId = `${actor === "applicant" ? "applicant-upload" : "manager-upload"}:${uploadId}`;
   const storageKey = `documents/${keySegment(input.marketId)}/${input.applicationId}/${uploadId}`;
   const transfer = await transferPrivateApplicationDocument({
     storageKey, sourceFileId: sourceId, filename: input.filename,
@@ -116,7 +121,7 @@ export async function uploadApplicationDocumentAsManager(
   const scan = await recordApplicationDocumentScan({
     documentId: persisted.document.id, marketId: input.marketId,
     expectedVersion: persisted.document.version, sourceEventId: sourceId,
-    outcome: "clean", reason: MANAGER_UPLOAD_SCAN_REASON,
+    outcome: "clean", reason: actor === "applicant" ? APPLICANT_UPLOAD_SCAN_REASON : MANAGER_UPLOAD_SCAN_REASON,
   }, sql);
   const validationState: DocumentValidationState = scan.kind === "applied" || scan.kind === "duplicate"
     ? scan.validationState : persisted.document.validationState;

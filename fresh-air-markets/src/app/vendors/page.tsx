@@ -37,8 +37,8 @@ const REQUIREMENTS = [
   ] },
 ];
 const STEPS = [
-  { title: "Fill Out the Application", body: "Complete the vendor application. Tell us about your business, what you sell, and which dates you'd like to join us. You'll sign the Vendor Agreement as part of the form." },
-  { title: "Receive Approval & Provide Documents", body: "We review your application and respond with an approval decision. If approved, send any requested documents, such as proof of insurance, for review." },
+  { title: "Fill Out the Application", body: "Complete the vendor application. Tell us about your business, what you sell, how many booths you want, and which dates you'd like to join us. You'll sign the Vendor Agreement as part of the form and can upload your proof of insurance right away." },
+  { title: "Receive Approval", body: "We review your application and respond with an approval decision. If you haven't uploaded your documents yet, reply to your approval email with proof of insurance and, for food vendors, your license or permit." },
   { title: "Confirm Dates & Complete Checkout", body: "After required documents are approved, your final market dates and booth quantity are confirmed. Once your dates and booths are reserved and you receive your payment request, complete checkout within 48 hours." },
   { title: "Get Your Confirmation", body: "Once payment is processed, you'll receive a confirmation with your booth assignment and market map, a copy of your signed vendor agreement, and your Vendor Pass for each registered weekend." },
   { title: "Market Day Reminders", body: "A few days before each market you're registered for, you'll receive a reminder with setup instructions, vendor rules and guidelines, and any other important info to help your day go smoothly." },

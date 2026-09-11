@@ -4,7 +4,7 @@ const { createHash } = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 const postgres = require('postgres');
-const { uploadApplicationDocumentAsManager, listApplicationDocuments, readApplicationDocumentFile, MANAGER_UPLOAD_SCAN_REASON } = require('../../.test-build/application-document-upload.js');
+const { uploadApplicationDocumentAsManager, listApplicationDocuments, readApplicationDocumentFile, MANAGER_UPLOAD_SCAN_REASON, APPLICANT_UPLOAD_SCAN_REASON } = require('../../.test-build/application-document-upload.js');
 const { postgresPrivateDocumentStore } = require('../../.test-build/private-document-store-pg.js');
 const { recordApplicationDocumentReview } = require('../../.test-build/application-document-pg.js');
 
@@ -107,4 +107,16 @@ test('rejected, oversized, foreign-market and unknown-kind uploads leave no priv
   assert.equal((await upload({ applicationId: 'not-a-uuid' })).kind, 'rejected');
   assert.equal(await objectCount(), 0);
   assert.equal((await sql`SELECT count(*)::int AS count FROM fame_application_documents`)[0].count, 0);
+});
+
+test('an applicant upload is recorded with its own source id and validation reason and reviews like a staff upload', async () => {
+  const result = await upload({ actor: 'applicant' });
+  assert.equal(result.kind, 'captured');
+  assert.equal(result.document.validationState, 'ready_for_review');
+  assert.match(result.document.sourceEventId, /^applicant-upload:/);
+  const [row] = await sql`SELECT validation_reason FROM fame_application_documents`;
+  assert.equal(row.validation_reason, APPLICANT_UPLOAD_SCAN_REASON);
+  const staffAgain = await upload({ actor: 'staff' });
+  assert.equal(staffAgain.kind, 'duplicate');
+  assert.equal(await objectCount(), 1);
 });

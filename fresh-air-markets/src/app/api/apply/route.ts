@@ -3,6 +3,7 @@ import { readObjectBody } from "@/lib/request-body";
 import { consumeInquiryLimit, inquiryClient } from "@/lib/inquiry-rate-limit";
 import { readPortalConfig, submitPortalApplication, validatePortalApplication } from "@/lib/portal-intake";
 import { notifyApplicationReceived } from "@/lib/notifications";
+import { createApplicationUploadToken } from "@/lib/application-upload-token";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -44,7 +45,9 @@ export async function POST(request: NextRequest) {
         name: `${input.firstName} ${input.lastName}`.trim(), businessName: input.businessName, type: input.registrationType,
       });
     }
-    return NextResponse.json({ ok: true, status: result.status, emailed: notified === "sent" }, { status: result.status === "captured" ? 201 : 200, headers });
+    let uploadToken: string | null = null;
+    try { uploadToken = createApplicationUploadToken(result.applicationId, config.marketId); } catch { uploadToken = null; }
+    return NextResponse.json({ ok: true, status: result.status, emailed: notified === "sent", uploadToken }, { status: result.status === "captured" ? 201 : 200, headers });
   } catch {
     return NextResponse.json({ error: "Your application could not be saved. Please try again." }, { status: 503, headers });
   }
