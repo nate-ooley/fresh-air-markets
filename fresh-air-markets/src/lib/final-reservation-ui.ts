@@ -7,6 +7,7 @@ export interface ReservationPlanningSnapshot {
   dates: string[];
   fullSeason: boolean;
   requiresFinalDateConfirmation: boolean;
+  boothsRequested?: number;
 }
 
 export interface FinalReservationForm {

@@ -15,6 +15,7 @@ interface ApplicationReviewIdentitySnapshot {
   requiresFinalDateConfirmation: boolean;
   category: string;
   details: string | null;
+  boothsRequested?: number;
 }
 
 interface ApplicationReviewListItem {
@@ -52,7 +53,8 @@ function isSnapshot(value: unknown): value is ApplicationReviewIdentitySnapshot 
     && typeof snapshot.category === "string" && typeof snapshot.fullSeason === "boolean"
     && typeof snapshot.requiresFinalDateConfirmation === "boolean"
     && Array.isArray(snapshot.dates) && snapshot.dates.every(date => typeof date === "string")
-    && (typeof snapshot.details === "string" || snapshot.details === null);
+    && (typeof snapshot.details === "string" || snapshot.details === null)
+    && (snapshot.boothsRequested === undefined || Number.isSafeInteger(snapshot.boothsRequested));
 }
 
 function isItem(value: unknown): value is ApplicationReviewListItem {
@@ -179,6 +181,7 @@ export default function ApplicationReviewList() {
                       <dl className="mt-4 grid gap-3 text-sm sm:grid-cols-3">
                         <div><dt className="text-xs font-semibold uppercase tracking-wide text-ink/45">Applicant type</dt><dd className="mt-1 text-pine-deep">{snapshot.applicantType}</dd></div>
                         <div><dt className="text-xs font-semibold uppercase tracking-wide text-ink/45">Category</dt><dd className="mt-1 text-pine-deep">{snapshot.category}</dd></div>
+                        <div><dt className="text-xs font-semibold uppercase tracking-wide text-ink/45">Booths requested</dt><dd className="mt-1 text-pine-deep">{snapshot.boothsRequested ?? 1} per market day</dd></div>
                         <div><dt className="text-xs font-semibold uppercase tracking-wide text-ink/45">Requested dates</dt><dd className="mt-1 text-pine-deep">{requestedDates(snapshot)}</dd></div>
                       </dl>
                     ) : (

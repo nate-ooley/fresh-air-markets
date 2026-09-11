@@ -6,17 +6,18 @@ import { type FormEvent, useMemo, useState } from "react";
 const FIELD = "mt-1 w-full rounded-xl border border-navy/15 bg-white px-4 py-3 text-ink outline-none transition focus:border-sky focus:ring-2 focus:ring-sky/25";
 const LABEL = "block text-xs font-semibold uppercase tracking-wide text-navy/60";
 
-interface Props { dates: string[]; categories: readonly string[]; fullSeasonLabel: string }
+interface Props { dates: string[]; categories: readonly string[]; fullSeasonLabel: string; maxBooths: number }
 
 function dateLabel(iso: string): string {
   return new Date(`${iso}T12:00:00Z`).toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric", year: "numeric", timeZone: "UTC" });
 }
 
-export default function ApplyForm({ dates, categories, fullSeasonLabel }: Props) {
+export default function ApplyForm({ dates, categories, fullSeasonLabel, maxBooths }: Props) {
   const [type, setType] = useState<"Vendor" | "Non-Profit Organization">("Vendor");
   const [fullSeason, setFullSeason] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [category, setCategory] = useState("");
+  const [booths, setBooths] = useState(1);
   const [busy, setBusy] = useState(false);
   const [done, setDone] = useState<"captured" | "duplicate" | null>(null);
   const [errors, setErrors] = useState<string[]>([]);
@@ -41,7 +42,7 @@ export default function ApplyForm({ dates, categories, fullSeasonLabel }: Props)
       registrationType: type,
       firstName: form.get("firstName"), lastName: form.get("lastName"), email: form.get("email"), phone: form.get("phone"),
       businessName: form.get("businessName"), vendorCategory: vendor ? category : "", otherCategory: form.get("otherCategory") ?? "",
-      fullSeason: vendor && fullSeason, dates: vendor && !fullSeason ? [...selected] : [],
+      fullSeason: vendor && fullSeason, dates: vendor && !fullSeason ? [...selected] : [], booths: vendor ? booths : 1,
       message: form.get("message"), agreementAccepted: form.get("agreementAccepted") === "on", signatureName: form.get("signatureName"),
       website: form.get("website"),
     };
@@ -102,14 +103,27 @@ export default function ApplyForm({ dates, categories, fullSeasonLabel }: Props)
 
       {vendor && (
         <fieldset>
+          <legend className={LABEL}>How many booths per market day?</legend>
+          <p className="mt-1 text-sm text-ink/60">Each booth is a 10x10 space. Take two or more side by side for extra room. Fees are per booth, per Saturday.</p>
+          <div className="mt-3 flex gap-2">
+            {Array.from({ length: maxBooths }, (_, i) => i + 1).map(count => (
+              <button key={count} type="button" onClick={() => setBooths(count)} aria-pressed={booths === count}
+                className={`rounded-full px-5 py-2 text-sm font-semibold transition ${booths === count ? "bg-navy text-white" : "bg-navy/5 text-navy hover:bg-navy/10"}`}>{count}</button>
+            ))}
+          </div>
+        </fieldset>
+      )}
+
+      {vendor && (
+        <fieldset>
           <legend className={LABEL}>Which Saturdays would you like?</legend>
           <label className="mt-3 flex items-center gap-3 rounded-2xl bg-sky/10 p-4 text-navy">
             <input type="checkbox" checked={fullSeason} onChange={e => setFullSeason(e.target.checked)} className="h-5 w-5" />
-            <span><span className="font-semibold">{fullSeasonLabel}</span> — $30 per week, every market Saturday</span>
+            <span><span className="font-semibold">{fullSeasonLabel}</span> — $30 per booth per week, every market Saturday</span>
           </label>
           {!fullSeason && (
             <div className="mt-4 space-y-4">
-              <p className="text-sm text-ink/60">$40 per week, or $35 per week when you book 4 or more consecutive Saturdays. Final dates are confirmed with you after approval.</p>
+              <p className="text-sm text-ink/60">$40 per booth per week, or $35 per booth per week when you book 4 or more consecutive Saturdays. Final dates are confirmed with you after approval.</p>
               {months.map(([month, isos]) => (
                 <div key={month}>
                   <p className="text-sm font-semibold text-navy">{month}</p>

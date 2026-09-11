@@ -21,6 +21,8 @@ function configuredClient(): Sql {
 
 export const VENDOR_AGREEMENT_VERSION = "portal-vendor-agreement-2026-2027-v1";
 export const FULL_SEASON_LABEL = "Full Season (Oct 3 - May 29)";
+/** Vendors may request several adjacent 10x10 booths per market day; staff confirm the final count. */
+export const MAX_BOOTHS_PER_APPLICATION = 4;
 export const VENDOR_CATEGORIES = [
   "Produce", "Baked Goods", "Prepared Food", "Food Truck", "Beverages", "Flowers & Plants",
   "Handmade & Crafts", "Art", "Jewelry", "Clothing & Accessories", "Health & Beauty",
@@ -43,6 +45,7 @@ export interface PortalApplicationInput {
   otherCategory: string;
   fullSeason: boolean;
   dates: string[];
+  booths: number;
   message: string;
   signatureName: string;
 }
@@ -77,6 +80,7 @@ export function validatePortalApplication(body: Record<string, unknown>): Portal
   const message = text(body.message, MAX.message);
   const signatureName = text(body.signatureName, MAX.text);
   const fullSeason = body.fullSeason === true;
+  const booths = body.booths === undefined ? 1 : Number(body.booths);
   const rawDates = Array.isArray(body.dates) ? body.dates : [];
   const dates = [...new Set(rawDates.filter((d): d is string => typeof d === "string"))].sort();
 
@@ -89,12 +93,13 @@ export function validatePortalApplication(body: Record<string, unknown>): Portal
     if (vendorCategory === "Other" && !otherCategory) errors.push("Tell us what you sell under \"Other\".");
     if (!fullSeason && dates.length === 0) errors.push("Choose the full season or at least one market Saturday.");
     if (dates.some(date => !(FRESH_AIR_SEASON_DATES as readonly string[]).includes(date))) errors.push("One or more selected dates are not market Saturdays this season.");
+    if (!Number.isSafeInteger(booths) || booths < 1 || booths > MAX_BOOTHS_PER_APPLICATION) errors.push(`Choose between 1 and ${MAX_BOOTHS_PER_APPLICATION} booths.`);
   }
   if (type === "Non-Profit Organization" && !message) errors.push("Tell us about your organization's mission.");
   if (body.agreementAccepted !== true) errors.push("You must accept the Vendor Agreement to apply.");
   if (signatureName.length < 2) errors.push("Type your full name to sign the Vendor Agreement.");
   if (errors.length || !type) return { ok: false, errors };
-  return { ok: true, input: { registrationType: type, firstName, lastName, email, phone, businessName, vendorCategory, otherCategory, fullSeason, dates, message, signatureName } };
+  return { ok: true, input: { registrationType: type, firstName, lastName, email, phone, businessName, vendorCategory, otherCategory, fullSeason, dates, booths: type === "Vendor" ? booths : 1, message, signatureName } };
 }
 
 export interface SubmitPortalApplicationResult {
@@ -127,7 +132,7 @@ export async function submitPortalApplication(
     phone: input.phone,
     ...(vendor
       ? { businessName: input.businessName, vendorCategory: input.vendorCategory, otherCategory: input.otherCategory,
-          vendorDatesRequested: input.fullSeason ? [FULL_SEASON_LABEL] : input.dates, message: input.message }
+          vendorDatesRequested: input.fullSeason ? [FULL_SEASON_LABEL] : input.dates, boothsRequested: input.booths, message: input.message }
       : { orgName: input.businessName, mission: input.message }),
     // The signing timestamp lives in fame_agreement_signatures so an identical
     // resubmission hashes to the same event and is recognized as a duplicate.

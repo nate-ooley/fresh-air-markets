@@ -18,6 +18,7 @@ interface ApplicationReviewIdentitySnapshot {
   requiresFinalDateConfirmation: boolean;
   category: string;
   details: string | null;
+  boothsRequested?: number;
 }
 
 interface ApplicationReviewDetail {
@@ -93,7 +94,8 @@ function isIdentitySnapshot(value: unknown): value is ApplicationReviewIdentityS
     && typeof snapshot.category === "string" && typeof snapshot.fullSeason === "boolean"
     && typeof snapshot.requiresFinalDateConfirmation === "boolean"
     && Array.isArray(snapshot.dates) && snapshot.dates.every(date => typeof date === "string")
-    && (typeof snapshot.details === "string" || snapshot.details === null);
+    && (typeof snapshot.details === "string" || snapshot.details === null)
+    && (snapshot.boothsRequested === undefined || Number.isSafeInteger(snapshot.boothsRequested));
 }
 
 function isApplicationReviewDetail(value: unknown, applicationId: string): value is ApplicationReviewDetail {
@@ -363,6 +365,10 @@ export default function ApplicationReviewPanel({ applicationId }: { applicationI
                     <div>
                       <dt className="text-xs font-semibold uppercase tracking-wide text-ink/45">Category</dt>
                       <dd className="mt-1 text-pine-deep">{application.identitySnapshot.category}</dd>
+                    </div>
+                    <div>
+                      <dt className="text-xs font-semibold uppercase tracking-wide text-ink/45">Booths requested</dt>
+                      <dd className="mt-1 text-pine-deep">{application.identitySnapshot.boothsRequested ?? 1} per market day</dd>
                     </div>
                     <div>
                       <dt className="text-xs font-semibold uppercase tracking-wide text-ink/45">Requested dates</dt>

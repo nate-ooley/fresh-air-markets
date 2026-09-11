@@ -79,7 +79,7 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
     vendorCategory: (FAME_VENDOR_CATEGORIES as readonly string[]).includes(snapshot.category) ? snapshot.category : "",
     selectedDates: snapshot.fullSeason ? [] : requestedReservationDates(snapshot.dates),
     fullSeason: snapshot.fullSeason,
-    boothsPerMarket: "1",
+    boothsPerMarket: String(Number.isSafeInteger(snapshot.boothsRequested) && (snapshot.boothsRequested as number) >= 1 ? snapshot.boothsRequested : 1),
     foodLicenseDecision: "",
     finalDatesConfirmed: false,
   }));

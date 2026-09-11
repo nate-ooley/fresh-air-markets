@@ -48,6 +48,8 @@ export interface ApplicationReviewIdentitySnapshot {
   requiresFinalDateConfirmation: boolean;
   category: string;
   details: string | null;
+  /** Booths per market day the vendor asked for; 1 when the source did not say. */
+  boothsRequested: number;
 }
 
 export interface ApplicationReviewListItem extends ApplicationReviewDetail {}
@@ -234,9 +236,13 @@ function reviewIdentitySnapshot(value: unknown): ApplicationReviewIdentitySnapsh
     ? firstSafeText(source, ["mission", "nonProfitMission"], MAX_SNAPSHOT_DETAILS_LENGTH)
     : firstSafeText(source, ["details", "message", "description"], MAX_SNAPSHOT_DETAILS_LENGTH);
 
+  const requested = source.boothsRequested;
+  const boothsRequested = typeof requested === "number" && Number.isSafeInteger(requested) && requested >= 1 && requested <= 50 ? requested : 1;
+
   if (!vendorName || !businessName || !email || !SIMPLE_EMAIL.test(email)
     || !applicantType || !category || !selection || (applicantType === "Non-Profit Organization" && !details)) return null;
   return {
+    boothsRequested,
     vendorName,
     businessName,
     email,

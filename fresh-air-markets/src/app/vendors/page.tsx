@@ -28,9 +28,10 @@ const REQUIREMENTS = [
     "Breakdown begins at 1:00 PM, no early departures",
   ] },
   { title: "Fees & Payment", items: [
-    "$40 per week — standard booth rate",
-    "$35 per week — when booking 4+ consecutive weeks",
-    "$30 per week — full season (Oct/Nov through Saturday, May 29)",
+    "$40 per booth per week — standard rate",
+    "$35 per booth per week — when booking 4+ consecutive weeks",
+    "$30 per booth per week — full season (Oct/Nov through Saturday, May 29)",
+    "Need more room? Request up to 4 side-by-side booths on your application",
     "Non-profit exhibitor booths are free of charge",
     "After your application is approved, your vendor agreement is signed, required documents are approved, and your dates and booths are reserved, payment is due within 48 hours of the payment request",
   ] },
@@ -45,7 +46,7 @@ const STEPS = [
 const FAQ = [
   { q: "How do I become a vendor at the North Port Farmer's Market?", a: "Submit the online application. We review it, reply with a decision, collect any required documents, confirm your dates, and send a payment request. Once paid, you're on the schedule." },
   { q: "What types of vendors do you accept?", a: "Local makers, artisans, farmers and growers, bakers, prepared-food vendors, food trucks, and small businesses. Every application is reviewed to keep the market varied and high quality." },
-  { q: "How much does it cost to participate?", a: "$40 per Saturday, $35 per Saturday when you book four or more consecutive weeks, and $30 per Saturday for the full season. Non-profit exhibitor booths are free." },
+  { q: "How much does it cost to participate?", a: "$40 per booth per Saturday, $35 when you book four or more consecutive weeks, and $30 for the full season. You can request up to four booths per market day for more space. Non-profit exhibitor booths are free." },
   { q: "I run a non-profit. Can we participate?", a: "Yes. Every Saturday we feature one non-profit at no cost. Apply as a Non-Profit Organization and tell us about your mission; one non-profit is scheduled per market day." },
   { q: "Do I need a license or permit to sell at the market?", a: "You are responsible for any permits and licenses your products require. Food vendors will be asked for their food license or permit during review, and all vendors provide proof of insurance." },
   { q: "Can I bring a generator to power my booth?", a: "Quiet generators may be allowed depending on your booth location and neighbors. Mention it in your application so we can place you appropriately." },
