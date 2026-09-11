@@ -48,9 +48,7 @@ payment link and copy it to the vendor.
 
 ## Not included yet
 
-- Outbound email (approval, document request, payment request, confirmation,
-  reminders). Staff copy links and email vendors from their own mailbox until
-  an email provider is added.
+- Market-day reminder emails and the Vendor Pass.
 - Vendor self-service document upload; staff upload documents for now.
 
 ## Email notifications (Resend)
