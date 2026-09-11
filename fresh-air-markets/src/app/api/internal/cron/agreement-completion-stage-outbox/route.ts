@@ -19,9 +19,8 @@ export async function GET(request: Request): Promise<Response> {
   if (!cronSecretConfigured(secret)) return Response.json({ error: "Agreement-stage scheduler is not configured." }, { status: 503 });
   if (!cronAuthorized(request, secret)) return Response.json({ error: "Unauthorized." }, { status: 401 });
   if (!process.env.DATABASE_URL) return Response.json({ error: "Persistent agreement storage is not configured." }, { status: 503 });
-  if (!agreementStageDeliveryConfigured(process.env)) {
-    return Response.json({ error: "HighLevel agreement-stage delivery is not configured." }, { status: 503 });
-  }
+  // CRM delivery is optional; a deployment without it reports the worker as disabled, not failed.
+  if (!agreementStageDeliveryConfigured(process.env)) return Response.json({ enabled: false });
   try {
     const config = readAgreementStageDeliveryConfig(process.env);
     const result = await dispatchAgreementStageOutbox(

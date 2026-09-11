@@ -43,6 +43,8 @@ async function boundedCounts(response, keys) {
     }
   } finally { await reader.cancel().catch(() => {}); }
   const data = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+  // A worker whose integration is switched off answers exactly { enabled: false }.
+  if (data && typeof data === 'object' && !Array.isArray(data) && Object.keys(data).length === 1 && data.enabled === false) return null;
   if (!data || typeof data !== 'object' || Array.isArray(data)
     || Object.keys(data).length !== keys.length
     || keys.some(key => !Object.hasOwn(data, key) || !Number.isSafeInteger(data[key]) || data[key] < 0 || data[key] > 1000)) {
@@ -83,6 +85,7 @@ export async function runPaymentScheduler(env = process.env, transport = fetch) 
     }
     try {
       const counts = await boundedCounts(response, worker.keys);
+      if (counts === null) { workers.push({ worker: worker.name, ok: true, skipped: true }); continue; }
       const needsAttention = Object.entries(counts).some(([key, value]) => ATTENTION_KEYS.has(key) && value > 0);
       workers.push({ worker: worker.name, ok: !needsAttention, ...(needsAttention ? { error: 'worker_needs_attention' } : {}), counts });
     } catch {

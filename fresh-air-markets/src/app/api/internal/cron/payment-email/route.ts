@@ -12,6 +12,8 @@ const headers = { "Cache-Control": "no-store" };
 export async function GET(request: Request) {
   if (!cronSecretConfigured(process.env.CRON_SECRET)) return Response.json({ error: "Scheduler unavailable." }, { status: 503, headers });
   if (!cronAuthorized(request, process.env.CRON_SECRET)) return Response.json({ error: "Unauthorized" }, { status: 401, headers });
+  // Outbound email is optional; staff copy payment links when it is off.
+  if (process.env.GHL_PAYMENT_EMAIL_ENABLED !== "true") return Response.json({ enabled: false }, { headers });
   try {
     const accessConfig = vendorPaymentAccessConfig(process.env);
     const deliveryConfig = readPaymentEmailDeliveryConfig(process.env);

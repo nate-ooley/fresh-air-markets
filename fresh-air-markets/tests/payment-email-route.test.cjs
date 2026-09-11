@@ -151,7 +151,9 @@ test('manager provider/storage failures expose no private diagnostics and do not
 test('disabled payment-email configuration blocks manager queueing and cron storage access', () => configured(async () => {
   const calls = [];
   assert.equal((await manager({ calls }).POST(request(), context)).status, 503);
-  assert.equal((await cron({ calls }).GET(scheduler())).status, 503);
+  // The scheduler must see a switched-off worker as disabled, not as an outage.
+  const off = await cron({ calls }).GET(scheduler());
+  assert.equal(off.status, 200); assert.deepEqual(await off.json(), { enabled: false });
   assert.equal(calls.length, 0);
 }, { GHL_PAYMENT_EMAIL_ENABLED: 'false' }));
 

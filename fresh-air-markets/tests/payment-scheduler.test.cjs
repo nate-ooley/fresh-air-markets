@@ -82,12 +82,11 @@ test('timeout and redirect failures are sanitized and attempted only once per wo
   assert.ok(!JSON.stringify(result).includes('attacker')); assert.ok(!JSON.stringify(result).includes('private-token'));
 });
 
-test('marketing HTML, redirects, disabled workers, PII fields and malformed counts fail closed', async () => {
+test('marketing HTML, redirects, PII fields and malformed counts fail closed', async () => {
   const { runPaymentScheduler } = await script;
   const invalid = [
     () => new Response('<html>Marketing site</html>', { headers: { 'content-type': 'text/html' } }),
     () => new Response('', { status: 307, headers: { location: 'https://attacker.invalid' } }),
-    () => Response.json({ enabled: false }),
     () => Response.json({ ...fixtures['/api/internal/cron/payment-email'], vendorEmail: 'private@example.com' }),
     () => Response.json({ ...fixtures['/api/internal/cron/payment-email'], accepted: '1' }),
     () => Response.json({ ...fixtures['/api/internal/cron/payment-email'], accepted: -1 }),
@@ -130,4 +129,13 @@ test('pending sync cancellation is counted while manual review fails the schedul
     assert.equal(pending.counts.cancelled, 1); assert.equal(pending.ok, manualReview === 0);
     assert.equal(result.failures, manualReview); assert.deepEqual(calls, Object.keys(fixtures));
   }
+});
+
+test('a worker that answers exactly { enabled: false } is reported as skipped, not failed', async () => {
+  const { runPaymentScheduler } = await script;
+  const result = await runPaymentScheduler(env, async url => new URL(url).pathname.endsWith('payment-email') ? Response.json({ enabled: false }) : Response.json(fixture(url)));
+  assert.equal(result.ok, true); assert.equal(result.failures, 0); assert.equal(result.processed, 6);
+  assert.deepEqual(result.workers.find(w => w.worker === 'payment_email'), { worker: 'payment_email', ok: true, skipped: true });
+  const partial = await runPaymentScheduler(env, async url => new URL(url).pathname.endsWith('payment-email') ? Response.json({ enabled: false, extra: 1 }) : Response.json(fixture(url)));
+  assert.equal(partial.failures, 1);
 });

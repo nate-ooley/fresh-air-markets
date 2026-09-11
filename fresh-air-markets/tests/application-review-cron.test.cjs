@@ -53,7 +53,7 @@ test('review cron claims one job so five slow QA provider calls cannot age a lat
   assert.deepEqual(await response.json(), { delivered: 1, deferred: 0, failed: 0, stale: 0 });
 }));
 test('review cron does not claim work without authentication and verified delivery configuration', () => withEnv(async () => {
-  for (const [authorized, configured, status] of [[false, true, 401], [true, false, 503]]) {
+  for (const [authorized, configured, status] of [[false, true, 401], [true, false, 200]]) {
     const calls = [];
     const response = await load({ calls, configured }).GET(request(authorized));
     assert.equal(response.status, status);
