@@ -2,7 +2,7 @@ import postgres from "postgres";
 import { applicantContact, emailConfigured, sendEmail, sendStaffEmail, type SendEmailResult } from "./email";
 import {
   applicationApprovedEmail, applicationChangesRequestedEmail, applicationDeclinedEmail, applicationReceivedEmail,
-  paymentReceivedEmail, paymentRequestEmail, passwordResetEmail, staffContactMessageEmail, staffNewApplicationEmail, staffPaymentReceivedEmail,
+  paymentReceivedEmail, paymentRequestEmail, passwordResetEmail, staffContactMessageEmail, staffInvitationEmail, staffNewApplicationEmail, staffPaymentReceivedEmail,
 } from "./email-templates";
 
 /**
@@ -132,4 +132,13 @@ export async function notifyPasswordReset(input: {
   if (!emailConfigured()) return "not_sent";
   const content = passwordResetEmail({ name: input.name, link: input.link, minutes: input.minutes });
   return outcome(await sendEmail({ kind: "staff_password_reset", to: input.email, marketId: input.marketId, referenceId: "", ...content }, { sql }));
+}
+
+/** Invitation to join a market's staff; the token inside `link` is never logged. */
+export async function notifyStaffInvitation(input: {
+  marketId: string; email: string; name: string; marketName: string; link: string; days: number;
+}, sql?: Sql): Promise<NotificationOutcome> {
+  if (!emailConfigured()) return "not_sent";
+  const content = staffInvitationEmail({ name: input.name, marketName: input.marketName, link: input.link, days: input.days });
+  return outcome(await sendEmail({ kind: "staff_invitation", to: input.email, marketId: input.marketId, referenceId: "", ...content }, { sql }));
 }

@@ -113,3 +113,11 @@ export function passwordResetEmail(input: { name: string; link: string; minutes:
     `The link works once. If you did not ask for this, ignore this email and your password stays the same.`,
   ]) };
 }
+
+export function staffInvitationEmail(input: { name: string; marketName: string; link: string; days: number }): EmailContent {
+  return { subject: `You're invited to manage ${input.marketName} on Fresh Air Markets`, ...wrap([
+    `Hi ${input.name},`,
+    `You've been added to the market staff for ${input.marketName}. Choose your password and start reviewing applications here: ${input.link}`,
+    `The link works once and expires in ${input.days} days. After that, ask the market owner for a new invitation.`,
+  ]) };
+}

@@ -83,3 +83,27 @@ one transaction, so a link works exactly once, and a newer request supersedes
 older unused links. Both routes use the shared per-IP and per-email limiter.
 Passwords must be 12–200 characters. Existing signed-in sessions are not
 revoked by a reset; they expire on their own within seven days.
+
+## Staff accounts
+
+Migration 026 adds `fame_staff_users`: each person who can sign in to a
+market, with their own password, a role (`owner` or `manager`) and a status
+(`invited`, `active`, `removed`). The existing account login is carried over
+as the owner, so nothing changes for it. Sessions now name both the market and
+the person; a legacy market-only session still verifies and counts as the owner.
+Every request re-checks that the person is still active, so removing someone
+ends their access immediately.
+
+- `/staff` lists the people with access. Owners see an **Invite a market
+  manager** form and **Remove** buttons; managers see the list only.
+- `POST /api/admin/staff` (owner, same origin) creates or re-invites a manager
+  and emails a link to `/accept-invite#token=…` that works once for 7 days.
+  Invitations and password resets share `fame_password_resets` (`purpose`).
+  If the email fails, the response carries the link for the owner to forward.
+- `DELETE /api/admin/staff/{id}` (owner) removes a manager. Owners and the
+  acting person cannot be removed here.
+- Sign-in looks the email up in the staff table first; a market with no staff
+  rows (or the in-memory demo) still signs in with its account login and gets
+  an owner row created on the spot.
+- Password reset works per person. Resetting the owner also updates the legacy
+  account password so the two never diverge.

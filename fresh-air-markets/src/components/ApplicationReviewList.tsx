@@ -139,7 +139,11 @@ export default function ApplicationReviewList() {
             <p className="text-xs font-bold uppercase tracking-[0.2em] text-leaf">Market staff</p>
             <h1 className="font-display text-2xl text-pine-deep">Applications</h1>
           </div>
-          <button type="button" onClick={() => void signOut()} className="rounded-full px-4 py-2 text-sm font-semibold text-pine hover:bg-pine/10">Sign out</button>
+          <nav className="flex items-center gap-3 text-sm font-semibold text-pine">
+            <a href="/messages" className="rounded-full px-3 py-2 hover:bg-pine/10">Messages</a>
+            <a href="/staff" className="rounded-full px-3 py-2 hover:bg-pine/10">Staff</a>
+            <button type="button" onClick={() => void signOut()} className="rounded-full px-4 py-2 hover:bg-pine/10">Sign out</button>
+          </nav>
         </div>
       </header>
 

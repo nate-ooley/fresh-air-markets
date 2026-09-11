@@ -91,6 +91,7 @@ Wording lives in `src/lib/email-templates.ts`; triggers in `src/lib/notification
 | Paid | Square webhook confirms payment | Paid: {business} ($40.00) |
 | Website message | visitor uses the contact form | Website message from {name} ({topic}) |
 | Password reset | staff use "Forgot your password?" | Reset your Fresh Air Markets & Events staff password |
+| Staff invitation (to the invitee) | owner invites a manager on `/staff` | You're invited to manage {market} on Fresh Air Markets |
 
 ## Not sent (yet)
 

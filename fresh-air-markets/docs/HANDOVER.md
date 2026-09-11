@@ -3,7 +3,7 @@
 ## Live today
 
 Site: https://freshairmarketsandevents.com (staff sign in at `/login`).
-Hosting: Vercel project `farmers-market`. Database: Neon PostgreSQL, migrations 001–025.
+Hosting: Vercel project `farmers-market`. Database: Neon PostgreSQL, migrations 001–026.
 Payments: Square production, merchant ML16MNPG8Z0R5, webhook on the custom domain.
 Email: Resend from `hello@freshairmarketsandevents.com` (domain verified).
 Scheduler: GitHub Actions every 5 minutes, releases unpaid 48-hour holds.
@@ -15,12 +15,15 @@ vendor and staff confirmation emails.
 
 Also live: vendor upload of insurance right after applying, 1–4 booths per
 market day, contact form and newsletter, staff password reset by emailed link,
-an admin endpoint that keeps Square's webhook URL aligned with the site.
+an admin endpoint that keeps Square's webhook URL aligned with the site,
+and staff accounts: the owner invites managers from `/staff`, each with
+their own password and a Remove button.
 
 ## Before handing to the client's market manager
 
-1. Switch the staff account to the manager's email (login, reset mailbox,
-   reply-to, staff notifications). Needs the manager's address.
+1. Invite the client's manager from `/staff` (they choose their own
+   password), and switch reply-to and staff notifications to the client's
+   mailbox. Decide who keeps the owner login.
 2. Refund the $40 test payment in Square (Nathan).
 3. Decide on the seven test applications: leave them (all named as tests) or
    approve a one-off database cleanup to remove them. Approved applications
@@ -41,10 +44,9 @@ an admin endpoint that keeps Square's webhook URL aligned with the site.
    insurance, reserves, creates checkout and sends the payment email.
    Needs Nathan's spreadsheet export and the insurance files or an OK to
    record the HighLevel approval.
-2. **Staff users**: individual logins, owner/manager roles, invitations.
-3. **Market roster report**: vendors per date grouped by category with booth
+2. **Market roster report**: vendors per date grouped by category with booth
    counts, pending-payment section, spreadsheet download, season overview.
-4. **"Add a vendor" staff screen** for walk-ups and phone applications.
+3. **"Add a vendor" staff screen** for walk-ups and phone applications.
 
 ## Later improvements
 

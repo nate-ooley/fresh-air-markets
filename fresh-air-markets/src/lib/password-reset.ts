@@ -1,6 +1,5 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import postgres from "postgres";
-import { hashPassword } from "./auth";
 
 /**
  * Staff password reset. A request creates one random token whose SHA-256 is
@@ -49,13 +48,14 @@ export function passwordProblem(password: unknown): string | null {
 
 export interface PasswordResetRequest {
   accountId: string;
+  userId: string;
   email: string;
   ownerName: string;
   token: string;
   expiresAt: string;
 }
 
-/** Creates a reset for the account with this email; null when no such account exists. */
+/** Creates a reset for the active staff member with this email; null when there is none. */
 export async function requestPasswordReset(
   email: string,
   sql: Sql = configuredClient(),
@@ -63,43 +63,35 @@ export async function requestPasswordReset(
 ): Promise<PasswordResetRequest | null> {
   const normalized = email.trim().toLowerCase();
   if (!EMAIL.test(normalized) || normalized.length > 254) return null;
-  const [account] = await sql<{ id: string; email: string; owner_name: string }[]>`
-    SELECT id, email, owner_name FROM accounts WHERE email = ${normalized}`;
-  if (!account) return null;
+  const rows = await sql<{ id: string; market_id: string; email: string; name: string }[]>`
+    SELECT id, market_id, email, name FROM fame_staff_users
+    WHERE email = ${normalized} AND status = 'active' AND password_hash IS NOT NULL ORDER BY created_at`;
+  if (rows.length !== 1) return null;
+  const [user] = rows;
   const { token, tokenHash } = newPasswordResetToken();
   const expiresAt = new Date(now + TTL_MS);
   await sql.begin(async tx => {
-    await tx`UPDATE fame_password_resets SET used_at = ${new Date(now)} WHERE account_id = ${account.id} AND used_at IS NULL`;
-    await tx`INSERT INTO fame_password_resets (id, account_id, token_hash, expires_at, created_at)
-      VALUES (${randomUUID()}, ${account.id}, ${tokenHash}, ${expiresAt}, ${new Date(now)})`;
+    await tx`UPDATE fame_password_resets SET used_at = ${new Date(now)} WHERE staff_user_id = ${user.id} AND purpose = 'reset' AND used_at IS NULL`;
+    await tx`INSERT INTO fame_password_resets (id, account_id, staff_user_id, purpose, token_hash, expires_at, created_at)
+      VALUES (${randomUUID()}, ${user.market_id}, ${user.id}, 'reset', ${tokenHash}, ${expiresAt}, ${new Date(now)})`;
   });
-  return { accountId: account.id, email: account.email, ownerName: account.owner_name, token, expiresAt: expiresAt.toISOString() };
+  return { accountId: user.market_id, userId: user.id, email: user.email, ownerName: user.name, token, expiresAt: expiresAt.toISOString() };
 }
 
 export type PasswordResetOutcome =
-  | { kind: "reset"; accountId: string; email: string }
+  | { kind: "reset" | "invited"; accountId: string; email: string }
   | { kind: "invalid" }
   | { kind: "expired" };
 
-/** Spends a valid token and replaces the account password in one transaction. */
+/** Spends a reset or invitation token and sets the person's password. */
 export async function consumePasswordReset(
   token: unknown,
   password: string,
   sql: Sql = configuredClient(),
   now = Date.now(),
 ): Promise<PasswordResetOutcome> {
-  if (!validPasswordResetToken(token) || passwordProblem(password)) return { kind: "invalid" };
-  const tokenHash = passwordResetTokenHash(token);
-  const passwordHash = hashPassword(password);
-  return sql.begin(async tx => {
-    const [row] = await tx<{ id: string; account_id: string; email: string; expires_at: Date; used_at: Date | null }[]>`
-      SELECT r.id, r.account_id, a.email, r.expires_at, r.used_at
-      FROM fame_password_resets r JOIN accounts a ON a.id = r.account_id
-      WHERE r.token_hash = ${tokenHash} FOR UPDATE OF r`;
-    if (!row || row.used_at) return { kind: "invalid" } as PasswordResetOutcome;
-    if (new Date(row.expires_at).getTime() <= now) return { kind: "expired" } as PasswordResetOutcome;
-    await tx`UPDATE accounts SET password_hash = ${passwordHash} WHERE id = ${row.account_id}`;
-    await tx`UPDATE fame_password_resets SET used_at = ${new Date(now)} WHERE id = ${row.id}`;
-    return { kind: "reset", accountId: row.account_id, email: row.email } as PasswordResetOutcome;
-  }) as Promise<PasswordResetOutcome>;
+  const { consumeStaffToken } = await import("./staff-users");
+  const outcome = await consumeStaffToken(token, password, sql, now);
+  if (outcome.kind === "invalid" || outcome.kind === "expired") return outcome;
+  return { kind: outcome.kind, accountId: outcome.user.marketId, email: outcome.user.email };
 }

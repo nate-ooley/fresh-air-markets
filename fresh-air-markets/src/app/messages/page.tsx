@@ -21,7 +21,7 @@ export default async function MessagesPage() {
       <div className="mx-auto max-w-4xl">
         <div className="flex items-center justify-between">
           <h1 className="font-display text-3xl text-pine-deep">Website messages</h1>
-          <Link href="/applications" className="text-sm text-pine-deep underline">Applications</Link>
+          <nav className="flex gap-4 text-sm text-pine-deep"><Link href="/applications" className="underline">Applications</Link><Link href="/staff" className="underline">Staff</Link></nav>
         </div>
         {error && <p className="mt-6 rounded-2xl bg-clay/10 p-4 text-clay">{error}</p>}
         <section className="mt-6 rounded-3xl bg-white p-6 shadow-sm ring-1 ring-pine/10">
