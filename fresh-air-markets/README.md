@@ -4,6 +4,14 @@ A multi-tenant Next.js SaaS. Market operators sign up, get a license and a
 seeded market map instantly, and manage everything from a password-protected
 dashboard. Vendors book off a public, per-market visual map.
 
+## What changed recently
+
+[`docs/CHANGES-2026-09-10.md`](docs/CHANGES-2026-09-10.md) records the
+September 10–11, 2026 work in plain language: production database bring-up,
+the marketing site and vendor application moving into this app (no CRM),
+staff document upload, Square production payments, email notifications, and
+the current architecture and configuration.
+
 ## Public site and vendor intake
 
 The marketing site (`/`, `/vendors`, `/about`) and the vendor application
