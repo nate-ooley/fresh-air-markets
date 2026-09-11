@@ -34,13 +34,13 @@ interface SavedReview {
   application: { id: string; reviewState: ReviewState };
   reviewEventId: string;
   duplicate: boolean;
-  delivery: "delivered" | "queued" | "failed" | "unknown";
+  delivery: "delivered" | "queued" | "failed" | "unknown" | "disabled";
   vendorNotification?: "not_sent" | "sent" | "failed";
 }
 
 interface ReviewNotice {
   duplicate: boolean;
-  delivery: "delivered" | "queued" | "failed" | "unknown";
+  delivery: "delivered" | "queued" | "failed" | "unknown" | "disabled";
   vendorNotification?: "not_sent" | "sent" | "failed";
   reviewState: ReviewState;
 }
@@ -115,7 +115,7 @@ function isSavedReview(value: unknown, applicationId: string): value is SavedRev
     && isReviewState(application.reviewState)
     && typeof saved?.reviewEventId === "string"
     && typeof saved?.duplicate === "boolean"
-    && (saved?.delivery === "delivered" || saved?.delivery === "queued" || saved?.delivery === "failed" || saved?.delivery === "unknown")
+    && (saved?.delivery === "delivered" || saved?.delivery === "queued" || saved?.delivery === "failed" || saved?.delivery === "unknown" || saved?.delivery === "disabled")
     && (saved.vendorNotification === undefined || saved.vendorNotification === "not_sent"
       || saved.vendorNotification === "sent" || saved.vendorNotification === "failed")
     && (application.reviewState !== "changes_requested" || saved.vendorNotification !== undefined);
@@ -433,13 +433,15 @@ export default function ApplicationReviewPanel({ applicationId }: { applicationI
                   <p className="font-semibold">
                     {notice.duplicate ? "This exact decision was already saved." : `Application marked ${STATE_LABEL[notice.reviewState].toLowerCase()}.`}
                   </p>
-                  <p className="mt-1 text-cream/75">
-                    {notice.delivery === "unknown"
-                      ? "The decision was saved, but its CRM delivery status could not be checked. Reload before taking further action."
-                      : notice.vendorNotification === "not_sent"
-                        ? CORRECTION_DELIVERY_LABEL[notice.delivery]
-                        : REVIEW_DELIVERY_LABEL[notice.delivery]}
-                  </p>
+                  {notice.delivery !== "disabled" && (
+                    <p className="mt-1 text-cream/75">
+                      {notice.delivery === "unknown"
+                        ? "The decision was saved, but its CRM delivery status could not be checked. Reload before taking further action."
+                        : notice.vendorNotification === "not_sent"
+                          ? CORRECTION_DELIVERY_LABEL[notice.delivery]
+                          : REVIEW_DELIVERY_LABEL[notice.delivery]}
+                    </p>
+                  )}
                   {notice.vendorNotification === "sent" && (
                     <p className="mt-2 font-semibold">The vendor has been emailed about this decision.</p>
                   )}

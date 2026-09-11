@@ -65,7 +65,9 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
     // A saved decision must remain visible even if HighLevel is unavailable.
     // When delivery is configured, try only this committed outbox item right
     // away; the authenticated worker route owns later retry/recovery.
-    let delivery: "delivered" | "queued" | "failed" | "unknown" = "unknown";
+    let delivery: "delivered" | "queued" | "failed" | "unknown" | "disabled" = "unknown";
+    // Without a CRM configured there is nothing to deliver; say so instead of "queued".
+    if (!applicationReviewDeliveryConfigured(process.env)) delivery = "disabled";
     if ((result.kind === "applied" || result.kind === "duplicate")
       && result.outboxId
       && applicationReviewDeliveryConfigured(process.env)) {
@@ -82,7 +84,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
     }
     // A failed/delivered replay is not claimable and has zero dispatch counts.
     // Read the authoritative result even if delivery is currently disabled.
-    if (result.outboxId) {
+    if (result.outboxId && delivery !== "disabled") {
       try {
         const status = await getApplicationReviewOutboxStatus({
           outboxId: result.outboxId, reviewEventId: result.reviewEventId,

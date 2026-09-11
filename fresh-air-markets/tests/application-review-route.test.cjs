@@ -72,7 +72,7 @@ test('application review route binds the path ID and market session, ignoring cl
     applicationId: appId, marketId: 'qa-market', actorAccountId: 'qa-market',
     action: 'approve', sourceEventId: 'application:qa:current', reason: '', idempotencyKey: key,
   });
-  assert.deepEqual(await response.json(), { application: { id: appId, reviewState: 'approved' }, reviewEventId: 'event', duplicate: false, delivery: 'queued', vendorNotification: 'not_sent' });
+  assert.deepEqual(await response.json(), { application: { id: appId, reviewState: 'approved' }, reviewEventId: 'event', duplicate: false, delivery: 'disabled', vendorNotification: 'not_sent' });
 });
 
 test('application review route rejects malformed identities/replay keys before persistence', async () => {
@@ -165,7 +165,7 @@ test('correction API reports not_sent when CRM is not configured and does not at
     dispatch: async () => { dispatched++; throw new Error('not configured'); } });
   const response = await route.PATCH(request({ action: 'request_changes', sourceEventId: 'application:qa:current', reason: 'Correct this name.' },
     { 'Idempotency-Key': key }), { params: Promise.resolve({ id: appId }) });
-  const body = await response.json(); assert.equal(body.vendorNotification, 'not_sent'); assert.equal(body.delivery, 'queued');
+  const body = await response.json(); assert.equal(body.vendorNotification, 'not_sent'); assert.equal(body.delivery, 'disabled');
   assert.equal(dispatched, 0);
 });
 
@@ -182,10 +182,12 @@ test('duplicate review with no claimed work preserves authoritative delivered or
       const response = await route.PATCH(request({ action: 'request_changes', sourceEventId: 'application:qa:current', reason: 'Correct the business name.',
         marketId: 'foreign-market', applicationId: 'foreign-application', outboxId: 'foreign-job' }, { 'Idempotency-Key': key }), { params: Promise.resolve({ id: appId }) });
       assert.equal(response.status, 200);
-      assert.deepEqual(events, [ ...(deliveryConfigured ? [['dispatch', 'original-outbox']] : []), ['status', {
+      // Without a CRM configured nothing is dispatched or read; the response says the delivery is disabled.
+      assert.deepEqual(events, deliveryConfigured ? [['dispatch', 'original-outbox'], ['status', {
         outboxId: 'original-outbox', reviewEventId: 'original-review', applicationId: appId, marketId: 'qa-market',
-      }] ]);
-      const body = await response.json(); assert.equal(body.delivery, ['pending', 'processing'].includes(status) ? 'queued' : status);
+      }]] : []);
+      const body = await response.json();
+      assert.equal(body.delivery, deliveryConfigured ? (['pending', 'processing'].includes(status) ? 'queued' : status) : 'disabled');
       assert.equal(body.vendorNotification, 'not_sent'); assert.equal(body.duplicate, true);
     }
   }
