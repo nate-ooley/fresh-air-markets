@@ -4,6 +4,7 @@ import { consumeInquiryLimit, inquiryClient } from "@/lib/inquiry-rate-limit";
 import { readPortalConfig, submitPortalApplication, validatePortalApplication } from "@/lib/portal-intake";
 import { notifyApplicationReceived } from "@/lib/notifications";
 import { createApplicationUploadToken } from "@/lib/application-upload-token";
+import { verifyApplicationPrefillToken } from "@/lib/application-prefill";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -36,7 +37,9 @@ export async function POST(request: NextRequest) {
   const emailLimit = await limited("email", JSON.stringify([config.marketId, validation.input.email]));
   if (emailLimit) return emailLimit;
   try {
-    const result = await submitPortalApplication(validation.input, config, { clientIp: ip, userAgent: request.headers.get("user-agent") ?? "" });
+    const invitation = verifyApplicationPrefillToken(body.prefillToken);
+    const invitedFrom = invitation && invitation.marketId === config.marketId ? invitation.invitedFrom : undefined;
+    const result = await submitPortalApplication(validation.input, config, { clientIp: ip, userAgent: request.headers.get("user-agent") ?? "", invitedFrom });
     let notified: "sent" | "failed" | "not_sent" = "not_sent";
     if (result.status === "captured") {
       const { input } = validation;

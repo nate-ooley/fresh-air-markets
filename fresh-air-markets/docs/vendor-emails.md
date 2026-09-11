@@ -83,6 +83,20 @@ Wording lives in `src/lib/email-templates.ts`; triggers in `src/lib/notification
 >
 > You'll receive your booth assignment, market map, and Vendor Pass before your first market day, plus a reminder with setup instructions a few days ahead. Setup begins at 6:30 AM; booths must be ready by 8:00 AM.
 
+### 0. Finish your application (invitation)
+**Trigger:** the owner sends a pre-filled application link (used for vendors who applied through the old HighLevel forms).
+**Subject:** Finish your North Port Farmer's Market vendor application
+
+> Hi {first name},
+>
+> Thanks for your interest in the North Port Farmer's Market with {business name}. We've moved vendor applications to our new website, and we need a few things from you to hold your spot.
+>
+> Use this personal link to finish your application. Your details and the dates you asked for ({dates or "the full season"}) are already filled in: https://freshairmarketsandevents.com/apply#prefill=…
+>
+> Please check your details, choose how many booths you need, sign the vendor agreement, and attach your certificate of insurance (PDF, PNG or JPEG). It takes about two minutes.
+>
+> Once market staff approve your application, we'll confirm your dates and email you a secure Square payment link. Payment is due within 48 hours of that email.
+
 ## To staff (nateooley68@gmail.com)
 
 | Email | Trigger | Subject |

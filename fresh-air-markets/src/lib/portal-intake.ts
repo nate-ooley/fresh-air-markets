@@ -116,7 +116,7 @@ export function portalContactId(email: string): string {
 export async function submitPortalApplication(
   input: PortalApplicationInput,
   config: PortalIntakeConfig,
-  context: { clientIp?: string; userAgent?: string } = {},
+  context: { clientIp?: string; userAgent?: string; invitedFrom?: string } = {},
   sql: Sql = configuredClient(),
 ): Promise<SubmitPortalApplicationResult> {
   const contactId = portalContactId(input.email);
@@ -125,6 +125,7 @@ export async function submitPortalApplication(
   const vendor = input.registrationType === "Vendor";
   const snapshot: Record<string, unknown> = {
     source: "portal-form",
+    ...(context.invitedFrom ? { invitedFrom: context.invitedFrom } : {}),
     registrationType: vendor ? "Vendor" : "Non-Profit Organization",
     firstName: input.firstName,
     lastName: input.lastName,

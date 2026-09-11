@@ -39,11 +39,11 @@ roster at `/roster` with a per-date spreadsheet download.
 
 ## Next work, in order
 
-1. **HighLevel vendor import** (~10 vendors): one-time script that creates
-   them as approved applications with their dates and booths, attaches
-   insurance, reserves, creates checkout and sends the payment email.
-   Needs Nathan's spreadsheet export and the insurance files or an OK to
-   record the HighLevel approval.
+1. **HighLevel applicants**: 21 vendors were emailed a personal pre-filled
+   application link on Sept 11. None had signed the agreement or supplied
+   insurance in HighLevel, so they finish on the new site and then flow
+   through approval, dates and payment like everyone else. Watch the
+   applications list for them; re-send from the invitation endpoint if needed.
 2. **"Add a vendor" staff screen** for walk-ups and phone applications.
 
 ## Later improvements

@@ -120,3 +120,17 @@ check-in sheet. The data comes from `fame_reservations` (dates, booths,
 state), `fame_reservation_finalizations` (category) and the application's
 latest snapshot (business, contact); expired, cancelled and declined
 reservations are excluded. Read-only; any signed-in staff member can use it.
+
+## Pre-filled application invitations
+
+For vendors known from elsewhere (the old HighLevel forms, a phone call), the
+owner can send a personal link to the application form with their details
+already filled in: `POST /api/admin/applications/invite` with
+`{ invitedFrom, vendors: [{ firstName, lastName, email, phone, businessName,
+vendorCategory, fullSeason, dates }] }` (up to 50). Each vendor gets the
+"Finish your … vendor application" email with a link to
+`/apply#prefill=<signed token>`; the form fetches the values from
+`POST /api/apply/prefill`, shows a notice, and the vendor still chooses booths,
+signs the agreement and attaches insurance. The token is signed with
+`AUTH_SECRET`, lasts 90 days, grants nothing, and the submitted application's
+snapshot records `invitedFrom` so staff can see where it came from.

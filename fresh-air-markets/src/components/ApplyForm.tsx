@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { type FormEvent, useMemo, useState } from "react";
+import { type FormEvent, useEffect, useMemo, useRef, useState } from "react";
 
 const FIELD = "mt-1 w-full rounded-xl border border-navy/15 bg-white px-4 py-3 text-ink outline-none transition focus:border-sky focus:ring-2 focus:ring-sky/25";
 const LABEL = "block text-xs font-semibold uppercase tracking-wide text-navy/60";
@@ -22,7 +22,30 @@ export default function ApplyForm({ dates, categories, fullSeasonLabel, maxBooth
   const [done, setDone] = useState<"captured" | "duplicate" | null>(null);
   const [uploadToken, setUploadToken] = useState<string | null>(null);
   const [errors, setErrors] = useState<string[]>([]);
+  const [prefill, setPrefill] = useState<Record<string, string> | null>(null);
+  const prefillToken = useRef<string | null>(null);
   const vendor = type === "Vendor";
+
+  useEffect(() => {
+    const match = /(?:^#|&)prefill=([A-Za-z0-9_.-]+)/.exec(window.location.hash);
+    if (!match) return;
+    prefillToken.current = match[1];
+    // Keep the personal link out of history and referrers.
+    window.history.replaceState(null, "", window.location.pathname);
+    (async () => {
+      try {
+        const response = await fetch("/api/apply/prefill", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ token: match[1] }) });
+        const payload = await response.json().catch(() => null);
+        const values = payload?.prefill;
+        if (!response.ok || !values || typeof values !== "object") { prefillToken.current = null; return; }
+        setType("Vendor");
+        if (typeof values.vendorCategory === "string" && categories.includes(values.vendorCategory)) setCategory(values.vendorCategory);
+        setFullSeason(values.fullSeason === true);
+        setSelected(new Set(Array.isArray(values.dates) ? values.dates.filter((d: unknown): d is string => typeof d === "string" && dates.includes(d)) : []));
+        setPrefill({ firstName: values.firstName ?? "", lastName: values.lastName ?? "", email: values.email ?? "", phone: values.phone ?? "", businessName: values.businessName ?? "" });
+      } catch { prefillToken.current = null; }
+    })();
+  }, [categories, dates]);
   const months = useMemo(() => {
     const groups = new Map<string, string[]>();
     for (const iso of dates) {
@@ -46,6 +69,7 @@ export default function ApplyForm({ dates, categories, fullSeasonLabel, maxBooth
       fullSeason: vendor && fullSeason, dates: vendor && !fullSeason ? [...selected] : [], booths: vendor ? booths : 1,
       message: form.get("message"), agreementAccepted: form.get("agreementAccepted") === "on", signatureName: form.get("signatureName"),
       website: form.get("website"),
+      ...(prefillToken.current ? { prefillToken: prefillToken.current } : {}),
     };
     try {
       const response = await fetch("/api/apply", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
@@ -74,7 +98,8 @@ export default function ApplyForm({ dates, categories, fullSeasonLabel, maxBooth
   }
 
   return (
-    <form onSubmit={submit} className="space-y-8 rounded-3xl bg-white p-6 shadow-sm ring-1 ring-navy/10 sm:p-8">
+    <form key={prefill ? "prefilled" : "blank"} onSubmit={submit} className="space-y-8 rounded-3xl bg-white p-6 shadow-sm ring-1 ring-navy/10 sm:p-8">
+      {prefill && <p role="status" className="rounded-2xl bg-sky/10 p-4 text-sm text-navy">We filled in the details you gave us earlier. Check them, choose your booths, sign the agreement, and attach your insurance to finish.</p>}
       <fieldset>
         <legend className={LABEL}>I am applying as</legend>
         <div className="mt-2 flex gap-3">
@@ -86,11 +111,11 @@ export default function ApplyForm({ dates, categories, fullSeasonLabel, maxBooth
       </fieldset>
 
       <div className="grid gap-4 sm:grid-cols-2">
-        <label className={LABEL}>First Name<input name="firstName" required maxLength={100} className={FIELD} /></label>
-        <label className={LABEL}>Last Name<input name="lastName" required maxLength={100} className={FIELD} /></label>
-        <label className={LABEL}>Email<input name="email" type="email" required maxLength={254} className={FIELD} /></label>
-        <label className={LABEL}>Phone<input name="phone" type="tel" maxLength={40} className={FIELD} /></label>
-        <label className={`${LABEL} sm:col-span-2`}>{vendor ? "Business Name" : "Organization Name"}<input name="businessName" required maxLength={200} className={FIELD} /></label>
+        <label className={LABEL}>First Name<input name="firstName" defaultValue={prefill?.firstName ?? ""} required maxLength={100} className={FIELD} /></label>
+        <label className={LABEL}>Last Name<input name="lastName" defaultValue={prefill?.lastName ?? ""} required maxLength={100} className={FIELD} /></label>
+        <label className={LABEL}>Email<input name="email" defaultValue={prefill?.email ?? ""} type="email" required maxLength={254} className={FIELD} /></label>
+        <label className={LABEL}>Phone<input name="phone" defaultValue={prefill?.phone ?? ""} type="tel" maxLength={40} className={FIELD} /></label>
+        <label className={`${LABEL} sm:col-span-2`}>{vendor ? "Business Name" : "Organization Name"}<input name="businessName" defaultValue={prefill?.businessName ?? ""} required maxLength={200} className={FIELD} /></label>
         {vendor && (
           <>
             <label className={LABEL}>What do you sell?

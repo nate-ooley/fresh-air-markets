@@ -1,7 +1,7 @@
 import postgres from "postgres";
 import { applicantContact, emailConfigured, sendEmail, sendStaffEmail, type SendEmailResult } from "./email";
 import {
-  applicationApprovedEmail, applicationChangesRequestedEmail, applicationDeclinedEmail, applicationReceivedEmail,
+  applicationInvitationEmail, applicationApprovedEmail, applicationChangesRequestedEmail, applicationDeclinedEmail, applicationReceivedEmail,
   paymentReceivedEmail, paymentRequestEmail, passwordResetEmail, staffContactMessageEmail, staffInvitationEmail, staffNewApplicationEmail, staffPaymentReceivedEmail,
 } from "./email-templates";
 
@@ -141,4 +141,13 @@ export async function notifyStaffInvitation(input: {
   if (!emailConfigured()) return "not_sent";
   const content = staffInvitationEmail({ name: input.name, marketName: input.marketName, link: input.link, days: input.days });
   return outcome(await sendEmail({ kind: "staff_invitation", to: input.email, marketId: input.marketId, referenceId: "", ...content }, { sql }));
+}
+
+/** Personal link to finish an application; the prefill token inside `link` is never logged. */
+export async function notifyApplicationInvitation(input: {
+  marketId: string; email: string; name: string; businessName: string; fullSeason: boolean; dates: string[]; link: string;
+}, sql?: Sql): Promise<NotificationOutcome> {
+  if (!emailConfigured()) return "not_sent";
+  const content = applicationInvitationEmail(input);
+  return outcome(await sendEmail({ kind: "application_invitation", to: input.email, marketId: input.marketId, referenceId: "", ...content }, { sql }));
 }
