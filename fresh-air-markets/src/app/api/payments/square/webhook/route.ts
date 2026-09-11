@@ -7,6 +7,7 @@ import {
 } from "@/lib/square-qa-faults";
 import { handleSquarePaymentWebhook } from "@/lib/square-webhook";
 import { persistSquarePaymentWebhook } from "@/lib/square-webhook-pg";
+import { notifyPaymentReceived } from "@/lib/notifications";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -35,10 +36,16 @@ export async function POST(request: Request): Promise<Response> {
     return await handleSquarePaymentWebhook(
       request,
       webhook,
-      event => persistSquarePaymentWebhook(
-        event,
-        qaRollbackEventId ? { environment, ...identity, qaRollbackEventId } : { environment, ...identity },
-      ),
+      async event => {
+        const result = await persistSquarePaymentWebhook(
+          event,
+          qaRollbackEventId ? { environment, ...identity, qaRollbackEventId } : { environment, ...identity },
+        );
+        // The receipt is committed above; a confirmation email failure must not make Square retry it.
+        const marketId = process.env.FAME_MARKET_ACCOUNT_ID?.trim();
+        if (result.kind === "paid" && marketId) await notifyPaymentReceived({ squareOrderId: event.payment.orderId, marketId });
+        return result;
+      },
     );
   } catch {
     // Missing/malformed configuration is not a source error. Do not expose

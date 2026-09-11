@@ -77,7 +77,7 @@ Correct subaccount: `aooAnUXF0COePorBo7wL`.
 ## Remaining acceptance
 
 The six recovery workers remain disabled pending verified native routing.
-Hosted acceptance requires Vercel access, migrations 001–023 in the private
+Hosted acceptance requires Vercel access, migrations 001–024 in the private
 Preview database, actual Approved stage and custom-field IDs, booth capacity,
 and proof that every field-triggered QA notification is contained to authorized
 recipients. Then test real Square Sandbox checkout/webhooks, email inboxes,

@@ -3,6 +3,7 @@ import { getSessionAccountId } from "@/lib/auth";
 import { validSquareReservationId } from "@/lib/square-payment";
 import { issueVendorPaymentInvitation, readVendorAccessBody, sameOriginVendorPost, vendorPaymentAccessConfig } from "@/lib/vendor-payment-access";
 import { postgresVendorPaymentAccessStore } from "@/lib/vendor-payment-access-pg";
+import { notifyPaymentRequest } from "@/lib/notifications";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -26,7 +27,10 @@ export async function POST(request: NextRequest, context: { params: Promise<{ id
   }
   try {
     const result = await issueVendorPaymentInvitation({ config, reservationId: id, actorAccountId, store: postgresVendorPaymentAccessStore });
-    if (result.kind === "issued") return NextResponse.json({ invitationToken: result.invitationToken, invitationUrl: result.invitationUrl, expiresAt: result.expiresAt }, { status: 201, headers });
+    if (result.kind === "issued") {
+      const vendorNotification = await notifyPaymentRequest({ reservationId: id, marketId: config.marketId, invitationUrl: result.invitationUrl, expiresAt: result.expiresAt });
+      return NextResponse.json({ invitationToken: result.invitationToken, invitationUrl: result.invitationUrl, expiresAt: result.expiresAt, vendorNotification }, { status: 201, headers });
+    }
     if (result.kind === "not_found") return NextResponse.json({ error: "Reservation not found." }, { status: 404, headers });
     if (result.kind === "forbidden") return NextResponse.json({ error: "Forbidden" }, { status: 403, headers });
     return NextResponse.json({ error: "A finalized reservation and ready payment request or confirmation are required." }, { status: 409, headers });

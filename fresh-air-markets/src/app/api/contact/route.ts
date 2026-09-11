@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { readObjectBody } from "@/lib/request-body";
 import { consumeInquiryLimit, inquiryClient } from "@/lib/inquiry-rate-limit";
 import { readPortalConfig, saveContactMessage, saveSubscriber, validateContactMessage } from "@/lib/portal-intake";
+import { notifyContactMessage } from "@/lib/notifications";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -27,7 +28,10 @@ export async function POST(request: NextRequest) {
     }
     const validation = validateContactMessage(body);
     if (!validation.ok) return NextResponse.json({ error: validation.errors.join(" "), errors: validation.errors }, { status: 400, headers });
-    await saveContactMessage(validation.input, config.marketId, inquiryClient(request.headers));
+    const messageId = await saveContactMessage(validation.input, config.marketId, inquiryClient(request.headers));
+    const { input } = validation;
+    await notifyContactMessage({ marketId: config.marketId, messageId, name: `${input.firstName} ${input.lastName}`.trim(),
+      email: input.email, phone: input.phone, topic: input.topic, message: input.message });
     return NextResponse.json({ ok: true }, { status: 201, headers });
   } catch (error) {
     if (error instanceof Error && error.message === "invalid_email") return NextResponse.json({ error: "Enter a valid email address." }, { status: 400, headers });

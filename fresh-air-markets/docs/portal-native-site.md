@@ -52,3 +52,23 @@ payment link and copy it to the vendor.
   reminders). Staff copy links and email vendors from their own mailbox until
   an email provider is added.
 - Vendor self-service document upload; staff upload documents for now.
+
+## Email notifications (Resend)
+
+`src/lib/email.ts` sends through Resend's HTTP API; `src/lib/notifications.ts`
+wires events to templates in `src/lib/email-templates.ts`; every attempt is
+logged in `fame_email_log` (migration 024). Without `RESEND_API_KEY` every
+send is recorded as skipped and nothing else changes.
+
+| Event | Vendor email | Staff email (`STAFF_NOTIFY_EMAIL`) |
+| --- | --- | --- |
+| Application submitted | received / what happens next | new application with review link |
+| Decision saved | approved / changes requested (with note) / declined | — |
+| Private payment link created | payment request with link, total, due date | — |
+| Square webhook reconciles a payment | payment received | paid, with application link |
+| Contact form | — | the message |
+
+`EMAIL_FROM` must use a domain verified in Resend; until the market domain's
+DNS is verified, `onboarding@resend.dev` delivers only to the Resend account
+owner's own address. Sends are best-effort (no retry queue): the response and
+the log say `sent`, `failed` or `not_sent`.

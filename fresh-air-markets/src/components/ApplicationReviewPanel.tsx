@@ -34,13 +34,13 @@ interface SavedReview {
   reviewEventId: string;
   duplicate: boolean;
   delivery: "delivered" | "queued" | "failed" | "unknown";
-  vendorNotification?: "not_sent";
+  vendorNotification?: "not_sent" | "sent" | "failed";
 }
 
 interface ReviewNotice {
   duplicate: boolean;
   delivery: "delivered" | "queued" | "failed" | "unknown";
-  vendorNotification?: "not_sent";
+  vendorNotification?: "not_sent" | "sent" | "failed";
   reviewState: ReviewState;
 }
 
@@ -114,8 +114,9 @@ function isSavedReview(value: unknown, applicationId: string): value is SavedRev
     && typeof saved?.reviewEventId === "string"
     && typeof saved?.duplicate === "boolean"
     && (saved?.delivery === "delivered" || saved?.delivery === "queued" || saved?.delivery === "failed" || saved?.delivery === "unknown")
-    && (saved.vendorNotification === undefined || saved.vendorNotification === "not_sent")
-    && (application.reviewState !== "changes_requested" || saved.vendorNotification === "not_sent");
+    && (saved.vendorNotification === undefined || saved.vendorNotification === "not_sent"
+      || saved.vendorNotification === "sent" || saved.vendorNotification === "failed")
+    && (application.reviewState !== "changes_requested" || saved.vendorNotification !== undefined);
 }
 
 async function readJson(response: Response): Promise<unknown> {
@@ -433,6 +434,12 @@ export default function ApplicationReviewPanel({ applicationId }: { applicationI
                         ? CORRECTION_DELIVERY_LABEL[notice.delivery]
                         : REVIEW_DELIVERY_LABEL[notice.delivery]}
                   </p>
+                  {notice.vendorNotification === "sent" && (
+                    <p className="mt-2 font-semibold">The vendor has been emailed about this decision.</p>
+                  )}
+                  {notice.vendorNotification === "failed" && (
+                    <p className="mt-2 font-semibold">The email to the vendor failed. Contact the vendor separately.</p>
+                  )}
                   {notice.vendorNotification === "not_sent" && (
                     <p className="mt-2 font-semibold">Vendor notification has not been sent. Contact the vendor separately with the corrections; no automatic correction email is queued.</p>
                   )}

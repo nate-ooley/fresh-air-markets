@@ -13,6 +13,7 @@ import {
   readApplicationReviewDeliveryConfig,
 } from "@/lib/ghl-application-review-delivery";
 import { readObjectBody } from "@/lib/request-body";
+import { notifyApplicationDecision } from "@/lib/notifications";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -93,14 +94,18 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
         // The decision is already saved; a failed read cannot prove queued work.
       }
     }
+    // Email the vendor about a newly applied decision. A replayed decision is
+    // not re-sent. The outcome is reported honestly, never assumed.
+    let vendorNotification: "sent" | "failed" | "not_sent" = "not_sent";
+    if (result.kind === "applied") {
+      vendorNotification = await notifyApplicationDecision({ applicationId: id, marketId, action: decision.action, reason: decision.reason });
+    }
     return NextResponse.json({
       application: { id: result.applicationId, reviewState: result.reviewState },
       reviewEventId: result.reviewEventId,
       duplicate: result.kind === "duplicate",
       delivery,
-      // The review outbox reconciles CRM state only. No application-correction
-      // email sender exists here, so never imply that one is queued or sent.
-      ...(decision.action === "request_changes" ? { vendorNotification: "not_sent" as const } : {}),
+      vendorNotification,
     });
   } catch {
     return NextResponse.json({ error: "Application review is unavailable." }, { status: 503 });

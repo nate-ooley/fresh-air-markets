@@ -5,7 +5,7 @@ dashboard. They do not establish readiness of a newly provisioned Neon branch.
 The regular portal initializer creates only the base tables and can seed a demo
 account; do not use a public demo request to bootstrap the Fresh Air QA tenant.
 The application, agreement, document, reservation and Square ledgers require
-migrations 001–023.
+migrations 001–024.
 
 ## September 9 hosted inspection
 
@@ -209,7 +209,7 @@ pooled/unpooled host variants. No new secret has to be created for the runner.
 
 ## What the runner verifies
 
-- All twenty-three numbered migrations are present in order.
+- All twenty-four numbered migrations are present in order.
 - The portal's base `accounts`, `booths`, `bookings` and `booking_dates` tables
   exist before migration. Missing base tables stop the migration; the runner
   will not fabricate an account or seed production-like application records.
@@ -280,7 +280,7 @@ routing or authorize live collection.
 ## Regression coverage
 
 `tests/database-readiness.test.cjs` verifies target validation, transaction
-wrapper handling, all twenty-three migration files, checksum/order enforcement and
+wrapper handling, all twenty-four migration files, checksum/order enforcement and
 redaction of invalid connection values. These five tests pass locally.
 
 `tests/database-readiness.pg.test.cjs` runs only with `DATABASE_TEST_URL` pointing
@@ -296,6 +296,6 @@ including varied creation weekdays and refusal of real applicant changes.
 `tests/pg/qa-seeded-bootstrap.test.cjs` covers read-only inspection, preservation
 of every original row, private-password verification, concurrent/repeated runs,
 conflicting identities, incompatible schemas and SQL hooks, rollback, and the
-complete 001–023 migration sequence beside the preserved demo. Run this suite
+complete 001–024 migration sequence beside the preserved demo. Run this suite
 against the disposable local PostgreSQL CI service before using the command on
 the hosted Preview branch; isolated tests do not establish hosted readiness.

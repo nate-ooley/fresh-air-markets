@@ -602,13 +602,13 @@ export async function main(args = process.argv.slice(2), env = process.env) {
       console.log(JSON.stringify({ command: options.command, ...result, ready: false,
         config: { FAME_MARKET_ACCOUNT_ID: result.accountId, FAME_SEASON_ID: '2026-2027' },
         next: result.demoAccountPresent
-          ? 'Remove the public demo tenant (remove-demo-tenant --production), then apply and check migrations 001–023 with --production.'
-          : 'Set FAME_MARKET_ACCOUNT_ID and FAME_BOOTH_CAPACITY in Production, then apply and check migrations 001–023 with --production.' }));
+          ? 'Remove the public demo tenant (remove-demo-tenant --production), then apply and check migrations 001–024 with --production.'
+          : 'Set FAME_MARKET_ACCOUNT_ID and FAME_BOOTH_CAPACITY in Production, then apply and check migrations 001–024 with --production.' }));
       return;
     }
     console.log(JSON.stringify({ command: options.command, ...result, ready: false,
       config: { FAME_MARKET_ACCOUNT_ID: result.accountId, FAME_SEASON_ID: '2026-2027', FAME_BOOTH_CAPACITY: options['qa-capacity'] },
-      next: 'Apply and check migrations 001–023; deploy Preview and verify private manager login. QA capacity is not Production capacity.' }));
+      next: 'Apply and check migrations 001–024; deploy Preview and verify private manager login. QA capacity is not Production capacity.' }));
   } finally { await sql.end({ timeout: 5 }); }
 }
 

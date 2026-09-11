@@ -12,7 +12,7 @@ or live-contact/admin messages. Preserve existing applicant history.
 
 ## Current contract and evidence scope
 
-- Apply and verify all migrations **001–023** on the reviewed private QA database
+- Apply and verify all migrations **001–024** on the reviewed private QA database
   with old stage-writing workers paused. Migration 021 retains legacy history
   and requires exact `ghl_opportunity_fields_v1` receipts; it does not prove
   hosted delivery.

@@ -29,6 +29,7 @@ function loadRoute({ checkout, webhook, handle, persist, qaSupport, qaSigner, qa
       squareQaSignerAuthorization: qaSigner || (() => 'absent'),
       squareQaWebhookRollbackEventId: qaRollback || (() => null),
     };
+    if (id === '@/lib/notifications') return { notifyPaymentReceived: async () => 'not_sent' };
     return require(id);
   };
   mod._compile(compiled, filename);

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { readObjectBody } from "@/lib/request-body";
 import { consumeInquiryLimit, inquiryClient } from "@/lib/inquiry-rate-limit";
 import { readPortalConfig, submitPortalApplication, validatePortalApplication } from "@/lib/portal-intake";
+import { notifyApplicationReceived } from "@/lib/notifications";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -35,7 +36,15 @@ export async function POST(request: NextRequest) {
   if (emailLimit) return emailLimit;
   try {
     const result = await submitPortalApplication(validation.input, config, { clientIp: ip, userAgent: request.headers.get("user-agent") ?? "" });
-    return NextResponse.json({ ok: true, status: result.status }, { status: result.status === "captured" ? 201 : 200, headers });
+    let notified: "sent" | "failed" | "not_sent" = "not_sent";
+    if (result.status === "captured") {
+      const { input } = validation;
+      notified = await notifyApplicationReceived({
+        applicationId: result.applicationId, marketId: config.marketId, email: input.email,
+        name: `${input.firstName} ${input.lastName}`.trim(), businessName: input.businessName, type: input.registrationType,
+      });
+    }
+    return NextResponse.json({ ok: true, status: result.status, emailed: notified === "sent" }, { status: result.status === "captured" ? 201 : 200, headers });
   } catch {
     return NextResponse.json({ error: "Your application could not be saved. Please try again." }, { status: 503, headers });
   }

@@ -18,6 +18,7 @@ function loadRoute(name, store = {}, actor = 'private-market') {
     if (id === '@/lib/vendor-payment-access') return access;
     if (id === '@/lib/vendor-payment-access-pg') return { postgresVendorPaymentAccessStore: store };
     if (id === '@/lib/square-payment') return require('../.test-build/square-payment.js');
+    if (id === '@/lib/notifications') return { notifyPaymentRequest: async () => 'not_sent' };
     return require(id);
   };
   mod._compile(ts.transpileModule(fs.readFileSync(filename, 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText, filename);
