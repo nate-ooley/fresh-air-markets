@@ -51,7 +51,9 @@ export async function POST(request: NextRequest) {
     let uploadToken: string | null = null;
     try { uploadToken = createApplicationUploadToken(result.applicationId, config.marketId); } catch { uploadToken = null; }
     return NextResponse.json({ ok: true, status: result.status, emailed: notified === "sent", uploadToken }, { status: result.status === "captured" ? 201 : 200, headers });
-  } catch {
+  } catch (error) {
+    // Logged so a vendor's "could not be saved" report can be traced in Vercel.
+    console.error("apply_submit_failed", { email: validation.input.email, reason: error instanceof Error ? error.message : String(error) });
     return NextResponse.json({ error: "Your application could not be saved. Please try again." }, { status: 503, headers });
   }
 }

@@ -74,11 +74,11 @@ export default function ApplyForm({ dates, categories, fullSeasonLabel, maxBooth
     try {
       const response = await fetch("/api/apply", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
       const payload = await response.json().catch(() => null);
-      if (!response.ok) { setErrors(Array.isArray(payload?.errors) ? payload.errors : [typeof payload?.error === "string" ? payload.error : "Your application could not be submitted."]); return; }
+      if (!response.ok) { setErrors(Array.isArray(payload?.errors) ? payload.errors : [typeof payload?.error === "string" ? payload.error : `Your application could not be submitted (error ${response.status}). Please try again in a minute.`]); return; }
       setUploadToken(typeof payload?.uploadToken === "string" ? payload.uploadToken : null);
       setDone(payload?.status === "duplicate" ? "duplicate" : "captured");
       window.scrollTo({ top: 0, behavior: "smooth" });
-    } catch { setErrors(["Your application could not be submitted. Please try again."]); }
+    } catch { setErrors(["We couldn't reach the server, so your application was not submitted. Check your connection and try again. If it keeps happening, email us at hello@freshairmarketsandevents.com and we'll enter it for you."]); }
     finally { setBusy(false); }
   };
 
