@@ -58,3 +58,10 @@ test('templates carry the essentials and escape HTML', () => {
   assert.match(templates.staffNewApplicationEmail({ name: 'Rosa', businessName: 'Sunrise Farms', email: 'r@example.com', type: 'Vendor', applicationId: 'abc', origin: 'https://p' }).text, /https:\/\/p\/applications\/abc/);
   assert.match(templates.staffContactMessageEmail({ name: 'Pat', email: 'p@example.com', phone: '', topic: 'general', message: 'Hello', origin: 'https://p' }).subject, /Pat/);
 });
+
+test('the staff new-application email includes the vendor phone when given', () => {
+  const withPhone = templates.staffNewApplicationEmail({ name: 'Rosa', businessName: 'Sunrise Farms', email: 'rosa@example.com', phone: '(941) 555-0100', type: 'Vendor', applicationId: 'a1', origin: 'https://x.test' });
+  assert.match(withPhone.text, /rosa@example\.com, \(941\) 555-0100/);
+  const without = templates.staffNewApplicationEmail({ name: 'Rosa', businessName: 'Sunrise Farms', email: 'rosa@example.com', type: 'Vendor', applicationId: 'a1', origin: 'https://x.test' });
+  assert.match(without.text, /rosa@example\.com\) applied/);
+});

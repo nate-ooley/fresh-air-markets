@@ -42,6 +42,8 @@ export interface ApplicationReviewIdentitySnapshot {
   vendorName: string;
   businessName: string;
   email: string;
+  /** Contact phone as the vendor typed it; empty when the source did not have one. */
+  phone: string;
   applicantType: string;
   dates: string[];
   fullSeason: boolean;
@@ -224,6 +226,7 @@ export function reviewIdentitySnapshot(value: unknown): ApplicationReviewIdentit
     ? firstSafeText(source, ["businessName", "vendorBusinessName"], MAX_SNAPSHOT_FIELD_LENGTH)
     : firstSafeText(source, ["orgName", "nonProfitOrgName"], MAX_SNAPSHOT_FIELD_LENGTH);
   const email = firstSafeText(source, ["email"], 254);
+  const phone = firstSafeText(source, ["phone", "phoneNumber", "contactPhone"], 40) ?? "";
   const selection = applicantType === "Vendor"
     ? sourceDateSelection(source.vendorDatesRequested ?? source.selectedDates ?? source.requestedDates ?? source.dates)
     : { dates: [], fullSeason: false, requiresFinalDateConfirmation: false };
@@ -246,6 +249,7 @@ export function reviewIdentitySnapshot(value: unknown): ApplicationReviewIdentit
     vendorName,
     businessName,
     email,
+    phone,
     applicantType,
     dates: dates ?? [],
     fullSeason,

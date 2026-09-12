@@ -12,6 +12,7 @@ interface ApplicationReviewIdentitySnapshot {
   vendorName: string;
   businessName: string;
   email: string;
+  phone?: string;
   applicantType: string;
   dates: string[];
   fullSeason: boolean;
@@ -95,7 +96,8 @@ function isIdentitySnapshot(value: unknown): value is ApplicationReviewIdentityS
     && typeof snapshot.requiresFinalDateConfirmation === "boolean"
     && Array.isArray(snapshot.dates) && snapshot.dates.every(date => typeof date === "string")
     && (typeof snapshot.details === "string" || snapshot.details === null)
-    && (snapshot.boothsRequested === undefined || Number.isSafeInteger(snapshot.boothsRequested));
+    && (snapshot.boothsRequested === undefined || Number.isSafeInteger(snapshot.boothsRequested))
+    && (snapshot.phone === undefined || typeof snapshot.phone === "string");
 }
 
 function isApplicationReviewDetail(value: unknown, applicationId: string): value is ApplicationReviewDetail {
@@ -356,7 +358,13 @@ export default function ApplicationReviewPanel({ applicationId }: { applicationI
                     </div>
                     <div>
                       <dt className="text-xs font-semibold uppercase tracking-wide text-ink/45">Email</dt>
-                      <dd className="mt-1 break-words text-pine-deep">{application.identitySnapshot.email}</dd>
+                      <dd className="mt-1 break-words text-pine-deep"><a href={`mailto:${application.identitySnapshot.email}`} className="underline-offset-4 hover:underline">{application.identitySnapshot.email}</a></dd>
+                    </div>
+                    <div>
+                      <dt className="text-xs font-semibold uppercase tracking-wide text-ink/45">Phone</dt>
+                      <dd className="mt-1 text-pine-deep">{application.identitySnapshot.phone
+                        ? <a href={`tel:${application.identitySnapshot.phone.replace(/[^\d+]/g, "")}`} className="underline-offset-4 hover:underline">{application.identitySnapshot.phone}</a>
+                        : <span className="text-ink/50">Not provided</span>}</dd>
                     </div>
                     <div>
                       <dt className="text-xs font-semibold uppercase tracking-wide text-ink/45">Applicant type</dt>

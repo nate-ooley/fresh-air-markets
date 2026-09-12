@@ -87,6 +87,7 @@ export function validatePortalApplication(body: Record<string, unknown>): Portal
   if (!firstName) errors.push("First name is required.");
   if (!lastName) errors.push("Last name is required.");
   if (!EMAIL.test(email)) errors.push("A valid email address is required.");
+  if (phone.replace(/\D/g, "").length < 7) errors.push("A phone number is required so market staff can reach you.");
   if (!businessName) errors.push(type === "Non-Profit Organization" ? "Organization name is required." : "Business name is required.");
   if (type === "Vendor") {
     if (!(VENDOR_CATEGORIES as readonly string[]).includes(vendorCategory)) errors.push("Pick the category that best describes what you sell.");

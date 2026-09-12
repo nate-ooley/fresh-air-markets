@@ -53,6 +53,10 @@ test('validation normalizes the form and reports every missing field', () => {
   assert.ok(nonprofit.errors.some(e => /mission/.test(e)));
   assert.equal(validatePortalApplication(body({ registrationType: 'Non-Profit Organization', vendorCategory: '', dates: [], message: 'Food access.' })).ok, true);
   assert.equal(validatePortalApplication(body({ fullSeason: true, dates: [] })).ok, true);
+  const noPhone = validatePortalApplication(body({ phone: '' }));
+  assert.equal(noPhone.ok, false);
+  assert.ok(noPhone.errors.some(e => /phone number is required/.test(e)));
+  assert.equal(validatePortalApplication(body({ phone: '(941) 555-0100' })).ok, true);
   assert.equal(validatePortalApplication(body({ booths: 9 })).ok, false);
   assert.equal(validatePortalApplication(body({ booths: undefined })).input.booths, 1);
   assert.equal(validatePortalApplication(body({ registrationType: 'Non-Profit Organization', vendorCategory: '', dates: [], message: 'x', booths: 3 })).input.booths, 1);
@@ -72,6 +76,7 @@ test('a submission becomes a reviewable application with an opportunity, a signe
   assert.deepEqual(detail.identitySnapshot.dates, ['2026-10-03', '2026-10-10']);
   assert.equal(detail.identitySnapshot.category, 'Produce');
   assert.equal(detail.identitySnapshot.boothsRequested, 2);
+  assert.equal(detail.identitySnapshot.phone, '555-0100');
   const [application] = await sql`SELECT contact_id, opportunity_id FROM fame_applications`;
   assert.equal(application.contact_id, portalContactId('rosa@sunrisefarms.example'));
   assert.match(application.opportunity_id, /^portal-opportunity:/);

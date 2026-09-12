@@ -253,7 +253,7 @@ test('manager detail and list use only the latest same-market, same-location sou
     reviewRevision: 0,
     hasOpportunity: true,
     identitySnapshot: {
-      vendorName: 'Current vendor', businessName: 'Current business', email: 'current@example.com',
+      vendorName: 'Current vendor', businessName: 'Current business', email: 'current@example.com', phone: '',
       applicantType: 'Vendor', dates: ['2027-05-29'], fullSeason: false, requiresFinalDateConfirmation: false, boothsRequested: 1,
       category: 'Community', details: 'Current detail',
     },
@@ -315,19 +315,19 @@ test('AI Studio vendor and nonprofit source keys map to a bounded manager snapsh
     },
   });
   assert.deepEqual((await getApplicationReviewDetail(vendor.applicationId, market, first)).identitySnapshot, {
-    vendorName: 'Vera Vendor', businessName: 'Vera Produce', email: 'vera@example.com', applicantType: 'Vendor',
+    vendorName: 'Vera Vendor', businessName: 'Vera Produce', email: 'vera@example.com', phone: '', applicantType: 'Vendor',
     dates: ['Sat, May 29, 2027', 'Sat, Oct 3, 2026'], fullSeason: false, requiresFinalDateConfirmation: false, boothsRequested: 1, category: 'Produce', details: 'Seasonal citrus and greens.',
   });
   assert.deepEqual((await getApplicationReviewDetail(nonprofit.applicationId, market, first)).identitySnapshot, {
-    vendorName: 'Nora Nonprofit', businessName: 'North Port Pantry', email: 'nora@example.com', applicantType: 'Non-Profit Organization',
+    vendorName: 'Nora Nonprofit', businessName: 'North Port Pantry', email: 'nora@example.com', phone: '', applicantType: 'Non-Profit Organization',
     dates: [], fullSeason: false, requiresFinalDateConfirmation: false, boothsRequested: 1, category: 'Non-Profit Organization', details: 'Share food with local families.',
   });
   assert.deepEqual((await getApplicationReviewDetail(fullSeason.applicationId, market, first)).identitySnapshot, {
-    vendorName: 'Faye Fullseason', businessName: 'Faye Flowers', email: 'faye@example.com', applicantType: 'Vendor',
+    vendorName: 'Faye Fullseason', businessName: 'Faye Flowers', email: 'faye@example.com', phone: '', applicantType: 'Vendor',
     dates: ['Full Season (Oct 3 - May 27)'], fullSeason: true, requiresFinalDateConfirmation: true, boothsRequested: 1, category: 'Floral', details: 'Legacy selection retained for confirmation.',
   });
   assert.deepEqual((await getApplicationReviewDetail(correctedFullSeason.applicationId, market, first)).identitySnapshot, {
-    vendorName: 'Cora Corrected', businessName: 'Cora Crafts', email: 'cora@example.com', applicantType: 'Vendor',
+    vendorName: 'Cora Corrected', businessName: 'Cora Crafts', email: 'cora@example.com', phone: '', applicantType: 'Vendor',
     dates: ['Full Season (Oct 3 - May 29)'], fullSeason: true, requiresFinalDateConfirmation: false, boothsRequested: 1, category: 'Arts & Crafts', details: 'Corrected source label.',
   });
 });

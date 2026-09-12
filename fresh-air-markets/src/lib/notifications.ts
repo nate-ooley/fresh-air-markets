@@ -33,7 +33,7 @@ export function portalOrigin(env: NodeJS.ProcessEnv = process.env): string {
 }
 
 export async function notifyApplicationReceived(input: {
-  applicationId: string; marketId: string; email: string; name: string; businessName: string; type: "Vendor" | "Non-Profit Organization";
+  applicationId: string; marketId: string; email: string; phone?: string; name: string; businessName: string; type: "Vendor" | "Non-Profit Organization";
 }, sql?: Sql): Promise<NotificationOutcome> {
   if (!emailConfigured()) return "not_sent";
   const deps = { sql };

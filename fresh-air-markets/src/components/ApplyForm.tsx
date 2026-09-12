@@ -114,7 +114,7 @@ export default function ApplyForm({ dates, categories, fullSeasonLabel, maxBooth
         <label className={LABEL}>First Name<input name="firstName" defaultValue={prefill?.firstName ?? ""} required maxLength={100} className={FIELD} /></label>
         <label className={LABEL}>Last Name<input name="lastName" defaultValue={prefill?.lastName ?? ""} required maxLength={100} className={FIELD} /></label>
         <label className={LABEL}>Email<input name="email" defaultValue={prefill?.email ?? ""} type="email" required maxLength={254} className={FIELD} /></label>
-        <label className={LABEL}>Phone<input name="phone" defaultValue={prefill?.phone ?? ""} type="tel" maxLength={40} className={FIELD} /></label>
+        <label className={LABEL}>Phone<input name="phone" defaultValue={prefill?.phone ?? ""} type="tel" required minLength={7} maxLength={40} className={FIELD} /></label>
         <label className={`${LABEL} sm:col-span-2`}>{vendor ? "Business Name" : "Organization Name"}<input name="businessName" defaultValue={prefill?.businessName ?? ""} required maxLength={200} className={FIELD} /></label>
         {vendor && (
           <>

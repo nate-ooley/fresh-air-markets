@@ -9,6 +9,7 @@ interface ApplicationReviewIdentitySnapshot {
   vendorName: string;
   businessName: string;
   email: string;
+  phone?: string;
   applicantType: string;
   dates: string[];
   fullSeason: boolean;
@@ -54,7 +55,8 @@ function isSnapshot(value: unknown): value is ApplicationReviewIdentitySnapshot 
     && typeof snapshot.requiresFinalDateConfirmation === "boolean"
     && Array.isArray(snapshot.dates) && snapshot.dates.every(date => typeof date === "string")
     && (typeof snapshot.details === "string" || snapshot.details === null)
-    && (snapshot.boothsRequested === undefined || Number.isSafeInteger(snapshot.boothsRequested));
+    && (snapshot.boothsRequested === undefined || Number.isSafeInteger(snapshot.boothsRequested))
+    && (snapshot.phone === undefined || typeof snapshot.phone === "string");
 }
 
 function isItem(value: unknown): value is ApplicationReviewListItem {
@@ -177,7 +179,7 @@ export default function ApplicationReviewList() {
                     <div className="flex flex-wrap items-start justify-between gap-4">
                       <div>
                         <h2 className="font-display text-xl text-pine-deep">{snapshot?.businessName ?? "Incomplete applicant details"}</h2>
-                        {snapshot && <p className="mt-1 text-sm text-ink/65">{snapshot.vendorName} · {snapshot.email}</p>}
+                        {snapshot && <p className="mt-1 text-sm text-ink/65">{snapshot.vendorName} · {snapshot.email}{snapshot.phone ? <> · <a href={`tel:${snapshot.phone.replace(/[^\d+]/g, "")}`} className="underline-offset-4 hover:underline">{snapshot.phone}</a></> : ""}</p>}
                       </div>
                       <span className="rounded-full bg-amber/15 px-3 py-1 text-xs font-bold text-clay">{STATE_LABEL[application.reviewState]}</span>
                     </div>

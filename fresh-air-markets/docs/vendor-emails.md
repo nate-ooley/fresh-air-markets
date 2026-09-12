@@ -101,7 +101,7 @@ Wording lives in `src/lib/email-templates.ts`; triggers in `src/lib/notification
 
 | Email | Trigger | Subject |
 | --- | --- | --- |
-| New application | vendor submits `/apply` | New vendor application: {business} |
+| New application (includes vendor email and phone) | vendor submits `/apply` | New vendor application: {business} |
 | Paid | Square webhook confirms payment | Paid: {business} ($40.00) |
 | Website message | visitor uses the contact form | Website message from {name} ({topic}) |
 | Password reset | staff use "Forgot your password?" | Reset your Fresh Air Markets & Events staff password |

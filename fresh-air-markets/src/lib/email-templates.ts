@@ -84,9 +84,9 @@ export function paymentReceivedEmail(input: { name: string; totalCents: number }
   ]) };
 }
 
-export function staffNewApplicationEmail(input: { name: string; businessName: string; email: string; type: string; applicationId: string; origin: string }): EmailContent {
+export function staffNewApplicationEmail(input: { name: string; businessName: string; email: string; phone?: string; type: string; applicationId: string; origin: string }): EmailContent {
   return { subject: `New ${input.type.toLowerCase()} application: ${input.businessName || input.name}`, ...wrap([
-    `${input.name} (${input.email}) applied${input.businessName ? ` as ${input.businessName}` : ""}.`,
+    `${input.name} (${input.email}${input.phone ? `, ${input.phone}` : ""}) applied${input.businessName ? ` as ${input.businessName}` : ""}.`,
     `Review it: ${input.origin}/applications/${input.applicationId}`,
   ]) };
 }
