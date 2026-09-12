@@ -2,7 +2,6 @@
 
 import { type FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import PaymentEmailPanel from "@/components/PaymentEmailPanel";
 import { FRESH_AIR_SEASON_DATES } from "@/lib/fresh-air-season";
 import { FAME_VENDOR_CATEGORIES } from "@/lib/vendor-booking-rules";
 import {
@@ -206,7 +205,7 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
           ? { ...current, state: "payment_pending" } : current);
       }
       setNotice(data.paymentOrder.status === "checkout_created"
-        ? "The payment request is ready. Create a private vendor link below to share access. No email has been sent."
+        ? "The payment request is ready. Use Email payment link below to send it to the vendor."
         : "The saved payment request was retrieved. Reload reservation status to check the latest payment outcome.");
     } catch {
       setError("The payment request could not be confirmed. Retry this same reservation to retrieve its saved request without creating a second order.");
@@ -242,7 +241,12 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
         return;
       }
       setInvitation(link);
-      setNotice("A new private vendor link was created. Previous links and vendor sessions were revoked. No email has been sent.");
+      const delivery = (payload as { vendorNotification?: unknown } | null)?.vendorNotification;
+      setNotice(delivery === "sent"
+        ? "The payment link was emailed to the vendor. Any earlier links were revoked."
+        : delivery === "failed"
+          ? "The link was created but the email could not be sent. Copy the link below and send it to the vendor yourself."
+          : "The link was created. Email is not configured, so copy the link below and send it to the vendor yourself.");
     } catch {
       setError("The private link could not be confirmed. Creating another link replaces any link from this attempt.");
     } finally {
@@ -364,19 +368,17 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
             </section>
           )}
 
-          {reservation.paymentRequired && reservation.state === "payment_pending" && <PaymentEmailPanel reservationId={reservation.id} />}
-
           {canCreateAccess && (
             <section className="rounded-2xl border border-pine/15 p-5">
-              <h3 className="font-semibold text-pine-deep">Private vendor access</h3>
-              <p className="mt-2 text-sm leading-relaxed text-ink/65">Create a private link to the vendor’s reservation page. Share it only with this vendor. Anyone with the link can open this reservation.</p>
+              <h3 className="font-semibold text-pine-deep">Email the payment link</h3>
+              <p className="mt-2 text-sm leading-relaxed text-ink/65">Emails the vendor their private reservation page with the total, their dates and the 48-hour deadline. The link is only for this vendor; anyone who has it can open this reservation. Sending again issues a fresh link and revokes the old one.</p>
               <label className="mt-4 flex items-start gap-3 text-sm text-ink/75">
                 <input type="checkbox" checked={replaceLinkConfirmed} disabled={disabled} onChange={event => setReplaceLinkConfirmed(event.target.checked)} className="mt-0.5" />
-                I understand that creating a link replaces previous links and signs the vendor out of existing sessions.
+                I understand that sending a link replaces any earlier link and signs the vendor out of existing sessions.
               </label>
-              <button type="button" disabled={disabled || !replaceLinkConfirmed} onClick={() => void createAccess()} className={`${BUTTON} mt-4`}>{busy === "access" ? "Creating private link…" : invitation ? "Replace private vendor link" : "Create private vendor link"}</button>
+              <button type="button" disabled={disabled || !replaceLinkConfirmed} onClick={() => void createAccess()} className={`${BUTTON} mt-4`}>{busy === "access" ? "Sending…" : invitation ? "Send a new payment link" : "Email payment link to vendor"}</button>
               {invitation && <div className="mt-4 rounded-xl bg-parchment/70 p-4">
-                <label className="block text-sm font-semibold text-pine-deep">Private link
+                <label className="block text-sm font-semibold text-pine-deep">Private link (in case you need to send it another way)
                   <input type="text" readOnly value={invitation.invitationUrl} onFocus={event => event.target.select()} autoComplete="off" spellCheck={false} className={`${FIELD} font-mono text-xs`} />
                 </label>
                 <p className="mt-2 text-xs text-ink/60">Link expires {deadlineLabel(invitation.expiresAt)}. It is shown here only until this page reloads.</p>

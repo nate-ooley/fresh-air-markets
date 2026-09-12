@@ -36,7 +36,6 @@ const order = {
   id: '22222222-2222-4222-8222-222222222222', checkoutUrl: 'https://sandbox.square.link/u/test',
   paymentDueAt: '2026-10-02T16:00:00Z', status: 'checkout_created',
 };
-const PaymentEmailBoundary = () => null;
 
 test('requested-date suggestions accept exact canonical labels and ISO values without moving historical dates', () => {
   assert.deepEqual(helper.requestedReservationDates([
@@ -112,7 +111,6 @@ function renderPanel(options = {}) {
       useEffect() {},
     },
     'next/navigation': { useRouter: () => router },
-    '@/components/PaymentEmailPanel': { default: PaymentEmailBoundary },
   }).default;
   const element = component({
     applicationId: '33333333-3333-4333-8333-333333333333', sourceEventId: 'qa:current',
@@ -124,7 +122,6 @@ function renderPanel(options = {}) {
   }
   return {
     updates,
-    emailPanels: () => elements(element, node => node.type === PaymentEmailBoundary),
     submit: () => elements(element, node => node.type === 'form')[0].props.onSubmit({ preventDefault() {} }),
     click: async label => {
       const button = elements(element, node => node.type === 'button' && node.props.children === label)[0];
@@ -203,25 +200,16 @@ test('checkout in progress reports pending without claiming payment or creating 
 
 test('private access requires explicit replacement consent and keeps the returned link out of session storage', async () => browserBoundary(async storage => {
   let calls = 0;
-  const payload = { invitationToken: 'private-token', invitationUrl: 'https://freshairmarketsandevents.com/vendor/payment#token=private-token', expiresAt: '2026-10-02T16:00:00Z' };
+  const payload = { invitationToken: 'private-token', invitationUrl: 'https://freshairmarketsandevents.com/vendor/payment#token=private-token', expiresAt: '2026-10-02T16:00:00Z', vendorNotification: 'sent' };
   global.fetch = async (_url, options) => { calls++; assert.equal(options.body, '{}'); return new Response(JSON.stringify(payload), { status: 201 }); };
   const blocked = renderPanel({ reservation, order });
-  await blocked.click('Create private vendor link');
+  await blocked.click('Email payment link to vendor');
   assert.equal(calls, 0);
   const panel = renderPanel({ reservation: { ...reservation, state: 'paid' }, replaceConfirmed: true });
-  await panel.click('Create private vendor link');
+  await panel.click('Email payment link to vendor');
   assert.equal(calls, 1);
   assert.equal(storage.size, 0);
-  assert.match(panel.updates.find(([index, value]) => index === 8 && value)[1], /No email has been sent/);
+  assert.match(panel.updates.find(([index, value]) => index === 8 && value)[1], /emailed to the vendor/);
   assert.deepEqual(panel.updates.find(([index, value]) => index === 3 && value)[1], { invitationUrl: payload.invitationUrl, expiresAt: payload.expiresAt });
 }));
 
-test('email controls use the exact pending reservation and remain hidden for terminal, held or nonprofit records', () => {
-  const panels = renderPanel({ reservation: { ...reservation, state: 'payment_pending' } }).emailPanels();
-  assert.equal(panels.length, 1);
-  assert.deepEqual(panels[0].props, { reservationId: reservation.id });
-  for (const state of ['held', 'paid', 'expired', 'cancelled', 'declined', 'manual_review']) {
-    assert.equal(renderPanel({ reservation: { ...reservation, state }, order }).emailPanels().length, 0, state);
-  }
-  assert.equal(renderPanel({ reservation: { ...reservation, state: 'confirmed', paymentRequired: false, totalCents: 0 }, order }).emailPanels().length, 0);
-});
