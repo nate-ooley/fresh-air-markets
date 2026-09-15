@@ -3,7 +3,7 @@
 ## Live today
 
 Site: https://freshairmarketsandevents.com (staff sign in at `/login`).
-Hosting: Vercel project `farmers-market`. Database: Neon PostgreSQL, migrations 001–026.
+Hosting: Vercel project `farmers-market`. Database: Neon PostgreSQL, migrations 001–027.
 Payments: Square production, merchant ML16MNPG8Z0R5, webhook on the custom domain.
 Email: Resend from `hello@freshairmarketsandevents.com` (domain verified).
 Scheduler: GitHub Actions every 5 minutes, releases unpaid 48-hour holds.

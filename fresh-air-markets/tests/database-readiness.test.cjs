@@ -86,8 +86,8 @@ test('SQL wrapper removal preserves function bodies and quoted semicolons while 
 test('all 21 checked-in migrations can run inside one transaction and contribute readiness checks', async () => {
   const { loadMigrations, expectedObjects } = await modulePromise;
   const migrations = await loadMigrations();
-  assert.equal(migrations.length, 26);
-  assert.match(migrations[25].name, /^026-/);
+  assert.equal(migrations.length, 27);
+  assert.match(migrations[26].name, /^027-/);
   assert.ok(migrations.every(m => /^[a-f0-9]{64}$/.test(m.checksum)));
   const objects = expectedObjects(migrations);
   for (const name of ['fame_applications', 'fame_reservation_allocations', 'fame_square_payment_link_retirements', 'fame_payment_paid_sync_outbox', 'fame_payment_email_outbox', 'fame_payment_pending_sync_outbox', 'fame_password_resets', 'fame_staff_users']) {
@@ -101,12 +101,13 @@ test('all 21 checked-in migrations can run inside one transaction and contribute
   assert.ok(objects.some(o => o.kind === 'trigger' && o.name === 'fame_payment_pending_sync_enqueue'));
   assert.ok(objects.some(o => o.kind === 'trigger' && o.name === 'fame_payment_pending_sync_identity_guard'));
   assert.ok(objects.some(o => o.kind === 'index' && o.name === 'fame_square_payment_link_retirements_ready_idx'));
+  assert.ok(objects.some(o => o.kind === 'index' && o.name === 'fame_payment_orders_live_revision_idx'));
 });
 
 test('history rejects changed SQL, unknown migrations and gaps rather than silently skipping them', async () => {
   const { loadMigrations, compareHistory } = await modulePromise;
   const migrations = await loadMigrations();
-  assert.equal(compareHistory(migrations, []).length, 26);
+  assert.equal(compareHistory(migrations, []).length, 27);
   assert.equal(compareHistory(migrations, migrations).length, 0);
   assert.throws(() => compareHistory(migrations, [{ ...migrations[0], checksum: 'changed' }]), /migration_checksum_mismatch/);
   assert.throws(() => compareHistory(migrations, [{ name: '999-unreviewed.sql', checksum: 'changed' }]), /migration_history_unknown_version/);

@@ -2,7 +2,7 @@
 
 Every message is sent through Resend from
 **Fresh Air Markets <hello@freshairmarketsandevents.com>** (`EMAIL_FROM`).
-Replies go to **nateooley68@gmail.com** (`EMAIL_REPLY_TO`). Staff copies go to
+Replies go to **hello@freshairmarketsandevents.com** (`EMAIL_REPLY_TO`; someone must read that mailbox). Staff copies go to
 **nateooley68@gmail.com** (`STAFF_NOTIFY_EMAIL`). All three are Vercel
 Production settings and can be changed without a code change. Each message
 ends with "— Fresh Air Markets & Events / (941) 740-8866". Every attempt is

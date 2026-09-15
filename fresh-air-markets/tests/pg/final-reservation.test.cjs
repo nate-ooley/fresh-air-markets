@@ -4,7 +4,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { randomUUID } = require('node:crypto');
 const postgres = require('postgres');
-const { reserveFinalApplication, getFinalApplicationReservation } = require('../../.test-build/final-reservation-pg.js');
+const { reserveFinalApplication, getFinalApplicationReservation, reopenExpiredReservation } = require('../../.test-build/final-reservation-pg.js');
+const { claimSquarePaymentCheckout } = require('../../.test-build/square-payment-pg.js');
 
 // This suite creates and drops only a private schema inside the disposable CI DB.
 const url = new URL(process.env.DATABASE_TEST_URL || 'postgres://invalid/');
@@ -62,6 +63,7 @@ before(async () => {
       '011-square-payment-checkout-ledger.sql',
       '012-square-webhook-events.sql',
       '013-final-reservation-writer.sql',
+      '027-payment-order-reissue.sql',
     ]) await migration.unsafe(fs.readFileSync(path.join(__dirname, '../../docs/migrations', file), 'utf8'));
   } finally {
     await migration.end();
@@ -230,4 +232,38 @@ test('manager reload returns only committed same-market reservation and no raw e
   assert.deepEqual(await getFinalApplicationReservation(marketId, applicationId, first), { reservation: result.reservation });
   assert.equal(await getFinalApplicationReservation('foreign-market', applicationId, first), null);
   assert.equal(await getFinalApplicationReservation(marketId, randomUUID(), first), null);
+});
+
+test('an expired hold can be reopened, keeps its dates, price and revision, respects capacity taken meanwhile, and gets a fresh payment order', async () => {
+  const { applicationId } = await seedEligibleApplication();
+  const made = await reserve(applicationId, selection({ selectedDates: ['2026-10-03'] }), first, 1);
+  assert.equal(made.kind, 'created');
+  const id = made.reservation.id;
+  const square = { environment: 'sandbox', merchantId: 'qa-merchant', locationId: 'qa-location' };
+  const firstClaim = await claimSquarePaymentCheckout({ marketId, reservationId: id, square, now, leaseSeconds: 60 }, first);
+  assert.equal(firstClaim.kind, 'checkout_required');
+  assert.equal((await reopenExpiredReservation({ marketId, reservationId: id, config: config(1), now }, first)).kind, 'not_expired');
+  // The scheduler retired the link: order expired, reservation expired.
+  await first`UPDATE fame_payment_orders SET status = 'expired', lease_token = NULL, locked_until = NULL WHERE id = ${firstClaim.order.id}`;
+  await first`UPDATE fame_reservations SET state = 'expired', payment_due_at = ${now} WHERE id = ${id}`;
+  // Someone else takes the only booth while the hold is expired.
+  const other = await seedEligibleApplication();
+  assert.equal((await reserve(other.applicationId, selection({ selectedDates: ['2026-10-03'] }), first, 1)).kind, 'created');
+  const blocked = await reopenExpiredReservation({ marketId, reservationId: id, config: config(1), now }, first);
+  assert.deepEqual(blocked, { kind: 'unavailable', unavailableDates: ['2026-10-03'] });
+  assert.equal((await first`SELECT state FROM fame_reservations WHERE id = ${id}`)[0].state, 'expired');
+  // With room, the hold reopens with no deadline and the same revision.
+  const reopened = await reopenExpiredReservation({ marketId, reservationId: id, config: config(2), now }, first);
+  assert.deepEqual(reopened, { kind: 'reopened', reservation: { id, state: 'held', finalDates: ['2026-10-03'], finalBoothQuantity: 1, totalCents: 4000 } });
+  const [row] = await first`SELECT state, revision, payment_due_at FROM fame_reservations WHERE id = ${id}`;
+  assert.deepEqual([row.state, row.revision, row.payment_due_at], ['held', 1, null]);
+  assert.equal((await reopenExpiredReservation({ marketId, reservationId: id, config: config(2), now }, first)).kind, 'not_expired');
+  assert.equal((await reopenExpiredReservation({ marketId: 'other-market', reservationId: id, config: config(2), now }, first)).kind, 'not_found');
+  // A second payment request is a new order with its own idempotency key; the expired one stays for audit.
+  const secondClaim = await claimSquarePaymentCheckout({ marketId, reservationId: id, square, now: new Date(now.valueOf() + 60_000), leaseSeconds: 60 }, first);
+  assert.equal(secondClaim.kind, 'checkout_required');
+  assert.notEqual(secondClaim.order.id, firstClaim.order.id);
+  assert.notEqual(secondClaim.order.idempotencyKey, firstClaim.order.idempotencyKey);
+  const orders = rows(await first`SELECT status FROM fame_payment_orders WHERE reservation_id = ${id} ORDER BY created_at`);
+  assert.deepEqual(orders.map(o => o.status), ['expired', 'processing_checkout']);
 });

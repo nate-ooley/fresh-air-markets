@@ -162,9 +162,12 @@ export function squarePaymentOrderIdempotencyKey(input: {
   locationId: string;
   reservationId: string;
   reservationRevision: number;
+  /** 1 for the first payment request of a revision; higher after a reopened hold. Omitted for 1 so existing keys are unchanged. */
+  attempt?: number;
 }): string {
+  const attempt = input.attempt && input.attempt > 1 ? `:attempt-${input.attempt}` : "";
   return createHash("sha256")
-    .update(`${input.environment}:${input.locationId}:${input.reservationId}:${input.reservationRevision}`)
+    .update(`${input.environment}:${input.locationId}:${input.reservationId}:${input.reservationRevision}${attempt}`)
     .digest("hex");
 }
 
@@ -254,8 +257,14 @@ export async function claimSquarePaymentCheckout(input: {
              checkout_attempts, lease_token
       FROM fame_payment_orders
       WHERE reservation_id = ${reservation.id} AND reservation_revision = ${reservation.revision}
+      ORDER BY (status = 'expired') ASC, created_at DESC
       FOR UPDATE`;
-    const existing = existingRows[0] ? toPaymentOrder(existingRows[0]) : null;
+    // A reopened hold (state back to "held", no deadline) may carry expired
+    // orders from its earlier attempt; those never block a fresh request.
+    const reopened = reservation.state === "held" && !reservation.payment_due_at
+      && existingRows.length > 0 && existingRows.every(row => row.status === "expired");
+    const attempt = reopened ? existingRows.length + 1 : 1;
+    const existing = existingRows[0] && !reopened ? toPaymentOrder(existingRows[0]) : null;
     if (existing) {
       if (existing.environment !== input.square.environment
         || existing.merchantId !== input.square.merchantId
@@ -317,6 +326,7 @@ export async function claimSquarePaymentCheckout(input: {
       locationId: input.square.locationId,
       reservationId: reservation.id,
       reservationRevision: Number(reservation.revision),
+      attempt,
     });
     const [created] = await tx<PaymentOrderRow[]>`
       INSERT INTO fame_payment_orders

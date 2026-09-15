@@ -56,7 +56,9 @@ async function snapshot(sql: QuerySql, config: VendorPaymentAccessConfig, reserv
     JOIN fame_reservation_finalizations f
       ON f.reservation_id = r.id AND f.market_id = r.market_id AND f.application_id = r.application_id
     LEFT JOIN fame_payment_orders p
-      ON p.reservation_id = r.id AND p.market_id = r.market_id AND p.reservation_revision = r.revision
+      ON p.id = (SELECT q.id FROM fame_payment_orders q
+                 WHERE q.reservation_id = r.id AND q.market_id = r.market_id AND q.reservation_revision = r.revision
+                 ORDER BY (q.status = 'expired') ASC, q.created_at DESC LIMIT 1)
     WHERE r.id = ${reservationId} AND r.market_id = ${config.marketId}
     ${lock ? sql`FOR UPDATE OF r` : sql``}`;
   return result[0] || null;

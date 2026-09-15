@@ -134,3 +134,16 @@ vendorCategory, fullSeason, dates }] }` (up to 50). Each vendor gets the
 signs the agreement and attaches insurance. The token is signed with
 `AUTH_SECRET`, lasts 90 days, grants nothing, and the submitted application's
 snapshot records `invitedFrom` so staff can see where it came from.
+
+## Reopening an expired hold
+
+When a vendor misses the 48-hour window the scheduler expires the Square
+link and the reservation, releasing the dates. On the reservation page an
+expired hold shows **Reopen this hold** (`POST
+/api/admin/reservations/{id}/reopen`). Reopening keeps dates, booths, price,
+revision and every audit row; it re-checks capacity (other vendors may have
+taken the dates), then returns the reservation to `held` with no deadline.
+Staff then create a new payment request and email the link as usual. The new
+Square order is a second attempt with its own idempotency key; the expired
+order stays for audit (migration 027 replaces the one-order-per-revision
+constraint with one *live* order per revision).

@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import postgres from "postgres";
 import { FRESH_AIR_SEASON_DATES } from "./fresh-air-season";
 import { DEMO_MARKET_ID } from "./seed";
+import { checkVendorBooking } from "./vendor-booking-rules";
 import {
   FRESH_AIR_FINAL_RESERVATION_QUOTE_VERSION,
   finalReservationCheckoutDescription,
@@ -445,4 +446,52 @@ export async function reserveFinalApplication(
       },
     };
   });
+}
+
+export type ReopenReservationResult =
+  | { kind: "reopened"; reservation: { id: string; state: "held"; finalDates: string[]; finalBoothQuantity: number; totalCents: number } }
+  | { kind: "not_found" }
+  | { kind: "not_expired"; state: string }
+  | { kind: "unavailable"; unavailableDates: string[] };
+
+/**
+ * Gives an expired hold a second chance. The reservation keeps its dates,
+ * booths, quote, revision and audit rows; only the state returns to "held"
+ * with no deadline, so a fresh Square payment request (with a fresh 48-hour
+ * window) can be created as a new attempt. Capacity is re-checked first because other vendors may
+ * have taken the dates while the hold was expired.
+ */
+export async function reopenExpiredReservation(
+  input: { marketId: string; reservationId: string; config: FreshAirFinalReservationConfig; now?: Date },
+  sql: Sql = configuredClient(),
+): Promise<ReopenReservationResult> {
+  const now = input.now ?? new Date();
+  return sql.begin(async tx => {
+    const [row] = await tx<{ id: string; state: string; revision: number; final_dates: unknown; final_booth_quantity: number; total_cents: string | number; applicant_type: string; vendor_category: string }[]>`
+      SELECT r.id, r.state, r.revision, r.final_dates, r.final_booth_quantity, r.total_cents, f.applicant_type, f.vendor_category
+      FROM fame_reservations r
+      JOIN fame_reservation_finalizations f ON f.reservation_id = r.id AND f.market_id = r.market_id
+      WHERE r.id = ${input.reservationId} AND r.market_id = ${input.marketId}
+      FOR UPDATE OF r`;
+    if (!row) return { kind: "not_found" } as ReopenReservationResult;
+    if (row.state !== "expired") return { kind: "not_expired", state: row.state } as ReopenReservationResult;
+    const dates = Array.isArray(row.final_dates) ? row.final_dates.filter((d): d is string => typeof d === "string").sort() : [];
+    const booths = Number(row.final_booth_quantity);
+    // The expired row is not counted in occupancy, so this is "everyone else".
+    const occupancy = [];
+    for (const date of dates) occupancy.push(await occupancyForDate(tx, input.marketId, date));
+    const check = checkVendorBooking(
+      { dates: [...input.config.calendarDates], boothCapacity: input.config.boothCapacity },
+      { applicantType: row.applicant_type as "Vendor" | "Non-Profit Organization", vendorCategory: row.vendor_category, selectedDates: dates, fullSeason: false, boothsPerMarket: booths },
+      occupancy,
+    );
+    if (!check.allDatesAvailable) return { kind: "unavailable", unavailableDates: check.unavailableDates } as ReopenReservationResult;
+    const [updated] = await tx<{ id: string }[]>`
+      UPDATE fame_reservations
+      SET state = 'held', payment_due_at = NULL, payment_request_sent_at = NULL, updated_at = ${now}
+      WHERE id = ${row.id} AND market_id = ${input.marketId} AND state = 'expired'
+      RETURNING id`;
+    if (!updated) return { kind: "not_expired", state: row.state } as ReopenReservationResult;
+    return { kind: "reopened", reservation: { id: updated.id, state: "held", finalDates: dates, finalBoothQuantity: booths, totalCents: Number(row.total_cents) } } as ReopenReservationResult;
+  }) as Promise<ReopenReservationResult>;
 }

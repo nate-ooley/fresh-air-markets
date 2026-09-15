@@ -86,7 +86,7 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
   const [paymentOrder, setPaymentOrder] = useState<ReservationPaymentView | null>(null);
   const [invitation, setInvitation] = useState<VendorInvitationView | null>(null);
   const [loading, setLoading] = useState(true);
-  const [busy, setBusy] = useState<"reserve" | "checkout" | "access" | null>(null);
+  const [busy, setBusy] = useState<"reserve" | "checkout" | "access" | "reopen" | null>(null);
   const [loadError, setLoadError] = useState("");
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -171,6 +171,34 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
       setNotice(data.duplicate ? "This exact reservation was already saved. Its current status is shown below." : "The final reservation was saved. The total below was calculated from the approved dates and booth quantity.");
     } catch {
       setError("The reservation result could not be confirmed. Reload status or retry this exact selection; the same request key will be reused.");
+    } finally {
+      inFlight.current = false;
+      setBusy(null);
+    }
+  }
+
+  async function reopen() {
+    if (inFlight.current || statusRead.current.pending || loadError || !reservation || reservation.state !== "expired") return;
+    inFlight.current = true;
+    setBusy("reopen");
+    setError("");
+    setNotice("");
+    try {
+      const response = await fetch(`/api/admin/reservations/${encodeURIComponent(reservation.id)}/reopen`, {
+        method: "POST", headers: { Accept: "application/json" },
+      });
+      const payload = await jsonBody(response);
+      if (response.status === 401) { router.replace("/login"); return; }
+      if (!response.ok) {
+        setError(reservationError(payload, "The hold could not be reopened."));
+        return;
+      }
+      setPaymentOrder(null);
+      setInvitation(null);
+      setReservation(current => current ? { ...current, state: "held" } : current);
+      setNotice("The hold is open again with the same dates, booths and price. Create a new payment request, then email the payment link.");
+    } catch {
+      setError("The hold could not be reopened. Reload reservation status and try again.");
     } finally {
       inFlight.current = false;
       setBusy(null);
@@ -355,6 +383,14 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
             </dl>
             {!reservation.paymentRequired && <p className="mt-4 text-sm text-pine">This nonprofit reservation has no payment due.</p>}
           </section>
+
+          {reservation.paymentRequired && reservation.state === "expired" && (
+            <section className="rounded-2xl border border-clay/30 bg-clay/5 p-5">
+              <h3 className="font-semibold text-pine-deep">Payment window expired</h3>
+              <p className="mt-2 text-sm leading-relaxed text-ink/65">The vendor did not pay within 48 hours, so these dates were released. If they still want them and the dates have room, reopen the hold and send a new payment request. Dates, booths and price stay the same.</p>
+              <button type="button" disabled={disabled} onClick={() => void reopen()} className={`${BUTTON} mt-4`}>{busy === "reopen" ? "Reopening…" : "Reopen this hold"}</button>
+            </section>
+          )}
 
           {reservation.paymentRequired && ["held", "payment_pending"].includes(reservation.state) && (
             <section className="rounded-2xl border border-pine/15 p-5">
