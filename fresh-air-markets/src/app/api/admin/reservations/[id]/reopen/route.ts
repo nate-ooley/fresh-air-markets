@@ -34,7 +34,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   try { result = await reopenExpiredReservation({ marketId, reservationId: id, config }); }
   catch { return NextResponse.json({ error: "The reservation could not be reopened right now." }, { status: 503, headers }); }
   if (result.kind === "not_found") return NextResponse.json({ error: "Reservation not found." }, { status: 404, headers });
-  if (result.kind === "not_expired") return NextResponse.json({ error: `Only expired holds can be reopened. This reservation is ${result.state.replace("_", " ")}.` }, { status: 409, headers });
+  if (result.kind === "not_expired") return NextResponse.json({ error: `Only expired holds (or holds waiting on manager review with no live payment attempt) can be reopened. This reservation is ${result.state.replace("_", " ")}.` }, { status: 409, headers });
   if (result.kind === "unavailable") return NextResponse.json({ error: `These dates no longer have room: ${result.unavailableDates.join(", ")}. Create a new reservation with different dates instead.`, unavailableDates: result.unavailableDates }, { status: 409, headers });
   return NextResponse.json({ reservation: result.reservation }, { status: 200, headers });
 }

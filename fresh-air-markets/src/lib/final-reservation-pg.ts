@@ -222,6 +222,7 @@ async function occupancyForDate(
   tx: QuerySql,
   marketId: string,
   date: string,
+  excludeReservationId: string | null = null,
 ): Promise<{ date: string; booths: number; foodTrucks: number; foodTruckBooths: number; nonprofits: number }> {
   const [row] = await tx<OccupancyRow[]>`
     SELECT
@@ -236,7 +237,8 @@ async function occupancyForDate(
       ON f.reservation_id = a.reservation_id AND f.market_id = a.market_id
     WHERE a.market_id = ${marketId}
       AND a.market_date = ${date}::date
-      AND r.state IN ('held', 'payment_pending', 'paid', 'confirmed', 'manual_review')`;
+      AND r.state IN ('held', 'payment_pending', 'paid', 'confirmed', 'manual_review')
+      AND (${excludeReservationId}::text IS NULL OR r.id <> ${excludeReservationId})`;
   return {
     date,
     booths: Number(row?.booths ?? 0),
@@ -474,12 +476,18 @@ export async function reopenExpiredReservation(
       WHERE r.id = ${input.reservationId} AND r.market_id = ${input.marketId}
       FOR UPDATE OF r`;
     if (!row) return { kind: "not_found" } as ReopenReservationResult;
-    if (row.state !== "expired") return { kind: "not_expired", state: row.state } as ReopenReservationResult;
+    // "manual_review" is reached when a retried checkout could not be
+    // completed; it is reopenable once no payment attempt is still live.
+    if (row.state !== "expired" && row.state !== "manual_review") return { kind: "not_expired", state: row.state } as ReopenReservationResult;
+    const [live] = await tx<{ n: number }[]>`
+      SELECT count(*)::int AS n FROM fame_payment_orders
+      WHERE reservation_id = ${row.id} AND market_id = ${input.marketId} AND status NOT IN ('expired', 'failed', 'cancelled')`;
+    if ((live?.n ?? 0) > 0) return { kind: "not_expired", state: row.state } as ReopenReservationResult;
     const dates = Array.isArray(row.final_dates) ? row.final_dates.filter((d): d is string => typeof d === "string").sort() : [];
     const booths = Number(row.final_booth_quantity);
-    // The expired row is not counted in occupancy, so this is "everyone else".
+    // Count everyone else: an expired row is already excluded, a manual-review row is not.
     const occupancy = [];
-    for (const date of dates) occupancy.push(await occupancyForDate(tx, input.marketId, date));
+    for (const date of dates) occupancy.push(await occupancyForDate(tx, input.marketId, date, row.id));
     const check = checkVendorBooking(
       { dates: [...input.config.calendarDates], boothCapacity: input.config.boothCapacity },
       { applicantType: row.applicant_type as "Vendor" | "Non-Profit Organization", vendorCategory: row.vendor_category, selectedDates: dates, fullSeason: false, boothsPerMarket: booths },
@@ -489,7 +497,7 @@ export async function reopenExpiredReservation(
     const [updated] = await tx<{ id: string }[]>`
       UPDATE fame_reservations
       SET state = 'held', payment_due_at = NULL, payment_request_sent_at = NULL, updated_at = ${now}
-      WHERE id = ${row.id} AND market_id = ${input.marketId} AND state = 'expired'
+      WHERE id = ${row.id} AND market_id = ${input.marketId} AND state IN ('expired', 'manual_review')
       RETURNING id`;
     if (!updated) return { kind: "not_expired", state: row.state } as ReopenReservationResult;
     return { kind: "reopened", reservation: { id: updated.id, state: "held", finalDates: dates, finalBoothQuantity: booths, totalCents: Number(row.total_cents) } } as ReopenReservationResult;

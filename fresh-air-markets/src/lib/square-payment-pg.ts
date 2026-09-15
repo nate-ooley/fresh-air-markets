@@ -175,7 +175,12 @@ function validDueDate(value: Date | null, now: Date): value is Date {
   return value instanceof Date && Number.isFinite(value.valueOf()) && value.valueOf() > now.valueOf();
 }
 
-function approvedCheckout(reservation: ReservationRow, paymentDueAt: Date): ApprovedCheckout | null {
+/** Orders that no longer hold the revision's payment slot. */
+function retiredOrderStatus(status: string): boolean {
+  return status === "expired" || status === "failed" || status === "cancelled";
+}
+
+function approvedCheckout(reservation: ReservationRow, paymentDueAt: Date, attempt = 1): ApprovedCheckout | null {
   const totalCents = Number(reservation.total_cents);
   if (!Number.isSafeInteger(totalCents) || totalCents <= 0
     || !Number.isSafeInteger(Number(reservation.revision)) || Number(reservation.revision) < 1
@@ -188,6 +193,7 @@ function approvedCheckout(reservation: ReservationRow, paymentDueAt: Date): Appr
     totalCents,
     description: reservation.checkout_description,
     paymentDeadline: paymentDueAt.toISOString(),
+    ...(attempt > 1 ? { attempt } : {}),
   };
 }
 
@@ -257,12 +263,12 @@ export async function claimSquarePaymentCheckout(input: {
              checkout_attempts, lease_token
       FROM fame_payment_orders
       WHERE reservation_id = ${reservation.id} AND reservation_revision = ${reservation.revision}
-      ORDER BY (status = 'expired') ASC, created_at DESC
+      ORDER BY (status IN ('expired', 'failed', 'cancelled')) ASC, created_at DESC
       FOR UPDATE`;
-    // A reopened hold (state back to "held", no deadline) may carry expired
-    // orders from its earlier attempt; those never block a fresh request.
+    // A reopened hold (state back to "held", no deadline) may carry expired or
+    // failed orders from earlier attempts; those never block a fresh request.
     const reopened = reservation.state === "held" && !reservation.payment_due_at
-      && existingRows.length > 0 && existingRows.every(row => row.status === "expired");
+      && existingRows.length > 0 && existingRows.every(row => retiredOrderStatus(row.status));
     const attempt = reopened ? existingRows.length + 1 : 1;
     const existing = existingRows[0] && !reopened ? toPaymentOrder(existingRows[0]) : null;
     if (existing) {
@@ -317,7 +323,7 @@ export async function claimSquarePaymentCheckout(input: {
       return { kind: "not_payable", reason: "expired" };
     }
     const provisionalDueAt = reservation.payment_due_at ?? dueDate(input.now);
-    const approved = approvedCheckout(reservation, provisionalDueAt);
+    const approved = approvedCheckout(reservation, provisionalDueAt, attempt);
     if (!approved) return { kind: "not_payable", reason: "invalid_reservation" };
     const id = randomUUID();
     const leaseToken = randomUUID();

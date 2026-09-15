@@ -64,6 +64,7 @@ before(async () => {
       '012-square-webhook-events.sql',
       '013-final-reservation-writer.sql',
       '027-payment-order-reissue.sql',
+      '028-payment-order-reissue-after-failure.sql',
     ]) await migration.unsafe(fs.readFileSync(path.join(__dirname, '../../docs/migrations', file), 'utf8'));
   } finally {
     await migration.end();
@@ -266,4 +267,13 @@ test('an expired hold can be reopened, keeps its dates, price and revision, resp
   assert.notEqual(secondClaim.order.idempotencyKey, firstClaim.order.idempotencyKey);
   const orders = rows(await first`SELECT status FROM fame_payment_orders WHERE reservation_id = ${id} ORDER BY created_at`);
   assert.deepEqual(orders.map(o => o.status), ['expired', 'processing_checkout']);
+  // A live attempt blocks reopening even from manual review; a failed attempt does not.
+  await first`UPDATE fame_reservations SET state = 'manual_review' WHERE id = ${id}`;
+  assert.equal((await reopenExpiredReservation({ marketId, reservationId: id, config: config(2), now }, first)).kind, 'not_expired');
+  await first`UPDATE fame_payment_orders SET status = 'failed', lease_token = NULL, locked_until = NULL WHERE id = ${secondClaim.order.id}`;
+  assert.equal((await reopenExpiredReservation({ marketId, reservationId: id, config: config(2), now }, first)).kind, 'reopened');
+  const thirdClaim = await claimSquarePaymentCheckout({ marketId, reservationId: id, square, now: new Date(now.valueOf() + 120_000), leaseSeconds: 60 }, first);
+  assert.equal(thirdClaim.kind, 'checkout_required');
+  assert.equal(thirdClaim.approved.attempt, 3);
+  assert.equal(new Set([firstClaim.order.idempotencyKey, secondClaim.order.idempotencyKey, thirdClaim.order.idempotencyKey]).size, 3);
 });

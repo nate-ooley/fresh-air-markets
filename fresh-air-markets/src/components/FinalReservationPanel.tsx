@@ -178,7 +178,7 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
   }
 
   async function reopen() {
-    if (inFlight.current || statusRead.current.pending || loadError || !reservation || reservation.state !== "expired") return;
+    if (inFlight.current || statusRead.current.pending || loadError || !reservation || !["expired", "manual_review"].includes(reservation.state)) return;
     inFlight.current = true;
     setBusy("reopen");
     setError("");
@@ -384,10 +384,12 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
             {!reservation.paymentRequired && <p className="mt-4 text-sm text-pine">This nonprofit reservation has no payment due.</p>}
           </section>
 
-          {reservation.paymentRequired && reservation.state === "expired" && (
+          {reservation.paymentRequired && (reservation.state === "expired" || reservation.state === "manual_review") && (
             <section className="rounded-2xl border border-clay/30 bg-clay/5 p-5">
-              <h3 className="font-semibold text-pine-deep">Payment window expired</h3>
-              <p className="mt-2 text-sm leading-relaxed text-ink/65">The vendor did not pay within 48 hours, so these dates were released. If they still want them and the dates have room, reopen the hold and send a new payment request. Dates, booths and price stay the same.</p>
+              <h3 className="font-semibold text-pine-deep">{reservation.state === "expired" ? "Payment window expired" : "Payment request needs attention"}</h3>
+              <p className="mt-2 text-sm leading-relaxed text-ink/65">{reservation.state === "expired"
+                ? "The vendor did not pay within 48 hours, so these dates were released. If they still want them and the dates have room, reopen the hold and send a new payment request. Dates, booths and price stay the same."
+                : "The last payment request could not be completed. If the dates still have room, reopen the hold and create a new payment request. Dates, booths and price stay the same."}</p>
               <button type="button" disabled={disabled} onClick={() => void reopen()} className={`${BUTTON} mt-4`}>{busy === "reopen" ? "Reopening…" : "Reopen this hold"}</button>
             </section>
           )}

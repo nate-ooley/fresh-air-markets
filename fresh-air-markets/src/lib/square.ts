@@ -246,6 +246,8 @@ export interface ApprovedCheckout {
   totalCents: number;
   description: string;
   paymentDeadline: string;
+  /** 1 for the first request of a revision; higher after a reopened hold. Changes the provider idempotency key so Square issues a fresh link. */
+  attempt?: number;
 }
 
 /**
@@ -288,7 +290,8 @@ export async function createSquareCheckout(config: Pick<SquareCheckoutConfig, "e
   if (!Number.isSafeInteger(approved.totalCents) || approved.totalCents <= 0) throw new Error("Square requires a positive integer amount; nonprofits bypass payment.");
   if (!approved.description.trim() || approved.description.length > 255) throw new Error("A short checkout description is required.");
   if (!(Date.parse(approved.paymentDeadline) > now)) throw new Error("The payment window has expired or is invalid.");
-  const idempotencyKey = createHash("sha256").update(`${config.environment}:${config.locationId}:${approved.reservationId}:${approved.revision}`).digest("hex");
+  const attempt = approved.attempt && approved.attempt > 1 ? `:attempt-${approved.attempt}` : "";
+  const idempotencyKey = createHash("sha256").update(`${config.environment}:${config.locationId}:${approved.reservationId}:${approved.revision}${attempt}`).digest("hex");
   const base = config.environment === "sandbox" ? SQUARE_SANDBOX_API_BASE : SQUARE_PRODUCTION_API_BASE;
   const response = await transport(`${base}/v2/online-checkout/payment-links`, {
     method: "POST",
