@@ -122,11 +122,13 @@ export function staffInvitationEmail(input: { name: string; marketName: string; 
   ]) };
 }
 
-export function applicationInvitationEmail(input: { name: string; businessName: string; fullSeason: boolean; dates: string[]; link: string }): EmailContent {
+export function applicationInvitationEmail(input: { name: string; businessName: string; fullSeason: boolean; dates: string[]; link: string; reminder?: boolean }): EmailContent {
   const wanted = input.fullSeason ? "the full season" : input.dates.length ? input.dates.map(day).join(", ") : "your market dates";
-  return { subject: `Finish your ${MARKET} vendor application`, ...wrap([
+  return { subject: `${input.reminder ? "Reminder: finish" : "Finish"} your ${MARKET} vendor application`, ...wrap([
     `Hi ${input.name || "there"},`,
-    `Thanks for your interest in the ${MARKET}${input.businessName ? ` with ${input.businessName}` : ""}. We've moved vendor applications to our new website, and we need a few things from you to hold your spot.`,
+    input.reminder
+      ? `We haven't received your ${MARKET} application yet${input.businessName ? ` for ${input.businessName}` : ""}. Booth spaces are filling up for the season, and we'd love to have you. Everything is done on our new website, and it only takes a couple of minutes.`
+      : `Thanks for your interest in the ${MARKET}${input.businessName ? ` with ${input.businessName}` : ""}. We've moved vendor applications to our new website, and we need a few things from you to hold your spot.`,
     `Use this personal link to finish your application. Your details and the dates you asked for (${wanted}) are already filled in: ${input.link}`,
     "Please check your details, choose how many booths you need, sign the vendor agreement, and attach your certificate of insurance (PDF, PNG or JPEG). It takes about two minutes.",
     "Once market staff approve your application, we'll confirm your dates and email you a secure Square payment link. Payment is due within 48 hours of that email.",

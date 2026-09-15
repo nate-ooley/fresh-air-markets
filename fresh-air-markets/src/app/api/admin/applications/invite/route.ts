@@ -28,6 +28,7 @@ export async function POST(request: NextRequest) {
   const vendors = Array.isArray(body?.vendors) ? body.vendors : null;
   if (!vendors || vendors.length === 0 || vendors.length > MAX_VENDORS) return NextResponse.json({ error: `Send between 1 and ${MAX_VENDORS} vendors.` }, { status: 400, headers });
   const invitedFrom = typeof body?.invitedFrom === "string" ? body.invitedFrom : "staff";
+  const reminder = body?.reminder === true;
   const results = [];
   for (const raw of vendors) {
     const prefill = raw && typeof raw === "object" ? normalizeApplicationPrefill(raw as Record<string, unknown>, config.marketId, invitedFrom) : null;
@@ -35,7 +36,7 @@ export async function POST(request: NextRequest) {
     const link = new URL(`/apply#prefill=${createApplicationPrefillToken(prefill)}`, portalOrigin()).toString();
     const outcome = await notifyApplicationInvitation({
       marketId: config.marketId, email: prefill.email, name: `${prefill.firstName} ${prefill.lastName}`.trim(), businessName: prefill.businessName,
-      fullSeason: prefill.fullSeason, dates: prefill.dates, link,
+      fullSeason: prefill.fullSeason, dates: prefill.dates, link, reminder,
     });
     results.push({ email: prefill.email, outcome });
   }

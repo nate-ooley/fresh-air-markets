@@ -34,6 +34,10 @@ test('the invitation email carries the personal link, the requested dates and th
   assert.match(email.text, /https:\/\/freshairmarketsandevents\.com\/apply#prefill=abc\.def/);
   assert.match(email.text, /sign the vendor agreement/);
   assert.match(applicationInvitationEmail({ name: '', businessName: '', fullSeason: true, dates: [], link: 'https://x.test/apply#prefill=a.b' }).text, /Hi there,[\s\S]*the full season/);
+  const reminder = applicationInvitationEmail({ name: 'Kathie', businessName: "Kat's Salty Shore", fullSeason: false, dates: ['2026-11-07'], link: 'https://x.test/apply#prefill=a.b', reminder: true });
+  assert.match(reminder.subject, /^Reminder: finish your/);
+  assert.match(reminder.text, /haven't received your .* application yet for Kat's Salty Shore/);
+  assert.match(reminder.text, /https:\/\/x\.test\/apply#prefill=a\.b/);
 });
 
 function loadRoute(file, stubs) {
@@ -80,7 +84,7 @@ test('the owner invitation route sends one personal link per vendor and reports 
     '@/lib/notifications': { portalOrigin: () => 'https://freshairmarketsandevents.com', notifyApplicationInvitation: async input => { sent.push(input); return 'sent'; } },
   };
   const route = loadRoute('../src/app/api/admin/applications/invite/route.ts', stubs);
-  const res = await route.POST(post('https://freshairmarketsandevents.com/api/admin/applications/invite', { invitedFrom: 'highlevel', vendors: [vendor, { firstName: 'No', lastName: 'Email' }] }));
+  const res = await route.POST(post('https://freshairmarketsandevents.com/api/admin/applications/invite', { invitedFrom: 'highlevel', reminder: true, vendors: [vendor, { firstName: 'No', lastName: 'Email' }] }));
   assert.equal(res.status, 200);
   const body = await res.json();
   assert.equal(body.sent, 1);
@@ -89,6 +93,7 @@ test('the owner invitation route sends one personal link per vendor and reports 
   const token = sent[0].link.split('#prefill=')[1];
   assert.equal(verifyApplicationPrefillToken(token, process.env).invitedFrom, 'highlevel');
   assert.deepEqual(sent[0].dates, ['2026-10-03', '2026-11-14']);
+  assert.equal(sent[0].reminder, true);
   const manager = loadRoute('../src/app/api/admin/applications/invite/route.ts', { ...stubs, '@/lib/auth': { getSessionStaff: async () => ({ marketId: 'fame-market', userId: 'staff-2', role: 'manager' }) } });
   assert.equal((await manager.POST(post('https://freshairmarketsandevents.com/api/admin/applications/invite', { vendors: [vendor] }))).status, 403);
   assert.equal((await route.POST(post('https://freshairmarketsandevents.com/api/admin/applications/invite', { vendors: [] }))).status, 400);

@@ -145,9 +145,9 @@ export async function notifyStaffInvitation(input: {
 
 /** Personal link to finish an application; the prefill token inside `link` is never logged. */
 export async function notifyApplicationInvitation(input: {
-  marketId: string; email: string; name: string; businessName: string; fullSeason: boolean; dates: string[]; link: string;
+  marketId: string; email: string; name: string; businessName: string; fullSeason: boolean; dates: string[]; link: string; reminder?: boolean;
 }, sql?: Sql): Promise<NotificationOutcome> {
   if (!emailConfigured()) return "not_sent";
   const content = applicationInvitationEmail(input);
-  return outcome(await sendEmail({ kind: "application_invitation", to: input.email, marketId: input.marketId, referenceId: "", ...content }, { sql }));
+  return outcome(await sendEmail({ kind: input.reminder ? "application_invitation_reminder" : "application_invitation", to: input.email, marketId: input.marketId, referenceId: "", ...content }, { sql }));
 }
