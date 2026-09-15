@@ -30,7 +30,9 @@ export async function POST(request: NextRequest) {
   const invitedFrom = typeof body?.invitedFrom === "string" ? body.invitedFrom : "staff";
   const reminder = body?.reminder === true;
   const results = [];
-  for (const raw of vendors) {
+  for (const [index, raw] of vendors.entries()) {
+    // Resend allows two sends per second; pace a batch so none are refused.
+    if (index > 0) await new Promise(resolve => setTimeout(resolve, 600));
     const prefill = raw && typeof raw === "object" ? normalizeApplicationPrefill(raw as Record<string, unknown>, config.marketId, invitedFrom) : null;
     if (!prefill) { results.push({ email: typeof (raw as { email?: unknown })?.email === "string" ? (raw as { email: string }).email : "", outcome: "invalid_email" }); continue; }
     const link = new URL(`/apply#prefill=${createApplicationPrefillToken(prefill)}`, portalOrigin()).toString();
