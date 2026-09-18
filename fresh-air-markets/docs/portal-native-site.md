@@ -158,3 +158,13 @@ emails include. The page reads the fragment and renders the shared
 `DocumentUploads` component against `POST /api/apply/documents`, so files land
 in the same ledger staff review on the application page. The link grants
 upload only, never read access.
+
+## Upload size limit
+
+Vercel serverless functions reject request bodies over 4.5 MB before any
+route code runs (`FUNCTION_PAYLOAD_TOO_LARGE`, plain-text 413). The server-side
+10 MB document limit is therefore unreachable in one request. `src/lib/upload-prepare.ts`
+handles it in the browser: images over 2.5 MB or in HEIC are re-encoded as
+JPEG (max 2400 px, quality 0.85) before upload; PDFs over 4 MB are refused with
+a readable message; a 413 or 5xx from the gateway is translated for the user.
+Moving uploads to direct-to-storage (presigned URLs) would lift the limit.

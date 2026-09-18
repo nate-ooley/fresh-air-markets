@@ -1,6 +1,7 @@
 "use client";
 
 import { type FormEvent, useCallback, useEffect, useState } from "react";
+import { prepareUpload, uploadFailureMessage } from "@/lib/upload-prepare";
 
 type Kind = "insurance" | "food_license";
 type ValidationState = "pending_scan" | "ready_for_review" | "rejected";
@@ -91,13 +92,14 @@ export default function ApplicationDocumentsPanel({ applicationId }: { applicati
     if (!file || busy) return;
     setBusy(true); setError(""); setNotice("");
     try {
+      const prepared = await prepareUpload(file);
       const form = new FormData();
       form.set("kind", kind);
-      form.set("file", file, file.name);
+      form.set("file", prepared, prepared.name);
       const response = await fetch(listEndpoint, { method: "POST", body: form, cache: "no-store" });
       const payload = await response.json().catch(() => null);
-      if (!response.ok) throw new Error(typeof payload?.error === "string" ? payload.error : "The file was not accepted.");
-      setNotice(payload?.duplicate ? "That exact file is already on record." : `Uploaded ${file.name}. Review it below.`);
+      if (!response.ok) throw new Error(uploadFailureMessage(response.status, payload?.error));
+      setNotice(payload?.duplicate ? "That exact file is already on record." : `Uploaded ${prepared.name}. Review it below.`);
       setFile(null);
       (event.target as HTMLFormElement).reset();
       setDocuments(await refresh());
@@ -151,7 +153,7 @@ export default function ApplicationDocumentsPanel({ applicationId }: { applicati
         </label>
         <label className="text-xs font-semibold uppercase tracking-wide text-ink/50">
           File
-          <input type="file" accept=".pdf,.png,.jpg,.jpeg,application/pdf,image/png,image/jpeg" required
+          <input type="file" accept=".pdf,.png,.jpg,.jpeg,.heic,.heif,application/pdf,image/*" required
             onChange={e => setFile(e.target.files?.[0] ?? null)} className={`mt-1 block ${field}`} />
         </label>
         <button type="submit" disabled={busy || !file} className={`${button} bg-pine text-cream enabled:hover:bg-leaf`}>

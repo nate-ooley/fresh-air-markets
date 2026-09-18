@@ -22,5 +22,5 @@ export default function DocumentUploadPage() {
       </p>
     );
   }
-  return <DocumentUploads token={token} vendor title="Your documents" intro="PDF, PNG or JPEG up to 10 MB. This link works for 14 days and you can come back to add a second file." />;
+  return <DocumentUploads token={token} vendor title="Your documents" intro="PDF, or a photo from your phone (large photos are shrunk automatically). This link works for 14 days and you can come back to add a second file." />;
 }
