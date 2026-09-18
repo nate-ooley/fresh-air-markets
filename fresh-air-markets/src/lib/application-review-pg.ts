@@ -30,6 +30,10 @@ export interface ApplicationReviewDetail {
   reviewState: ApplicationReviewState;
   reviewRevision: number;
   hasOpportunity: boolean;
+  /** When the current submission arrived. */
+  submittedAt: string | null;
+  /** True when the vendor re-submitted after the last decision, so a new decision is possible. */
+  updatedSinceReview: boolean;
   /**
    * A deliberately small projection of the snapshot on the exact current
    * source event. Internal CRM identifiers, tokens, unknown form answers and
@@ -117,11 +121,23 @@ interface ReviewEventRow {
 interface SourceEventRow {
   event_id: string;
   snapshot: unknown;
+  created_at?: Date;
 }
 
 interface ApplicationListRow extends ApplicationRow {
   event_id: string | null;
   snapshot: unknown | null;
+  submitted_at: Date | null;
+  reviewed_source_event_id: string | null;
+}
+
+function iso(value: Date | null | undefined): string | null {
+  return value instanceof Date && Number.isFinite(value.valueOf()) ? value.toISOString() : null;
+}
+
+/** The vendor re-submitted after the last decision when the current submission is not the one that was reviewed. */
+function updatedSinceReview(sourceEventId: string | null, reviewedSourceEventId: string | null): boolean {
+  return Boolean(sourceEventId && reviewedSourceEventId && sourceEventId !== reviewedSourceEventId);
 }
 
 const MAX_SNAPSHOT_FIELD_LENGTH = 200;
@@ -288,11 +304,16 @@ export async function getApplicationReviewDetail(
     WHERE id = ${applicationId} AND market_id = ${marketId}`;
   if (!application) return null;
   const [latest] = await sql<SourceEventRow[]>`
-    SELECT event_id, snapshot FROM fame_application_events
+    SELECT event_id, snapshot, created_at FROM fame_application_events
     WHERE application_id = ${application.id}
       AND market_id = ${application.market_id}
       AND location_id = ${application.location_id}
     ORDER BY created_at DESC, event_id DESC
+    LIMIT 1`;
+  const [lastReview] = await sql<{ source_event_id: string }[]>`
+    SELECT source_event_id FROM fame_application_review_events
+    WHERE application_id = ${application.id} AND market_id = ${application.market_id}
+    ORDER BY created_at DESC, id DESC
     LIMIT 1`;
   const sourceEventId = latest && validSourceEventId(latest.event_id) ? latest.event_id : null;
   return {
@@ -301,6 +322,8 @@ export async function getApplicationReviewDetail(
     reviewState: applicationState(application.review_state),
     reviewRevision: Number(application.review_revision),
     hasOpportunity: Boolean(application.opportunity_id),
+    submittedAt: iso(latest?.created_at),
+    updatedSinceReview: updatedSinceReview(sourceEventId, lastReview?.source_event_id ?? null),
     identitySnapshot: sourceEventId ? reviewIdentitySnapshot(latest?.snapshot) : null,
   };
 }
@@ -319,7 +342,8 @@ export async function listApplicationReviewDetails(
   const rows = await sql<ApplicationListRow[]>`
     SELECT a.id, a.market_id, a.location_id, a.contact_id, a.season_id,
            a.opportunity_id, a.review_state, a.review_revision,
-           source.event_id, source.snapshot
+           source.event_id, source.snapshot, source.created_at AS submitted_at,
+           review.source_event_id AS reviewed_source_event_id
     FROM fame_applications AS a
     LEFT JOIN LATERAL (
       SELECT event_id, snapshot, created_at
@@ -330,6 +354,13 @@ export async function listApplicationReviewDetails(
       ORDER BY created_at DESC, event_id DESC
       LIMIT 1
     ) AS source ON TRUE
+    LEFT JOIN LATERAL (
+      SELECT source_event_id
+      FROM fame_application_review_events
+      WHERE application_id = a.id AND market_id = a.market_id
+      ORDER BY created_at DESC, id DESC
+      LIMIT 1
+    ) AS review ON TRUE
     WHERE a.market_id = ${marketId}
     ORDER BY source.created_at DESC NULLS LAST, a.created_at DESC, a.id DESC
     LIMIT ${boundedLimit}`;
@@ -341,6 +372,8 @@ export async function listApplicationReviewDetails(
       reviewState: applicationState(row.review_state),
       reviewRevision: Number(row.review_revision),
       hasOpportunity: Boolean(row.opportunity_id),
+      submittedAt: iso(row.submitted_at),
+      updatedSinceReview: updatedSinceReview(sourceEventId, row.reviewed_source_event_id),
       identitySnapshot: sourceEventId ? reviewIdentitySnapshot(row.snapshot) : null,
     };
   });

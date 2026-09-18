@@ -2,7 +2,7 @@
 
 Every message is sent through Resend from
 **Fresh Air Markets <hello@freshairmarketsandevents.com>** (`EMAIL_FROM`).
-Replies go to **hello@freshairmarketsandevents.com** (`EMAIL_REPLY_TO`; someone must read that mailbox). Staff copies go to
+Replies go to **nateooley68@gmail.com** (`EMAIL_REPLY_TO`). `hello@freshairmarketsandevents.com` is a send-only identity: the domain's mail is hosted at Microsoft 365 and no such mailbox exists there, so replies to it bounce ("Message blocked"). Point `EMAIL_REPLY_TO` at a mailbox someone reads, or create hello@ in Microsoft 365 first. Staff copies go to
 **nateooley68@gmail.com** (`STAFF_NOTIFY_EMAIL`). All three are Vercel
 Production settings and can be changed without a code change. Each message
 ends with "— Fresh Air Markets & Events / (941) 740-8866". Every attempt is

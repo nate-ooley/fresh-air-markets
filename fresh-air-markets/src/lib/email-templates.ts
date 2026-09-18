@@ -29,7 +29,14 @@ ${paragraphs.map(p => `<p>${escape(p).replace(/(https?:\/\/\S+)/g, '<a href="$1"
 
 export interface EmailContent { subject: string; text: string; html: string }
 
-export function applicationReceivedEmail(input: { name: string; businessName: string }): EmailContent {
+export function applicationReceivedEmail(input: { name: string; businessName: string; resubmission?: boolean }): EmailContent {
+  if (input.resubmission) {
+    return { subject: `We received your updated ${MARKET} application`, ...wrap([
+      `Hi ${input.name},`,
+      `Thanks for the update${input.businessName ? ` for ${input.businessName}` : ""}. Market staff will look at your revised application and reply to this email address with a decision.`,
+      "If you attached documents, we have them. Once approved, we'll confirm your dates and booth count and send a payment request, due within 48 hours.",
+    ]) };
+  }
   return { subject: `We received your ${MARKET} application`, ...wrap([
     `Hi ${input.name},`,
     `Thanks for applying to the ${MARKET}${input.businessName ? ` with ${input.businessName}` : ""}. Market staff review every application and will reply to this email address with a decision.`,
@@ -84,9 +91,16 @@ export function paymentReceivedEmail(input: { name: string; totalCents: number }
   ]) };
 }
 
-export function staffNewApplicationEmail(input: { name: string; businessName: string; email: string; phone?: string; type: string; applicationId: string; origin: string }): EmailContent {
+export function staffNewApplicationEmail(input: { name: string; businessName: string; email: string; phone?: string; type: string; applicationId: string; origin: string; resubmission?: boolean }): EmailContent {
+  const who = `${input.name} (${input.email}${input.phone ? `, ${input.phone}` : ""})`;
+  if (input.resubmission) {
+    return { subject: `Updated ${input.type.toLowerCase()} application: ${input.businessName || input.name}`, ...wrap([
+      `${who} sent an updated application${input.businessName ? ` for ${input.businessName}` : ""} after changes were requested. It is ready for a new decision.`,
+      `Review it: ${input.origin}/applications/${input.applicationId}`,
+    ]) };
+  }
   return { subject: `New ${input.type.toLowerCase()} application: ${input.businessName || input.name}`, ...wrap([
-    `${input.name} (${input.email}${input.phone ? `, ${input.phone}` : ""}) applied${input.businessName ? ` as ${input.businessName}` : ""}.`,
+    `${who} applied${input.businessName ? ` as ${input.businessName}` : ""}.`,
     `Review it: ${input.origin}/applications/${input.applicationId}`,
   ]) };
 }

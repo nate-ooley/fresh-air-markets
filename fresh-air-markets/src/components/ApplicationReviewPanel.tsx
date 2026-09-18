@@ -25,6 +25,8 @@ interface ApplicationReviewIdentitySnapshot {
 interface ApplicationReviewDetail {
   id: string;
   sourceEventId: string | null;
+  submittedAt?: string | null;
+  updatedSinceReview?: boolean;
   reviewState: ReviewState;
   reviewRevision: number;
   hasOpportunity: boolean;
@@ -159,6 +161,13 @@ async function reviewAttemptStorageKey(material: string): Promise<string | null>
   }
 }
 
+function submittedLabel(iso: string): string {
+  const value = new Date(iso);
+  return Number.isFinite(value.valueOf())
+    ? new Intl.DateTimeFormat("en-US", { dateStyle: "medium", timeStyle: "short", timeZone: "America/New_York" }).format(value)
+    : "";
+}
+
 export default function ApplicationReviewPanel({ applicationId }: { applicationId: string }) {
   const router = useRouter();
   const attempts = useRef(new Map<string, string>());
@@ -234,6 +243,8 @@ export default function ApplicationReviewPanel({ applicationId }: { applicationI
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (!application || !application.sourceEventId || !application.identitySnapshot || saving || awaitingResubmission) return;
+    // Nothing to decide until the vendor answers a change request.
+    if (application.reviewState === "changes_requested" && !application.updatedSinceReview) return;
 
     const normalizedReason = reason.trim();
     if (action !== "approve" && !normalizedReason) {
@@ -264,9 +275,16 @@ export default function ApplicationReviewPanel({ applicationId }: { applicationI
         return;
       }
       if (!response.ok || !isSavedReview(payload, application.id)) {
-        // In particular, stale-source and terminal 409 responses stay visible
-        // until the manager chooses Reload review; no request is retried here.
-        setSaveError(messageFrom(payload, "The review could not be saved. You can retry the same decision after resolving this message."));
+        const message = messageFrom(payload, "The review could not be saved. You can retry the same decision after resolving this message.");
+        if (response.status === 409 && asRecord(payload)?.code === "stale_source") {
+          // The vendor re-submitted while this page was open. Refresh to the
+          // current submission; the manager decides again on what they now see.
+          await load();
+          setSaveError(message);
+          return;
+        }
+        // Other 409s (terminal, awaiting re-submission) stay visible until the manager reloads.
+        setSaveError(message);
         return;
       }
       const saved = payload;
@@ -289,7 +307,8 @@ export default function ApplicationReviewPanel({ applicationId }: { applicationI
   };
 
   const terminal = application?.reviewState === "approved" || application?.reviewState === "declined";
-  const canReview = Boolean(application?.sourceEventId && application.hasOpportunity && application.identitySnapshot && !terminal && !awaitingResubmission);
+  const waitingOnVendor = application?.reviewState === "changes_requested" && !application.updatedSinceReview;
+  const canReview = Boolean(application?.sourceEventId && application.hasOpportunity && application.identitySnapshot && !terminal && !awaitingResubmission && !waitingOnVendor);
   const requiresReason = action !== "approve";
   const canSubmit = canReview && !saving && (!requiresReason || Boolean(reason.trim()));
 
@@ -430,9 +449,14 @@ export default function ApplicationReviewPanel({ applicationId }: { applicationI
                   This application is already {STATE_LABEL[application.reviewState].toLowerCase()}. Terminal decisions cannot be changed here.
                 </p>
               )}
-              {application.reviewState === "changes_requested" && (
+              {application.reviewState === "changes_requested" && application.updatedSinceReview && (
+                <p role="status" className="mt-5 rounded-2xl bg-pine/10 p-4 text-sm text-pine">
+                  The vendor sent an updated application{application.submittedAt ? ` on ${submittedLabel(application.submittedAt)}` : ""}. Review the updated details below and make a new decision.
+                </p>
+              )}
+              {application.reviewState === "changes_requested" && !application.updatedSinceReview && (
                 <p role="status" className="mt-5 rounded-2xl bg-amber/15 p-4 text-sm text-clay">
-                  Changes were recorded. This action does not send a vendor email. Contact the vendor with the corrections and review a newer submission before making another decision.
+                  Changes were requested and the vendor was emailed your note. Waiting for their updated application; a new decision becomes possible when it arrives. If they reply by email instead, ask them to re-submit at the application page so their answers are on file.
                 </p>
               )}
 
@@ -457,7 +481,7 @@ export default function ApplicationReviewPanel({ applicationId }: { applicationI
                     <p className="mt-2 font-semibold">The email to the vendor failed. Contact the vendor separately.</p>
                   )}
                   {notice.vendorNotification === "not_sent" && (
-                    <p className="mt-2 font-semibold">Vendor notification has not been sent. Contact the vendor separately with the corrections; no automatic correction email is queued.</p>
+                    <p className="mt-2 font-semibold">No email was sent to the vendor (email is not configured). Contact the vendor separately with this decision.</p>
                   )}
                 </div>
               )}

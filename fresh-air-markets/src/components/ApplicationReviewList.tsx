@@ -23,6 +23,8 @@ interface ApplicationReviewListItem {
   id: string;
   sourceEventId: string | null;
   reviewState: ReviewState;
+  submittedAt?: string | null;
+  updatedSinceReview?: boolean;
   reviewRevision: number;
   hasOpportunity: boolean;
   identitySnapshot: ApplicationReviewIdentitySnapshot | null;
@@ -181,7 +183,12 @@ export default function ApplicationReviewList() {
                         <h2 className="font-display text-xl text-pine-deep">{snapshot?.businessName ?? "Incomplete applicant details"}</h2>
                         {snapshot && <p className="mt-1 text-sm text-ink/65">{snapshot.vendorName} · {snapshot.email}{snapshot.phone ? <> · <a href={`tel:${snapshot.phone.replace(/[^\d+]/g, "")}`} className="underline-offset-4 hover:underline">{snapshot.phone}</a></> : ""}</p>}
                       </div>
-                      <span className="rounded-full bg-amber/15 px-3 py-1 text-xs font-bold text-clay">{STATE_LABEL[application.reviewState]}</span>
+                      <span className="flex flex-wrap items-center gap-2">
+                        {application.reviewState === "changes_requested" && application.updatedSinceReview && (
+                          <span className="rounded-full bg-pine px-3 py-1 text-xs font-bold text-cream">Updated · needs review</span>
+                        )}
+                        <span className="rounded-full bg-amber/15 px-3 py-1 text-xs font-bold text-clay">{STATE_LABEL[application.reviewState]}</span>
+                      </span>
                     </div>
 
                     {snapshot ? (

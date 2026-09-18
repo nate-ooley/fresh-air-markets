@@ -46,6 +46,7 @@ export async function POST(request: NextRequest) {
       notified = await notifyApplicationReceived({
         applicationId: result.applicationId, marketId: config.marketId, email: input.email, phone: input.phone,
         name: `${input.firstName} ${input.lastName}`.trim(), businessName: input.businessName, type: input.registrationType,
+        resubmission: result.submissionNumber > 1,
       });
     }
     let uploadToken: string | null = null;

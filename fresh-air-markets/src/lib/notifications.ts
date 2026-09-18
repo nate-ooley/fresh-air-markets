@@ -33,14 +33,14 @@ export function portalOrigin(env: NodeJS.ProcessEnv = process.env): string {
 }
 
 export async function notifyApplicationReceived(input: {
-  applicationId: string; marketId: string; email: string; phone?: string; name: string; businessName: string; type: "Vendor" | "Non-Profit Organization";
+  applicationId: string; marketId: string; email: string; phone?: string; name: string; businessName: string; type: "Vendor" | "Non-Profit Organization"; resubmission?: boolean;
 }, sql?: Sql): Promise<NotificationOutcome> {
   if (!emailConfigured()) return "not_sent";
   const deps = { sql };
-  const vendor = applicationReceivedEmail({ name: input.name, businessName: input.businessName });
-  const result = await sendEmail({ kind: "application_received", to: input.email, marketId: input.marketId, referenceId: input.applicationId, ...vendor }, deps);
+  const vendor = applicationReceivedEmail({ name: input.name, businessName: input.businessName, resubmission: input.resubmission });
+  const result = await sendEmail({ kind: input.resubmission ? "application_updated" : "application_received", to: input.email, marketId: input.marketId, referenceId: input.applicationId, ...vendor }, deps);
   const staff = staffNewApplicationEmail({ ...input, origin: portalOrigin() });
-  await sendStaffEmail({ kind: "staff_new_application", marketId: input.marketId, referenceId: input.applicationId, ...staff }, deps);
+  await sendStaffEmail({ kind: input.resubmission ? "staff_updated_application" : "staff_new_application", marketId: input.marketId, referenceId: input.applicationId, ...staff }, deps);
   return outcome(result);
 }
 

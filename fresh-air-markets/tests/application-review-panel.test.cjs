@@ -52,8 +52,7 @@ test('saving a correction reports no vendor email even when Needs Review reconci
     assert.match(panel.text(), /Record corrections; contact the vendor separately/);
     panel.chooseCorrection(); panel.note('Please correct the business name.'); await panel.submit();
     assert.match(panel.text(), /matching Needs Review state was verified/);
-    assert.match(panel.text(), /Vendor notification has not been sent/);
-    assert.match(panel.text(), /no automatic correction email is queued/);
+    assert.match(panel.text(), /No email was sent to the vendor \(email is not configured\)/);
     const patch = calls.find(c => c.options.method === 'PATCH');
     assert.deepEqual(JSON.parse(patch.options.body), { action: 'request_changes', sourceEventId: application.sourceEventId, reason: 'Please correct the business name.' });
     await panel.submit(); assert.equal(calls.filter(c => c.options.method === 'PATCH').length, 1);
@@ -63,8 +62,7 @@ test('saving a correction reports no vendor email even when Needs Review reconci
 test('queued and failed CRM correction states never imply an automatic email or a successful stage update', async () => {
   for (const delivery of ['queued', 'failed']) await scenario(saved(delivery), async panel => {
     panel.chooseCorrection(); panel.note('Please correct the business name.'); await panel.submit();
-    assert.match(panel.text(), /Vendor notification has not been sent/);
-    assert.match(panel.text(), /no automatic correction email is queued/);
+    assert.match(panel.text(), /No email was sent to the vendor \(email is not configured\)/);
     assert.doesNotMatch(panel.text(), /matching CRM stage update was delivered/);
     if (delivery === 'failed') { assert.match(panel.text(), /could not be verified/); assert.doesNotMatch(panel.text(), /state is queued for verification/); }
   });
@@ -79,13 +77,38 @@ test('a correction response missing notification disclosure is not shown as succ
   });
 });
 
-test('a reopened correction still explains that this action does not email the vendor', async () => {
-  await scenario(saved('delivered'), async panel => {
-    // A loaded correction may have a newer source and become reviewable; its notification limitation remains visible.
-    assert.match(panel.text(), /This action does not send a vendor email/);
-    assert.match(panel.text(), /Contact the vendor with the corrections/);
-    assert.doesNotMatch(panel.text(), /Ask the vendor/);
-  }, { ...application, reviewState: 'changes_requested' });
+test('a correction waiting on the vendor is locked and says so; a re-submitted one is reviewable and says the vendor updated it', async () => {
+  await scenario(saved('delivered'), async (panel, calls) => {
+    assert.match(panel.text(), /Waiting for their updated application/);
+    assert.match(panel.text(), /the vendor was emailed your note/);
+    assert.doesNotMatch(panel.text(), /does not send a vendor email/);
+    panel.chooseCorrection(); panel.note('Anything'); await panel.submit();
+    assert.equal(calls.filter(c => c.options.method === 'PATCH').length, 0);
+  }, { ...application, reviewState: 'changes_requested', updatedSinceReview: false, submittedAt: '2026-09-15T22:50:33.799Z' });
+  await scenario(saved('delivered'), async (panel, calls) => {
+    assert.match(panel.text(), /The vendor sent an updated application\s+on Sep 17, 2026/);
+    assert.doesNotMatch(panel.text(), /Waiting for their updated application/);
+    panel.chooseCorrection(); panel.note('One more thing.'); await panel.submit();
+    assert.equal(calls.filter(c => c.options.method === 'PATCH').length, 1);
+  }, { ...application, reviewState: 'changes_requested', updatedSinceReview: true, submittedAt: '2026-09-17T19:39:58.681Z' });
+});
+
+test('a stale-source refusal reloads the current submission instead of leaving a dead-end error', async () => {
+  const previous = global.fetch; const calls = [];
+  const newer = { ...application, sourceEventId: 'application:qa:newer', updatedSinceReview: true, submittedAt: '2026-09-17T19:39:58.681Z' };
+  let loads = 0;
+  global.fetch = async (url, options = {}) => {
+    calls.push({ url, options });
+    if (options.method === 'PATCH') return Response.json({ error: 'The vendor updated this application after the page was opened. It has been reloaded; check the updated details and decide again.', code: 'stale_source' }, { status: 409 });
+    loads++; return Response.json({ application: loads === 1 ? application : newer });
+  };
+  try {
+    const panel = harness(); panel.flushEffects(); await flush(); panel.render();
+    await panel.submit();
+    assert.equal(loads, 2);
+    assert.match(panel.text(), /updated this application after the page was opened/);
+    assert.match(panel.text(), /application:qa:newer/);
+  } finally { global.fetch = previous; }
 });
 
 
@@ -93,7 +116,7 @@ test('unknown stored CRM status preserves the saved correction and never claims 
   await scenario(saved('unknown'), async panel => {
     panel.chooseCorrection(); panel.note('Please correct the business name.'); await panel.submit();
     assert.match(panel.text(), /decision was saved, but its CRM delivery status could not be checked/);
-    assert.match(panel.text(), /Vendor notification has not been sent/);
+    assert.match(panel.text(), /No email was sent to the vendor/);
     assert.doesNotMatch(panel.text(), /state is queued for verification|stage update was delivered/);
   });
 });

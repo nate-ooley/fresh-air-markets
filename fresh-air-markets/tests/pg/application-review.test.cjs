@@ -246,12 +246,15 @@ test('manager detail and list use only the latest same-market, same-location sou
     })}, ${new Date('2027-04-03T12:00:00.000Z')})`;
 
   const detail = await getApplicationReviewDetail(application.applicationId, market, first);
-  assert.deepEqual(detail, {
+  assert.equal(detail.submittedAt, eventTime.toISOString());
+  assert.deepEqual({ ...detail, submittedAt: undefined }, {
     id: application.applicationId,
     sourceEventId: 'application:qa:source-z',
     reviewState: 'unreviewed',
     reviewRevision: 0,
     hasOpportunity: true,
+    submittedAt: undefined,
+    updatedSinceReview: false,
     identitySnapshot: {
       vendorName: 'Current vendor', businessName: 'Current business', email: 'current@example.com', phone: '',
       applicantType: 'Vendor', dates: ['2027-05-29'], fullSeason: false, requiresFinalDateConfirmation: false, boothsRequested: 1,
@@ -418,4 +421,27 @@ test('stored review delivery status belongs to the exact application, market, re
   // A malformed job payload must not be exposed merely because its IDs join the audit row.
   await first`UPDATE fame_application_outbox SET payload=jsonb_set(payload, '{applicationId}', to_jsonb(${sibling.applicationId}::text)) WHERE id=${saved.outboxId}`;
   assert.equal(await getApplicationReviewOutboxStatus(scope, first), null);
+});
+
+test('detail and list report when a vendor re-submitted after a correction, and when staff are still waiting', async () => {
+  const application = await seedApplication({ contactId: 'contact-resubmit', opportunityId: 'opportunity-resubmit' });
+  const { applicationId, marketId, eventId } = application;
+  const before = await getApplicationReviewDetail(applicationId, marketId, first);
+  assert.equal(before.updatedSinceReview, false);
+  assert.ok(before.submittedAt);
+  const correction = await recordApplicationReview(decision(application, { action: 'request_changes', reason: 'Send insurance.' }), first);
+  assert.equal(correction.kind, 'applied');
+  const waiting = await getApplicationReviewDetail(applicationId, marketId, first);
+  assert.deepEqual([waiting.reviewState, waiting.updatedSinceReview], ['changes_requested', false]);
+  assert.equal((await listApplicationReviewDetails(marketId, 50, first)).find(a => a.id === applicationId).updatedSinceReview, false);
+  const newer = `application:qa:resubmit-${randomUUID()}`;
+  await first`INSERT INTO fame_application_events (location_id, event_id, market_id, application_id, payload_hash, snapshot, created_at)
+    SELECT location_id, ${newer}, market_id, application_id, ${`hash:${newer}`}, snapshot, now() + interval '1 second'
+    FROM fame_application_events WHERE application_id = ${applicationId} AND event_id = ${eventId}`;
+  const updated = await getApplicationReviewDetail(applicationId, marketId, first);
+  assert.deepEqual([updated.reviewState, updated.sourceEventId, updated.updatedSinceReview], ['changes_requested', newer, true]);
+  assert.equal((await listApplicationReviewDetails(marketId, 50, first)).find(a => a.id === applicationId).updatedSinceReview, true);
+  const approved = await recordApplicationReview(decision({ ...application, eventId: newer }), first);
+  assert.equal(approved.kind, 'applied');
+  assert.equal((await getApplicationReviewDetail(applicationId, marketId, first)).updatedSinceReview, false);
 });

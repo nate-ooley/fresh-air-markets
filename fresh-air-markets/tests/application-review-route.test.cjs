@@ -107,7 +107,7 @@ test('application review route exposes only scoped detail and maps non-mutating 
   assert.equal((await get.json()).application.sourceEventId, 'application:qa:current');
   const patch = await route.PATCH(request({ action: 'approve', sourceEventId: 'application:qa:current' }, { 'Idempotency-Key': key }), { params: Promise.resolve({ id: appId }) });
   assert.equal(patch.status, 409);
-  assert.deepEqual(await patch.json(), { error: 'Application changed; reload before reviewing.' });
+  assert.deepEqual(await patch.json(), { error: 'The vendor updated this application after the page was opened. It has been reloaded; check the updated details and decide again.', code: 'stale_source' });
 });
 
 test('application review route keeps incomplete identity snapshot failures non-mutating', async () => {

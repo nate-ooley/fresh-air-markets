@@ -105,6 +105,8 @@ export function validatePortalApplication(body: Record<string, unknown>): Portal
 
 export interface SubmitPortalApplicationResult {
   status: "captured" | "duplicate";
+  /** 1 for a first application, higher for each re-submission by the same vendor this season. */
+  submissionNumber: number;
   applicationId: string;
   agreementSigned: boolean;
 }
@@ -158,9 +160,12 @@ export async function submitPortalApplication(
         AND contact_id = ${contactId} AND season_id = ${config.seasonId}
       FOR UPDATE`;
     if (!application) throw new Error("Application row missing after capture.");
+    const [count] = await tx<{ n: number }[]>`
+      SELECT count(*)::int AS n FROM fame_application_events WHERE application_id = ${application.id} AND market_id = ${config.marketId}`;
+    const submissionNumber = Math.max(1, Number(count?.n ?? 1));
     const [completed] = await tx<{ id: string }[]>`
       SELECT id FROM fame_agreement_completions WHERE application_id = ${application.id}`;
-    if (completed) return { status, applicationId: application.id, agreementSigned: true };
+    if (completed) return { status, applicationId: application.id, agreementSigned: true, submissionNumber };
     const signatureId = randomUUID();
     await tx`
       INSERT INTO fame_agreement_signatures
@@ -176,7 +181,7 @@ export async function submitPortalApplication(
       VALUES (${randomUUID()}, ${application.id}, ${config.marketId}, ${config.locationId}, ${contactId},
               ${application.opportunity_id ?? opportunityId}, ${config.seasonId}, ${signatureId},
               ${VENDOR_AGREEMENT_VERSION}, ${`portal-sign:${signatureId}`}, ${signedAt})`;
-    return { status, applicationId: application.id, agreementSigned: true };
+    return { status, applicationId: application.id, agreementSigned: true, submissionNumber };
   });
 }
 
