@@ -8,6 +8,8 @@ import { signingSecret } from "./auth-secret";
  */
 
 const TTL_MS = 2 * 60 * 60 * 1000;
+/** Emailed upload links last longer than the post-submit one: vendors read email days later. */
+export const EMAILED_UPLOAD_TTL_MS = 14 * 24 * 60 * 60 * 1000;
 const ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 function sign(payload: string, env: NodeJS.ProcessEnv): string {
@@ -15,9 +17,9 @@ function sign(payload: string, env: NodeJS.ProcessEnv): string {
 }
 
 export function createApplicationUploadToken(
-  applicationId: string, marketId: string, env: NodeJS.ProcessEnv = process.env, now = Date.now(),
+  applicationId: string, marketId: string, env: NodeJS.ProcessEnv = process.env, now = Date.now(), ttlMs = TTL_MS,
 ): string {
-  const expires = now + TTL_MS;
+  const expires = now + ttlMs;
   const payload = Buffer.from(JSON.stringify([applicationId, marketId, expires])).toString("base64url");
   return `${payload}.${sign(payload, env)}`;
 }

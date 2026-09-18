@@ -147,3 +147,14 @@ Staff then create a new payment request and email the link as usual. The new
 Square order is a second attempt with its own idempotency key; the expired
 order stays for audit (migration 027 replaces the one-order-per-revision
 constraint with one *live* order per revision).
+
+## Emailed document upload link
+
+The post-submit upload token (2 hours) has a 14-day sibling used in emails:
+`createApplicationUploadToken(applicationId, marketId, env, now, EMAILED_UPLOAD_TTL_MS)`.
+`notifications.documentUploadLink()` builds `/apply/documents#token=…`, which
+the received, approved (when nothing is on file yet) and changes-requested
+emails include. The page reads the fragment and renders the shared
+`DocumentUploads` component against `POST /api/apply/documents`, so files land
+in the same ledger staff review on the application page. The link grants
+upload only, never read access.

@@ -29,38 +29,47 @@ ${paragraphs.map(p => `<p>${escape(p).replace(/(https?:\/\/\S+)/g, '<a href="$1"
 
 export interface EmailContent { subject: string; text: string; html: string }
 
-export function applicationReceivedEmail(input: { name: string; businessName: string; resubmission?: boolean }): EmailContent {
+function uploadLine(link: string | null | undefined, lead: string): string {
+  return link
+    ? `${lead} Upload it here (PDF, PNG or JPEG; the link works for 14 days): ${link}`
+    : `${lead} Reply to this email with it as a PDF, PNG or JPEG.`;
+}
+
+export function applicationReceivedEmail(input: { name: string; businessName: string; resubmission?: boolean; uploadLink?: string | null }): EmailContent {
   if (input.resubmission) {
     return { subject: `We received your updated ${MARKET} application`, ...wrap([
       `Hi ${input.name},`,
       `Thanks for the update${input.businessName ? ` for ${input.businessName}` : ""}. Market staff will look at your revised application and reply to this email address with a decision.`,
-      "If you attached documents, we have them. Once approved, we'll confirm your dates and booth count and send a payment request, due within 48 hours.",
+      uploadLine(input.uploadLink, "If you still need to send your certificate of insurance or food license:"),
+      "Once approved, we'll confirm your dates and booth count and send a payment request, due within 48 hours.",
     ]) };
   }
   return { subject: `We received your ${MARKET} application`, ...wrap([
     `Hi ${input.name},`,
     `Thanks for applying to the ${MARKET}${input.businessName ? ` with ${input.businessName}` : ""}. Market staff review every application and will reply to this email address with a decision.`,
-    "If you attached your certificate of insurance (and food license, if you sell food) on the confirmation page, we have it. If not, you can reply to this email with it as a PDF, PNG or JPEG.",
+    uploadLine(input.uploadLink, "If you didn't attach your certificate of insurance (and food license, if you sell food) on the confirmation page:"),
     "If approved, we'll confirm your dates and booth count and send a payment request. Payment is due within 48 hours of that request.",
   ]) };
 }
 
-export function applicationApprovedEmail(input: { name: string; businessName: string; documentsOnFile?: boolean }): EmailContent {
+export function applicationApprovedEmail(input: { name: string; businessName: string; documentsOnFile?: boolean; uploadLink?: string | null }): EmailContent {
   return { subject: `Your ${MARKET} application is approved`, ...wrap([
     `Hi ${input.name},`,
     `Good news: your application${input.businessName ? ` for ${input.businessName}` : ""} has been approved.`,
     input.documentsOnFile
       ? "We have the documents you uploaded with your application. Once market staff have checked them we'll confirm your market dates and booth count and send your payment request."
-      : "Next step: reply to this email with your certificate of insurance (PDF, PNG or JPEG) and, if you sell food, your food license or permit. Once those are approved we'll confirm your market dates and booth count and send your payment request.",
+      : uploadLine(input.uploadLink, "Next step: we need your certificate of insurance and, if you sell food, your food license or permit."),
+    ...(input.documentsOnFile ? [] : ["Once those are approved we'll confirm your market dates and booth count and send your payment request."]),
   ]) };
 }
 
-export function applicationChangesRequestedEmail(input: { name: string; reason: string }): EmailContent {
+export function applicationChangesRequestedEmail(input: { name: string; reason: string; uploadLink?: string | null }): EmailContent {
   return { subject: `Your ${MARKET} application needs a small change`, ...wrap([
     `Hi ${input.name},`,
     "We reviewed your application and need one thing before we can approve it:",
     input.reason,
-    "Reply to this email with the update, or submit the application again with the corrected details.",
+    ...(input.uploadLink ? [`If it's a document (certificate of insurance, food license), upload it here; the link works for 14 days: ${input.uploadLink}`] : []),
+    "If it's a detail on the application, submit the application again with the corrected details, or reply to this email.",
   ]) };
 }
 

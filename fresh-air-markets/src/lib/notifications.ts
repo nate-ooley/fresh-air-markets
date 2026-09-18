@@ -1,5 +1,6 @@
 import postgres from "postgres";
 import { applicantContact, emailConfigured, sendEmail, sendStaffEmail, type SendEmailResult } from "./email";
+import { EMAILED_UPLOAD_TTL_MS, createApplicationUploadToken } from "./application-upload-token";
 import {
   applicationInvitationEmail, applicationApprovedEmail, applicationChangesRequestedEmail, applicationDeclinedEmail, applicationReceivedEmail,
   paymentReceivedEmail, paymentRequestEmail, passwordResetEmail, staffContactMessageEmail, staffInvitationEmail, staffNewApplicationEmail, staffPaymentReceivedEmail,
@@ -32,12 +33,19 @@ export function portalOrigin(env: NodeJS.ProcessEnv = process.env): string {
   return "https://farmers-market-wine.vercel.app";
 }
 
+/** Personal 14-day upload link for this application; null when signing is unavailable. */
+export function documentUploadLink(applicationId: string, marketId: string): string | null {
+  try {
+    return new URL(`/apply/documents#token=${createApplicationUploadToken(applicationId, marketId, process.env, Date.now(), EMAILED_UPLOAD_TTL_MS)}`, portalOrigin()).toString();
+  } catch { return null; }
+}
+
 export async function notifyApplicationReceived(input: {
   applicationId: string; marketId: string; email: string; phone?: string; name: string; businessName: string; type: "Vendor" | "Non-Profit Organization"; resubmission?: boolean;
 }, sql?: Sql): Promise<NotificationOutcome> {
   if (!emailConfigured()) return "not_sent";
   const deps = { sql };
-  const vendor = applicationReceivedEmail({ name: input.name, businessName: input.businessName, resubmission: input.resubmission });
+  const vendor = applicationReceivedEmail({ name: input.name, businessName: input.businessName, resubmission: input.resubmission, uploadLink: documentUploadLink(input.applicationId, input.marketId) });
   const result = await sendEmail({ kind: input.resubmission ? "application_updated" : "application_received", to: input.email, marketId: input.marketId, referenceId: input.applicationId, ...vendor }, deps);
   const staff = staffNewApplicationEmail({ ...input, origin: portalOrigin() });
   await sendStaffEmail({ kind: input.resubmission ? "staff_updated_application" : "staff_new_application", marketId: input.marketId, referenceId: input.applicationId, ...staff }, deps);
@@ -63,8 +71,9 @@ export async function notifyApplicationDecision(input: {
     const contact = await applicantContact(input.applicationId, input.marketId, db);
     if (!contact) return "not_sent";
     const documentsOnFile = input.action === "approve" && await hasCurrentDocument(input.applicationId, input.marketId, db);
-    const content = input.action === "approve" ? applicationApprovedEmail({ ...contact, documentsOnFile })
-      : input.action === "request_changes" ? applicationChangesRequestedEmail({ name: contact.name, reason: input.reason })
+    const uploadLink = documentUploadLink(input.applicationId, input.marketId);
+    const content = input.action === "approve" ? applicationApprovedEmail({ ...contact, documentsOnFile, uploadLink })
+      : input.action === "request_changes" ? applicationChangesRequestedEmail({ name: contact.name, reason: input.reason, uploadLink })
       : applicationDeclinedEmail({ name: contact.name, reason: input.reason });
     const kind = input.action === "approve" ? "application_approved" : input.action === "request_changes" ? "application_changes_requested" : "application_declined";
     return outcome(await sendEmail({ kind, to: contact.email, marketId: input.marketId, referenceId: input.applicationId, ...content }, { sql: db }));

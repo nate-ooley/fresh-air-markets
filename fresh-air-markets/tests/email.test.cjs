@@ -50,10 +50,15 @@ test('templates carry the essentials and escape HTML', () => {
   assert.match(changes.text, /Add <b>insurance<\/b> & license/);
   assert.match(changes.html, /Add &lt;b&gt;insurance&lt;\/b&gt; &amp; license/);
   assert.match(templates.applicationApprovedEmail({ name: 'Rosa', businessName: 'Sunrise Farms' }).text, /Sunrise Farms/);
-  assert.match(templates.applicationApprovedEmail({ name: 'Rosa', businessName: 'Sunrise Farms' }).text, /reply to this email with your certificate of insurance/);
+  assert.match(templates.applicationApprovedEmail({ name: 'Rosa', businessName: 'Sunrise Farms' }).text, /Reply to this email with it as a PDF/);
+  const link = 'https://freshairmarketsandevents.com/apply/documents#token=abc.def';
+  assert.match(templates.applicationApprovedEmail({ name: 'Rosa', businessName: 'Sunrise Farms', uploadLink: link }).text, /Upload it here .*14 days.*apply\/documents#token=abc\.def/);
+  assert.doesNotMatch(templates.applicationApprovedEmail({ name: 'Rosa', businessName: 'Sunrise Farms', uploadLink: link }).text, /Reply to this email/);
+  assert.match(templates.applicationChangesRequestedEmail({ name: 'Rosa', reason: 'Send insurance.', uploadLink: link }).text, /upload it here.*apply\/documents#token=abc\.def/);
+  assert.match(templates.applicationReceivedEmail({ name: 'Rosa', businessName: 'Sunrise Farms', uploadLink: link }).text, /Upload it here .*apply\/documents#token=abc\.def/);
   assert.match(templates.applicationApprovedEmail({ name: 'Rosa', businessName: 'Sunrise Farms', documentsOnFile: true }).text, /We have the documents you uploaded/);
   assert.doesNotMatch(templates.applicationApprovedEmail({ name: 'Rosa', businessName: 'Sunrise Farms', documentsOnFile: true }).text, /reply to this email with your certificate/);
-  assert.match(templates.applicationReceivedEmail({ name: 'Rosa', businessName: 'Sunrise Farms' }).text, /attached your certificate of insurance .* on the confirmation page/);
+  assert.match(templates.applicationReceivedEmail({ name: 'Rosa', businessName: 'Sunrise Farms' }).text, /attach your certificate of insurance .* on the confirmation page/);
   assert.match(templates.applicationReceivedEmail({ name: 'Rosa', businessName: 'Sunrise Farms', resubmission: true }).subject, /updated .* application/);
   assert.match(templates.applicationReceivedEmail({ name: 'Rosa', businessName: 'Sunrise Farms', resubmission: true }).text, /Thanks for the update for Sunrise Farms/);
   const updated = templates.staffNewApplicationEmail({ name: 'Rosa', businessName: 'Sunrise Farms', email: 'r@example.com', phone: '555-0100', type: 'Vendor', applicationId: 'app-1', origin: 'https://x.test', resubmission: true });
