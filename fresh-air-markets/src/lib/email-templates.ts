@@ -157,3 +157,11 @@ export function applicationInvitationEmail(input: { name: string; businessName: 
     "Once market staff approve your application, we'll confirm your dates and email you a secure Square payment link. Payment is due within 48 hours of that email.",
   ]) };
 }
+
+export function documentUploadLinkEmail(input: { name: string; businessName: string; link: string }): EmailContent {
+  return { subject: `Upload your documents for the ${MARKET}`, ...wrap([
+    `Hi ${input.name},`,
+    `Here is your personal link to upload your certificate of insurance and, if you sell food or drinks, your food license or permit${input.businessName ? ` for ${input.businessName}` : ""}: ${input.link}`,
+    "PDF, PNG or JPEG up to 10 MB. The link works for 14 days and you can come back to add a second file. Once market staff approve your documents we'll confirm your dates and send your payment request.",
+  ]) };
+}

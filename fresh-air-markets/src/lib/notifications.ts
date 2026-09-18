@@ -2,7 +2,7 @@ import postgres from "postgres";
 import { applicantContact, emailConfigured, sendEmail, sendStaffEmail, type SendEmailResult } from "./email";
 import { EMAILED_UPLOAD_TTL_MS, createApplicationUploadToken } from "./application-upload-token";
 import {
-  applicationInvitationEmail, applicationApprovedEmail, applicationChangesRequestedEmail, applicationDeclinedEmail, applicationReceivedEmail,
+  applicationInvitationEmail, applicationApprovedEmail, documentUploadLinkEmail, applicationChangesRequestedEmail, applicationDeclinedEmail, applicationReceivedEmail,
   paymentReceivedEmail, paymentRequestEmail, passwordResetEmail, staffContactMessageEmail, staffInvitationEmail, staffNewApplicationEmail, staffPaymentReceivedEmail,
 } from "./email-templates";
 
@@ -159,4 +159,18 @@ export async function notifyApplicationInvitation(input: {
   if (!emailConfigured()) return "not_sent";
   const content = applicationInvitationEmail(input);
   return outcome(await sendEmail({ kind: input.reminder ? "application_invitation_reminder" : "application_invitation", to: input.email, marketId: input.marketId, referenceId: "", ...content }, { sql }));
+}
+
+/** Staff-triggered: email the vendor their 14-day document upload link. Does not change review state. */
+export async function notifyDocumentUploadLink(input: { applicationId: string; marketId: string }, sql?: Sql): Promise<NotificationOutcome | "not_found"> {
+  if (!emailConfigured()) return "not_sent";
+  try {
+    const db = sql ?? configuredClient();
+    const contact = await applicantContact(input.applicationId, input.marketId, db);
+    if (!contact) return "not_found";
+    const link = documentUploadLink(input.applicationId, input.marketId);
+    if (!link) return "failed";
+    const content = documentUploadLinkEmail({ name: contact.name, businessName: contact.businessName, link });
+    return outcome(await sendEmail({ kind: "document_upload_link", to: contact.email, marketId: input.marketId, referenceId: input.applicationId, ...content }, { sql: db }));
+  } catch { return "failed"; }
 }
