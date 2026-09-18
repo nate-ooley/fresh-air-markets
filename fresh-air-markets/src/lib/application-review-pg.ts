@@ -129,6 +129,7 @@ interface ApplicationListRow extends ApplicationRow {
   snapshot: unknown | null;
   submitted_at: Date | null;
   reviewed_source_event_id: string | null;
+  documents_after_review: number | string | null;
 }
 
 function iso(value: Date | null | undefined): string | null {
@@ -310,11 +311,15 @@ export async function getApplicationReviewDetail(
       AND location_id = ${application.location_id}
     ORDER BY created_at DESC, event_id DESC
     LIMIT 1`;
-  const [lastReview] = await sql<{ source_event_id: string }[]>`
-    SELECT source_event_id FROM fame_application_review_events
+  const [lastReview] = await sql<{ source_event_id: string; created_at: Date }[]>`
+    SELECT source_event_id, created_at FROM fame_application_review_events
     WHERE application_id = ${application.id} AND market_id = ${application.market_id}
     ORDER BY created_at DESC, id DESC
     LIMIT 1`;
+  const [documentAfterReview] = lastReview ? await sql<{ n: number }[]>`
+    SELECT count(*)::int AS n FROM fame_application_documents
+    WHERE application_id = ${application.id} AND market_id = ${application.market_id}
+      AND submitted_at > ${lastReview.created_at}` : [{ n: 0 }];
   const sourceEventId = latest && validSourceEventId(latest.event_id) ? latest.event_id : null;
   return {
     id: application.id,
@@ -323,7 +328,7 @@ export async function getApplicationReviewDetail(
     reviewRevision: Number(application.review_revision),
     hasOpportunity: Boolean(application.opportunity_id),
     submittedAt: iso(latest?.created_at),
-    updatedSinceReview: updatedSinceReview(sourceEventId, lastReview?.source_event_id ?? null),
+    updatedSinceReview: updatedSinceReview(sourceEventId, lastReview?.source_event_id ?? null) || (documentAfterReview?.n ?? 0) > 0,
     identitySnapshot: sourceEventId ? reviewIdentitySnapshot(latest?.snapshot) : null,
   };
 }
@@ -343,7 +348,7 @@ export async function listApplicationReviewDetails(
     SELECT a.id, a.market_id, a.location_id, a.contact_id, a.season_id,
            a.opportunity_id, a.review_state, a.review_revision,
            source.event_id, source.snapshot, source.created_at AS submitted_at,
-           review.source_event_id AS reviewed_source_event_id
+           review.source_event_id AS reviewed_source_event_id, uploaded.n AS documents_after_review
     FROM fame_applications AS a
     LEFT JOIN LATERAL (
       SELECT event_id, snapshot, created_at
@@ -355,12 +360,17 @@ export async function listApplicationReviewDetails(
       LIMIT 1
     ) AS source ON TRUE
     LEFT JOIN LATERAL (
-      SELECT source_event_id
+      SELECT source_event_id, created_at
       FROM fame_application_review_events
       WHERE application_id = a.id AND market_id = a.market_id
       ORDER BY created_at DESC, id DESC
       LIMIT 1
     ) AS review ON TRUE
+    LEFT JOIN LATERAL (
+      SELECT count(*)::int AS n
+      FROM fame_application_documents d
+      WHERE d.application_id = a.id AND d.market_id = a.market_id AND review.created_at IS NOT NULL AND d.submitted_at > review.created_at
+    ) AS uploaded ON TRUE
     WHERE a.market_id = ${marketId}
     ORDER BY source.created_at DESC NULLS LAST, a.created_at DESC, a.id DESC
     LIMIT ${boundedLimit}`;
@@ -373,7 +383,7 @@ export async function listApplicationReviewDetails(
       reviewRevision: Number(row.review_revision),
       hasOpportunity: Boolean(row.opportunity_id),
       submittedAt: iso(row.submitted_at),
-      updatedSinceReview: updatedSinceReview(sourceEventId, row.reviewed_source_event_id),
+      updatedSinceReview: updatedSinceReview(sourceEventId, row.reviewed_source_event_id) || Number(row.documents_after_review ?? 0) > 0,
       identitySnapshot: sourceEventId ? reviewIdentitySnapshot(row.snapshot) : null,
     };
   });
@@ -461,13 +471,21 @@ export async function recordApplicationReview(
       return { kind: "terminal", reviewState: currentState };
     }
     if (currentState === "changes_requested") {
-      const [lastReview] = await tx<ReviewEventRow[]>`
-        SELECT id, payload_hash, outbox_id, source_event_id
+      const [lastReview] = await tx<(ReviewEventRow & { created_at: Date })[]>`
+        SELECT id, payload_hash, outbox_id, source_event_id, created_at
         FROM fame_application_review_events
         WHERE application_id = ${application.id}
         ORDER BY created_at DESC, id DESC
         LIMIT 1`;
-      if (lastReview?.source_event_id === input.sourceEventId) return { kind: "awaiting_resubmission" };
+      if (lastReview?.source_event_id === input.sourceEventId) {
+        // The vendor may answer a change request by uploading a document
+        // instead of re-submitting the form; that counts as their reply.
+        const [uploaded] = await tx<{ n: number }[]>`
+          SELECT count(*)::int AS n FROM fame_application_documents
+          WHERE application_id = ${application.id} AND market_id = ${application.market_id}
+            AND submitted_at > ${lastReview.created_at}`;
+        if (!(uploaded?.n > 0)) return { kind: "awaiting_resubmission" };
+      }
     }
 
     const reviewState = stateForReviewAction(input.action);

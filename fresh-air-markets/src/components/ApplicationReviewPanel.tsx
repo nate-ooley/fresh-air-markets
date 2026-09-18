@@ -451,7 +451,7 @@ export default function ApplicationReviewPanel({ applicationId }: { applicationI
               )}
               {application.reviewState === "changes_requested" && application.updatedSinceReview && (
                 <p role="status" className="mt-5 rounded-2xl bg-pine/10 p-4 text-sm text-pine">
-                  The vendor sent an updated application{application.submittedAt ? ` on ${submittedLabel(application.submittedAt)}` : ""}. Review the updated details below and make a new decision.
+                  The vendor responded to your change request (an updated application or a new document). Review the details and the Vendor documents section below, then make a new decision.
                 </p>
               )}
               {application.reviewState === "changes_requested" && !application.updatedSinceReview && (

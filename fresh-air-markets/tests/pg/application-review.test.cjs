@@ -40,6 +40,7 @@ before(async () => {
   try {
     await migration.unsafe(fs.readFileSync(path.join(__dirname, '../../docs/migrations/001-application-handoff.sql'), 'utf8'));
     await migration.unsafe(fs.readFileSync(path.join(__dirname, '../../docs/migrations/004-application-review-outbox.sql'), 'utf8'));
+    await migration.unsafe(fs.readFileSync(path.join(__dirname, '../../docs/migrations/006-application-document-ledger.sql'), 'utf8'));
     await migration.unsafe(fs.readFileSync(path.join(__dirname, '../../docs/migrations/010-application-review-terminal-state.sql'), 'utf8'));
   } finally {
     await migration.end();
@@ -47,7 +48,7 @@ before(async () => {
 });
 
 beforeEach(async () => {
-  await first`TRUNCATE fame_application_review_events, fame_application_outbox, fame_application_events, fame_applications`;
+  await first`TRUNCATE fame_application_review_events, fame_application_outbox, fame_application_events, fame_applications CASCADE`;
 });
 
 after(async () => {
@@ -444,4 +445,17 @@ test('detail and list report when a vendor re-submitted after a correction, and 
   const approved = await recordApplicationReview(decision({ ...application, eventId: newer }), first);
   assert.equal(approved.kind, 'applied');
   assert.equal((await getApplicationReviewDetail(applicationId, marketId, first)).updatedSinceReview, false);
+});
+
+test('a document uploaded after a change request counts as the vendor\'s answer: flagged as updated and reviewable', async () => {
+  const application = await seedApplication({ contactId: 'contact-docanswer', opportunityId: 'opportunity-docanswer' });
+  const { applicationId, marketId, eventId } = application;
+  assert.equal((await recordApplicationReview(decision(application, { action: 'request_changes', reason: 'Send insurance.' }), first)).kind, 'applied');
+  assert.equal((await recordApplicationReview(decision(application), first)).kind, 'awaiting_resubmission');
+  assert.equal((await getApplicationReviewDetail(applicationId, marketId, first)).updatedSinceReview, false);
+  await first`INSERT INTO fame_application_documents (id, application_id, market_id, kind, version, source_event_id, source_file_id, storage_key, filename, content_type, size_bytes, content_sha256, submitted_at, validation_state, validation_reason, review_state, review_revision, review_reason, is_current)
+    VALUES (${randomUUID()}, ${applicationId}, ${marketId}, 'insurance', 1, ${`applicant-upload:${randomUUID()}`}, 'file-1', ${`documents/${marketId}/${applicationId}/x`}, 'coi.pdf', 'application/pdf', 100, ${'d'.repeat(64)}, now() + interval '1 second', 'ready_for_review', 'qa', 'submitted', 0, '', true)`;
+  assert.equal((await getApplicationReviewDetail(applicationId, marketId, first)).updatedSinceReview, true);
+  assert.equal((await listApplicationReviewDetails(marketId, 50, first)).find(a => a.id === applicationId).updatedSinceReview, true);
+  assert.equal((await recordApplicationReview(decision({ ...application, eventId }), first)).kind, 'applied');
 });

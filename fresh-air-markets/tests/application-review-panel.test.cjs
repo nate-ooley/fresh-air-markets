@@ -86,7 +86,7 @@ test('a correction waiting on the vendor is locked and says so; a re-submitted o
     assert.equal(calls.filter(c => c.options.method === 'PATCH').length, 0);
   }, { ...application, reviewState: 'changes_requested', updatedSinceReview: false, submittedAt: '2026-09-15T22:50:33.799Z' });
   await scenario(saved('delivered'), async (panel, calls) => {
-    assert.match(panel.text(), /The vendor sent an updated application\s+on Sep 17, 2026/);
+    assert.match(panel.text(), /The vendor responded to your change request/);
     assert.doesNotMatch(panel.text(), /Waiting for their updated application/);
     panel.chooseCorrection(); panel.note('One more thing.'); await panel.submit();
     assert.equal(calls.filter(c => c.options.method === 'PATCH').length, 1);
