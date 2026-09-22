@@ -73,6 +73,14 @@ async function attemptKey(material: string, attempts: Map<string, string>): Prom
   return key;
 }
 
+interface BookingRequestView { id: string; dates: string[]; booths: number; vendorNote: string; createdAt: string }
+
+function bookingRequestView(value: unknown): BookingRequestView | null {
+  const data = reservationRecord(value);
+  if (!data || typeof data.id !== "string" || !Array.isArray(data.dates) || typeof data.booths !== "number") return null;
+  return { id: data.id, dates: data.dates.filter((d): d is string => typeof d === "string"), booths: data.booths, vendorNote: typeof data.vendorNote === "string" ? data.vendorNote : "", createdAt: typeof data.createdAt === "string" ? data.createdAt : "" };
+}
+
 function reservationList(payload: Record<string, unknown> | null): FinalReservationView[] | null {
   if (!payload) return null;
   if (Array.isArray(payload.reservations)) {
@@ -114,6 +122,10 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
   const [addingDates, setAddingDates] = useState(false);
   const [withdrawNote, setWithdrawNote] = useState("");
   const [withdrawTarget, setWithdrawTarget] = useState<string | null>(null);
+  const [insuranceExpiresOn, setInsuranceExpiresOn] = useState<string | null>(null);
+  const [bookingRequest, setBookingRequest] = useState<BookingRequestView | null>(null);
+  const [declineNote, setDeclineNote] = useState("");
+  const [declining, setDeclining] = useState(false);
 
   const endpoint = `/api/admin/applications/${encodeURIComponent(applicationId)}/reserve`;
   const load = useCallback(async (signal?: AbortSignal) => {
@@ -142,6 +154,13 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
       }
       setReservations(list);
       setPaymentOrders({});
+      const expiry = reservationRecord(payload)?.insuranceExpiresOn;
+      setInsuranceExpiresOn(typeof expiry === "string" ? expiry : null);
+      try {
+        const pending = await fetch(`/api/admin/applications/${encodeURIComponent(applicationId)}/booking-request`, { headers: { Accept: "application/json" }, cache: "no-store", signal });
+        const body = reservationRecord(await jsonBody(pending));
+        if (!signal?.aborted && revision === statusRead.current.revision) setBookingRequest(pending.ok ? bookingRequestView(body?.pendingRequest) : null);
+      } catch { /* the request card is optional; the rest of the panel still works */ }
     } catch {
       if (!signal?.aborted && revision === statusRead.current.revision) setLoadError("The saved reservation could not be checked. Reload its status before continuing.");
     } finally {
@@ -150,7 +169,7 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
         setLoading(false);
       }
     }
-  }, [endpoint, router]);
+  }, [endpoint, router, applicationId]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -171,6 +190,7 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
 
   const liveReservations = reservations.filter(item => LIVE_STATES.has(item.state));
   const heldDates = new Set(liveReservations.flatMap(item => item.finalDates));
+  const uninsured = (date: string) => Boolean(insuranceExpiresOn && date > insuranceExpiresOn);
   const showForm = addingDates || liveReservations.length === 0;
 
   async function reserve(event: FormEvent<HTMLFormElement>) {
@@ -354,6 +374,75 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
     }
   }
 
+  async function confirmRequest(request: BookingRequestView) {
+    if (inFlight.current || statusRead.current.pending || loadError) return;
+    inFlight.current = true;
+    setBusy("reserve");
+    setError("");
+    setNotice("");
+    try {
+      const response = await fetch(`/api/admin/booking-requests/${encodeURIComponent(request.id)}/confirm`, {
+        method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json" }, body: "{}",
+      });
+      const payload = await jsonBody(response);
+      if (response.status === 401) { router.replace("/login"); return; }
+      const data = reservationRecord(payload);
+      if (isFinalReservationView(data?.reservation)) {
+        const saved = data.reservation;
+        setReservations(current => current.some(item => item.id === saved.id) ? current.map(item => item.id === saved.id ? saved : item) : [...current, saved]);
+        if (isReservationPaymentView(data?.paymentOrder)) {
+          const order = data.paymentOrder;
+          setPaymentOrders(current => ({ ...current, [saved.id]: order }));
+        }
+      }
+      if (!response.ok) {
+        setError(reservationError(payload, "The request could not be confirmed."));
+        if (isFinalReservationView(data?.reservation)) setBookingRequest(null);
+        return;
+      }
+      setBookingRequest(null);
+      const delivery = data?.vendorNotification;
+      setNotice(delivery === "sent"
+        ? "Confirmed. The dates are booked and the vendor was emailed their payment link (48 hours to pay)."
+        : delivery === "not_sent" && data?.paymentOrder === null
+          ? "Confirmed. This nonprofit booking has nothing to pay."
+          : "Confirmed and the payment request is ready, but the email could not be sent. Use Email payment link below.");
+    } catch {
+      setError("The request could not be confirmed. Reload reservation status to see what was saved.");
+    } finally {
+      inFlight.current = false;
+      setBusy(null);
+    }
+  }
+
+  async function declineRequest(request: BookingRequestView) {
+    const note = declineNote.trim();
+    if (inFlight.current || statusRead.current.pending || loadError || !note) return;
+    inFlight.current = true;
+    setBusy("withdraw");
+    setError("");
+    setNotice("");
+    try {
+      const response = await fetch(`/api/admin/booking-requests/${encodeURIComponent(request.id)}/decline`, {
+        method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json" }, body: JSON.stringify({ note }),
+      });
+      const payload = await jsonBody(response);
+      if (response.status === 401) { router.replace("/login"); return; }
+      if (!response.ok) { setError(reservationError(payload, "The request could not be declined.")); return; }
+      setBookingRequest(null);
+      setDeclining(false);
+      setDeclineNote("");
+      setNotice((payload as { vendorNotification?: unknown } | null)?.vendorNotification === "sent"
+        ? "Request declined and the vendor was emailed your note."
+        : "Request declined. The email could not be sent, so let the vendor know yourself.");
+    } catch {
+      setError("The request could not be declined. Reload and try again.");
+    } finally {
+      inFlight.current = false;
+      setBusy(null);
+    }
+  }
+
   async function copyInvitation(reservation: FinalReservationView) {
     const invitation = invitations[reservation.id];
     if (!invitation) return;
@@ -381,6 +470,28 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
 
       {loading && <p role="status" className="mt-4 text-sm text-ink/60">Checking for saved bookings…</p>}
       {loadError && <p role="alert" className="mt-4 rounded-xl bg-clay/10 p-4 text-sm text-clay">{loadError}</p>}
+
+      {!loading && !loadError && bookingRequest && (
+        <section className="mt-6 rounded-2xl border-2 border-amber bg-amber/10 p-5">
+          <h3 className="font-semibold text-pine-deep">The vendor asked for more dates</h3>
+          <p className="mt-2 text-sm text-pine-deep">{bookingRequest.booths} booth{bookingRequest.booths === 1 ? "" : "s"} on {bookingRequest.dates.map(reservationDateLabel).join(" · ")}{bookingRequest.createdAt ? ` (asked ${deadlineLabel(bookingRequest.createdAt)})` : ""}</p>
+          {bookingRequest.vendorNote && <p className="mt-2 text-sm text-ink/70">Their note: {bookingRequest.vendorNote}</p>}
+          <p className="mt-3 text-sm leading-relaxed text-ink/65">Confirm books these dates using the type, category and booth count from their last booking, creates the Square payment request and emails them the link, all in one go.</p>
+          {!declining && <div className="mt-4 flex flex-wrap gap-3">
+            <button type="button" disabled={disabled} onClick={() => void confirmRequest(bookingRequest)} className={BUTTON}>{busy === "reserve" ? "Confirming…" : "Confirm and send payment link"}</button>
+            <button type="button" disabled={disabled} onClick={() => { setDeclining(true); setDeclineNote(""); }} className={QUIET_BUTTON}>Decline</button>
+          </div>}
+          {declining && <div className="mt-4">
+            <label className="block text-sm font-semibold text-pine-deep">Why? (sent to the vendor)
+              <textarea value={declineNote} disabled={disabled} maxLength={1000} rows={2} onChange={event => setDeclineNote(event.target.value)} placeholder="Example: Those Saturdays are full; Nov 14 and Nov 28 are open if you'd like them." className={FIELD} />
+            </label>
+            <div className="mt-3 flex flex-wrap gap-3">
+              <button type="button" disabled={disabled || !declineNote.trim()} onClick={() => void declineRequest(bookingRequest)} className={BUTTON}>{busy === "withdraw" ? "Declining…" : "Send decline"}</button>
+              <button type="button" disabled={disabled} onClick={() => { setDeclining(false); setDeclineNote(""); }} className={QUIET_BUTTON}>Back</button>
+            </div>
+          </div>}
+        </section>
+      )}
 
       {!loading && !loadError && reservations.length > 0 && (
         <div className="mt-6 space-y-5">
@@ -509,14 +620,15 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
               <legend className="text-sm font-semibold text-pine-deep">Final market dates</legend>
               <p className="mt-1 text-xs leading-relaxed text-ink/60">35 Saturdays, October 3, 2026 through May 29, 2027. Requested dates are suggestions; confirm the final selection with the vendor.{reservations.length ? " This booking is priced on its own dates: $40 per Saturday, $35 when it covers 4 or more Saturdays in a row." : ""}</p>
               {hasUnmappedRequestedDates && <p className="mt-3 rounded-xl bg-amber/15 p-3 text-sm text-clay">Some requested values do not match the confirmed calendar. Review the original request above and choose the final dates here.</p>}
-              {heldDates.size === 0 && <label className="mt-3 flex items-start gap-3 rounded-xl border border-pine/20 bg-parchment/40 p-4 text-sm font-semibold text-pine-deep">
+              {insuranceExpiresOn && <p className="mt-3 rounded-xl bg-amber/15 p-3 text-sm text-clay">Their certificate of insurance expires {reservationDateLabel(insuranceExpiresOn)}. Saturdays after that are greyed out until a renewed certificate is approved.</p>}
+              {heldDates.size === 0 && !insuranceExpiresOn && <label className="mt-3 flex items-start gap-3 rounded-xl border border-pine/20 bg-parchment/40 p-4 text-sm font-semibold text-pine-deep">
                 <input type="checkbox" checked={form.fullSeason} onChange={event => edit({ fullSeason: event.target.checked, selectedDates: [] })} className="mt-0.5" />
                 Full season — all 35 dates through Saturday, May 29, 2027
               </label>}
               {!form.fullSeason && <div className="mt-3 grid max-h-80 grid-cols-1 gap-2 overflow-y-auto rounded-xl border border-pine/15 p-3 sm:grid-cols-2">
-                {FRESH_AIR_SEASON_DATES.map(date => <label key={date} className={`flex items-center gap-2 rounded-lg px-2 py-2 text-sm hover:bg-parchment/60 ${heldDates.has(date) ? "text-ink/40" : "text-pine-deep"}`}>
-                  <input type="checkbox" disabled={heldDates.has(date)} checked={form.selectedDates.includes(date)} onChange={event => edit({ selectedDates: event.target.checked ? [...form.selectedDates, date].sort() : form.selectedDates.filter(value => value !== date) })} />
-                  {reservationDateLabel(date)}{heldDates.has(date) ? " (already booked)" : ""}
+                {FRESH_AIR_SEASON_DATES.map(date => <label key={date} className={`flex items-center gap-2 rounded-lg px-2 py-2 text-sm hover:bg-parchment/60 ${heldDates.has(date) || uninsured(date) ? "text-ink/40" : "text-pine-deep"}`}>
+                  <input type="checkbox" disabled={heldDates.has(date) || uninsured(date)} checked={form.selectedDates.includes(date)} onChange={event => edit({ selectedDates: event.target.checked ? [...form.selectedDates, date].sort() : form.selectedDates.filter(value => value !== date) })} />
+                  {reservationDateLabel(date)}{heldDates.has(date) ? " (already booked)" : uninsured(date) ? " (after insurance expires)" : ""}
                 </label>)}
               </div>}
               <p className="mt-2 text-xs font-semibold text-pine">{form.fullSeason ? 35 : form.selectedDates.length} market dates selected</p>

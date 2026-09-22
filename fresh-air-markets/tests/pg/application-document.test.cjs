@@ -65,6 +65,8 @@ before(async () => {
     for (const file of ['001-application-handoff.sql', '006-application-document-ledger.sql', '008-application-opportunity-identity.sql']) {
       await migration.unsafe(fs.readFileSync(path.join(__dirname, '../../docs/migrations', file), 'utf8'));
     }
+    // Migration 030 adds the insurance expiry column; the rest of 030 needs the payment ledger this suite does not load.
+    await migration.unsafe('ALTER TABLE fame_application_documents ADD COLUMN IF NOT EXISTS expires_on DATE');
   } finally {
     await migration.end();
   }

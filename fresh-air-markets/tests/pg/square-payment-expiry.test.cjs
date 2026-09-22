@@ -76,7 +76,7 @@ before(async () => {
       '013-final-reservation-writer.sql',
       '014-square-payment-expiry.sql',
       '015-square-payment-expiry-retry-schedule.sql',
-      '016-square-production-environment-fences.sql',
+      '016-square-production-environment-fences.sql', '029-vendor-bookings.sql', '030-vendor-booking-requests.sql',
     ]) await migration.unsafe(fs.readFileSync(path.join(__dirname, '../../docs/migrations', file), 'utf8'));
   } finally {
     await migration.end();

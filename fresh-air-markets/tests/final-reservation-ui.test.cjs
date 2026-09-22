@@ -99,7 +99,7 @@ function renderPanel(options = {}) {
   const states = [
     { ...form, ...options.form }, options.reservation ? [options.reservation] : [],
     options.order && options.reservation ? { [options.reservation.id]: options.order } : {}, {},
-    false, null, '', '', '', [], options.replaceConfirmed ?? false, '', false, '', null,
+    false, null, '', '', '', [], options.replaceConfirmed ?? false, '', false, '', null, null, null, '', false,
   ];
   let index = 0;
   const updates = [];

@@ -21,6 +21,7 @@ interface DocumentSummary {
   reviewState: ReviewState;
   reviewReason: string;
   isCurrent: boolean;
+  expiresOn?: string | null;
 }
 
 const KIND_LABELS: Record<Kind, string> = { insurance: "Certificate of insurance", food_license: "Food license / permit" };
@@ -66,6 +67,7 @@ export default function ApplicationDocumentsPanel({ applicationId }: { applicati
   };
   const [file, setFile] = useState<File | null>(null);
   const [reasons, setReasons] = useState<Record<string, string>>({});
+  const [expiries, setExpiries] = useState<Record<string, string>>({});
   const listEndpoint = `/api/admin/applications/${encodeURIComponent(applicationId)}/documents`;
 
   const refresh = useCallback(async (signal?: AbortSignal) => {
@@ -112,12 +114,15 @@ export default function ApplicationDocumentsPanel({ applicationId }: { applicati
     if (busy) return;
     const reason = (reasons[document.id] ?? "").trim();
     if (action !== "approve" && !reason) { setError("Add a short note for the vendor before requesting changes or rejecting."); return; }
+    // Insurance approvals record the certificate's expiry so dates past it cannot be booked.
+    const expiresOn = (expiries[document.id] ?? "").trim();
+    if (action === "approve" && document.kind === "insurance" && !/^\d{4}-\d{2}-\d{2}$/.test(expiresOn)) { setError("Enter the date the certificate of insurance expires (it's printed on the certificate) before approving it."); return; }
     setBusy(true); setError(""); setNotice("");
     try {
       const response = await fetch(`/api/admin/documents/${encodeURIComponent(document.id)}/review`, {
         method: "PATCH", cache: "no-store",
         headers: { "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() },
-        body: JSON.stringify({ expectedVersion: document.version, action, reason }),
+        body: JSON.stringify({ expectedVersion: document.version, action, reason, ...(action === "approve" && document.kind === "insurance" ? { expiresOn } : {}) }),
       });
       const payload = await response.json().catch(() => null);
       if (!response.ok) throw new Error(typeof payload?.error === "string" ? payload.error : "The review could not be saved.");
@@ -194,8 +199,16 @@ export default function ApplicationDocumentsPanel({ applicationId }: { applicati
                   </p>
                 </div>
                 {document.reviewReason && <p className="mt-2 text-sm text-ink/60">Note: {document.reviewReason}</p>}
+                {document.kind === "insurance" && document.reviewState === "approved" && (
+                  <p className="mt-2 text-sm text-ink/60">{document.expiresOn ? `Expires ${new Date(`${document.expiresOn}T12:00:00Z`).toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric", timeZone: "UTC" })}. Dates after that cannot be booked until a renewed certificate is approved.` : "No expiry date recorded (approved before expiry tracking)."}</p>
+                )}
                 {reviewable && (
                   <div className="mt-3 flex flex-wrap items-center gap-2">
+                    {document.kind === "insurance" && (
+                      <label className="flex items-center gap-2 text-sm font-semibold text-pine-deep">Expires on
+                        <input type="date" value={expiries[document.id] ?? ""} onChange={e => setExpiries(current => ({ ...current, [document.id]: e.target.value }))} className={`${field} font-normal`} />
+                      </label>
+                    )}
                     <input
                       type="text" maxLength={2000} placeholder="Note for changes or rejection"
                       value={reasons[document.id] ?? ""}

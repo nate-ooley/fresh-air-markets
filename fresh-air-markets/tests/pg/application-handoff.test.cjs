@@ -32,7 +32,7 @@ before(async () => {
   // 029 (and the chain it depends on) admits the 'withdrawn' value.
   try {
     for (const file of ['001-application-handoff.sql', '004-application-review-outbox.sql', '005-agreement-completion-outbox.sql', '006-application-document-ledger.sql',
-      '011-square-payment-checkout-ledger.sql', '012-square-webhook-events.sql', '013-final-reservation-writer.sql', '029-vendor-bookings.sql']) {
+      '011-square-payment-checkout-ledger.sql', '012-square-webhook-events.sql', '013-final-reservation-writer.sql', '029-vendor-bookings.sql', '030-vendor-booking-requests.sql']) {
       await migration.unsafe(fs.readFileSync(path.join(__dirname, '../../docs/migrations', file), 'utf8'));
     }
   } finally { await migration.end(); }

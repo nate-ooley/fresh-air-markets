@@ -1,9 +1,9 @@
 import postgres from "postgres";
 import { applicantContact, emailConfigured, sendEmail, sendStaffEmail, type SendEmailResult } from "./email";
-import { EMAILED_UPLOAD_TTL_MS, createApplicationUploadToken } from "./application-upload-token";
+import { BOOKING_LINK_TTL_MS, EMAILED_UPLOAD_TTL_MS, createApplicationLinkToken, createApplicationUploadToken } from "./application-upload-token";
 import {
-  applicationInvitationEmail, applicationApprovedEmail, applicationWithdrawnEmail, bookingWithdrawnEmail, documentUploadLinkEmail, applicationChangesRequestedEmail, applicationDeclinedEmail, applicationReceivedEmail,
-  paymentReceivedEmail, paymentRequestEmail, passwordResetEmail, staffContactMessageEmail, staffInvitationEmail, staffNewApplicationEmail, staffPaymentReceivedEmail,
+  applicationInvitationEmail, applicationApprovedEmail, applicationWithdrawnEmail, bookingRequestDeclinedEmail, bookingRequestReceivedEmail, bookingWithdrawnEmail, documentUploadLinkEmail, applicationChangesRequestedEmail, applicationDeclinedEmail, applicationReceivedEmail,
+  paymentReceivedEmail, staffBookingRequestEmail, paymentRequestEmail, passwordResetEmail, staffContactMessageEmail, staffInvitationEmail, staffNewApplicationEmail, staffPaymentReceivedEmail,
 } from "./email-templates";
 
 /**
@@ -37,6 +37,13 @@ export function portalOrigin(env: NodeJS.ProcessEnv = process.env): string {
 export function documentUploadLink(applicationId: string, marketId: string): string | null {
   try {
     return new URL(`/apply/documents#token=${createApplicationUploadToken(applicationId, marketId, process.env, Date.now(), EMAILED_UPLOAD_TTL_MS)}`, portalOrigin()).toString();
+  } catch { return null; }
+}
+
+/** Personal "book more dates" link for this vendor; null when signing is unavailable. */
+export function bookMoreDatesLink(applicationId: string, marketId: string): string | null {
+  try {
+    return new URL(`/vendor/book#token=${createApplicationLinkToken("booking", applicationId, marketId, process.env, Date.now(), BOOKING_LINK_TTL_MS)}`, portalOrigin()).toString();
   } catch { return null; }
 }
 
@@ -119,7 +126,7 @@ export async function notifyPaymentReceived(input: { squareOrderId: string; mark
     if (!contact) return "not_sent";
     const totalCents = Number(order.expected_total_cents);
     const result = await sendEmail({ kind: "payment_received", to: contact.email, marketId: input.marketId, referenceId: order.reservation_id,
-      ...paymentReceivedEmail({ name: contact.name, totalCents }) }, { sql: db });
+      ...paymentReceivedEmail({ name: contact.name, totalCents, bookMoreLink: bookMoreDatesLink(reservation.application_id, input.marketId) }) }, { sql: db });
     await sendStaffEmail({ kind: "staff_payment_received", marketId: input.marketId, referenceId: order.reservation_id,
       ...staffPaymentReceivedEmail({ ...contact, totalCents, applicationId: reservation.application_id, origin: portalOrigin() }) }, { sql: db });
     return outcome(result);
@@ -186,7 +193,7 @@ export async function notifyBookingWithdrawn(input: { reservationId: string; mar
     const contact = await applicantContact(reservation.application_id, input.marketId, db);
     if (!contact) return "not_sent";
     const dates = Array.isArray(reservation.final_dates) ? reservation.final_dates.filter((d): d is string => typeof d === "string").sort() : [];
-    const content = bookingWithdrawnEmail({ name: contact.name, dates, note: input.note });
+    const content = bookingWithdrawnEmail({ name: contact.name, dates, note: input.note, bookMoreLink: bookMoreDatesLink(reservation.application_id, input.marketId) });
     return outcome(await sendEmail({ kind: "booking_withdrawn", to: contact.email, marketId: input.marketId, referenceId: input.reservationId, ...content }, { sql: db }));
   } catch { return "failed"; }
 }
@@ -200,5 +207,32 @@ export async function notifyApplicationWithdrawn(input: { applicationId: string;
     if (!contact) return "not_sent";
     const content = applicationWithdrawnEmail({ name: contact.name, businessName: contact.businessName, note: input.note });
     return outcome(await sendEmail({ kind: "application_withdrawn", to: contact.email, marketId: input.marketId, referenceId: input.applicationId, ...content }, { sql: db }));
+  } catch { return "failed"; }
+}
+
+/** Vendor asked for more dates: confirm to them, tell staff. */
+export async function notifyBookingRequest(input: { applicationId: string; marketId: string; requestId: string; dates: string[]; booths: number; note: string }, sql?: Sql): Promise<NotificationOutcome> {
+  if (!emailConfigured()) return "not_sent";
+  try {
+    const db = sql ?? configuredClient();
+    const contact = await applicantContact(input.applicationId, input.marketId, db);
+    if (!contact) return "not_sent";
+    const result = await sendEmail({ kind: "booking_request_received", to: contact.email, marketId: input.marketId, referenceId: input.requestId,
+      ...bookingRequestReceivedEmail({ name: contact.name, dates: input.dates, booths: input.booths }) }, { sql: db });
+    await sendStaffEmail({ kind: "staff_booking_request", marketId: input.marketId, referenceId: input.requestId,
+      ...staffBookingRequestEmail({ ...contact, dates: input.dates, booths: input.booths, note: input.note, applicationId: input.applicationId, origin: portalOrigin() }) }, { sql: db });
+    return outcome(result);
+  } catch { return "failed"; }
+}
+
+/** Staff declined a date request. */
+export async function notifyBookingRequestDeclined(input: { applicationId: string; marketId: string; requestId: string; dates: string[]; note: string }, sql?: Sql): Promise<NotificationOutcome> {
+  if (!emailConfigured()) return "not_sent";
+  try {
+    const db = sql ?? configuredClient();
+    const contact = await applicantContact(input.applicationId, input.marketId, db);
+    if (!contact) return "not_sent";
+    const content = bookingRequestDeclinedEmail({ name: contact.name, dates: input.dates, note: input.note, bookMoreLink: bookMoreDatesLink(input.applicationId, input.marketId) });
+    return outcome(await sendEmail({ kind: "booking_request_declined", to: contact.email, marketId: input.marketId, referenceId: input.requestId, ...content }, { sql: db }));
   } catch { return "failed"; }
 }

@@ -295,8 +295,9 @@ export default function ApplicationReviewPanel({ applicationId }: { applicationI
         return;
       }
       const saved = payload;
+      // The decision now covers the current submission.
       setApplication(current => current
-        ? { ...current, reviewState: saved.application.reviewState }
+        ? { ...current, reviewState: saved.application.reviewState, resubmittedSinceReview: false, updatedSinceReview: false }
         : current);
       setNotice({
         duplicate: saved.duplicate,

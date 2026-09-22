@@ -133,7 +133,7 @@ interface DocumentListRow {
   source_event_id: string; source_file_id: string; storage_key: string; filename: string;
   content_type: ApplicationDocumentRecord["file"]["contentType"]; size_bytes: string | number; content_sha256: string;
   validation_state: DocumentValidationState; review_state: DocumentReviewState; review_revision: number; is_current: boolean;
-  submitted_at: Date; review_reason: string; validation_reason: string;
+  submitted_at: Date; review_reason: string; validation_reason: string; expires_on: string | null;
 }
 
 /** Everything the manager needs to review; storage keys stay server-side. */
@@ -150,6 +150,8 @@ export interface ApplicationDocumentSummary {
   reviewState: DocumentReviewState;
   reviewReason: string;
   isCurrent: boolean;
+  /** Insurance only: the expiry date staff recorded on approval (YYYY-MM-DD). */
+  expiresOn?: string | null;
 }
 
 export async function listApplicationDocuments(
@@ -161,7 +163,7 @@ export async function listApplicationDocuments(
   const rows = await sql<DocumentListRow[]>`
     SELECT id, application_id, market_id, kind, version, source_event_id, source_file_id, storage_key,
            filename, content_type, size_bytes, content_sha256, validation_state, review_state,
-           review_revision, is_current, submitted_at, review_reason, validation_reason
+           review_revision, is_current, submitted_at, review_reason, validation_reason, expires_on::text AS expires_on
     FROM fame_application_documents
     WHERE application_id = ${applicationId} AND market_id = ${marketId}
     ORDER BY kind, version DESC`;
@@ -171,6 +173,7 @@ export async function listApplicationDocuments(
     submittedAt: new Date(row.submitted_at).toISOString(),
     validationState: row.validation_state, validationReason: row.validation_reason,
     reviewState: row.review_state, reviewReason: row.review_reason, isCurrent: row.is_current,
+    expiresOn: row.expires_on ?? null,
   }));
 }
 

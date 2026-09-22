@@ -91,6 +91,14 @@ export interface ParsedDocumentReview {
   action: DocumentReviewAction;
   reason: string;
   idempotencyKey: string;
+  /** Insurance approvals record when the certificate expires (YYYY-MM-DD). */
+  expiresOn?: string;
+}
+
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+export function validDocumentExpiryDate(value: unknown): value is string {
+  return typeof value === "string" && ISO_DATE.test(value) && !Number.isNaN(Date.parse(`${value}T00:00:00Z`))
+    && new Date(`${value}T00:00:00Z`).toISOString().slice(0, 10) === value;
 }
 
 export interface ParsedDocumentScan {
@@ -289,7 +297,9 @@ export function parseApplicationDocumentReview(
   if (body.reason !== undefined && typeof body.reason !== "string") return null;
   const reason = typeof body.reason === "string" ? body.reason.trim() : "";
   if (reason.length > 2000 || (body.action !== "approve" && !reason)) return null;
-  return { expectedVersion: body.expectedVersion, action: body.action, reason, idempotencyKey };
+  if (body.expiresOn !== undefined && body.expiresOn !== null && body.expiresOn !== "" && !validDocumentExpiryDate(body.expiresOn)) return null;
+  const expiresOn = body.action === "approve" && validDocumentExpiryDate(body.expiresOn) ? body.expiresOn : undefined;
+  return { expectedVersion: body.expectedVersion, action: body.action, reason, idempotencyKey, ...(expiresOn ? { expiresOn } : {}) };
 }
 
 export function documentReviewState(action: DocumentReviewAction): DocumentReviewState {

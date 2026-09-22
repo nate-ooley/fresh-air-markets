@@ -93,6 +93,12 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     if (result.kind === "conflict") {
       return NextResponse.json({ error: "This request key was already used for a different booking. Reload and try again." }, { status: 409 });
     }
+    if (result.kind === "insurance_expires") {
+      return NextResponse.json({
+        error: `The vendor's certificate of insurance expires on ${result.expiresOn}, so ${result.dates.length === 1 ? "this date" : "these dates"} cannot be booked yet: ${result.dates.join(", ")}. Ask them for a renewed certificate first.`,
+        insuranceExpiresOn: result.expiresOn, uncoveredDates: result.dates,
+      }, { status: 409 });
+    }
     if (result.kind === "overlap") {
       return NextResponse.json({
         error: `The vendor already holds ${result.dates.length === 1 ? "this date" : "these dates"}: ${result.dates.join(", ")}. Choose different dates, or withdraw the earlier booking first.`,

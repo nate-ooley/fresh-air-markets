@@ -87,6 +87,7 @@ interface CurrentDocumentRow {
   review_revision: number;
   validation_state: string;
   review_state: string;
+  expires_on?: string | null;
 }
 
 interface ExistingFinalizationRow {
@@ -134,6 +135,7 @@ export type FinalReservationResult =
   | { kind: "not_found" }
   | { kind: "conflict" }
   | { kind: "overlap"; dates: string[] }
+  | { kind: "insurance_expires"; expiresOn: string; dates: string[] }
   | { kind: "invalid_selection" }
   | { kind: "not_eligible"; reason: FinalReservationIneligibility }
   | { kind: "unavailable"; availability: { date: string; available: boolean; reasons: string[] }[] };
@@ -148,11 +150,12 @@ export async function getFinalApplicationReservation(
   marketId: string,
   applicationId: string,
   sql: Sql = configuredClient(),
-): Promise<{ reservation: FinalReservationRecord | null; reservations: FinalReservationRecord[] } | null> {
+): Promise<{ reservation: FinalReservationRecord | null; reservations: FinalReservationRecord[]; insuranceExpiresOn: string | null } | null> {
   if (!marketId || marketId === DEMO_MARKET_ID || !validFinalReservationApplicationId(applicationId)) return null;
   const [application] = await sql`SELECT id FROM fame_applications
     WHERE id = ${applicationId} AND market_id = ${marketId}`;
   if (!application) return null;
+  const insuranceExpiresOn = await currentInsuranceExpiry(sql, marketId, applicationId);
   const rows = await sql<ExistingFinalizationRow[]>`
     SELECT f.reservation_id, f.selection_fingerprint, f.idempotency_key,
       r.state, r.payment_required, r.total_cents, r.final_booth_quantity, r.final_dates, r.quote_version,
@@ -169,7 +172,22 @@ export async function getFinalApplicationReservation(
   });
   const reservation = [...reservations].reverse().find(record => record.state !== "cancelled")
     ?? reservations[reservations.length - 1] ?? null;
-  return { reservation, reservations };
+  return { reservation, reservations, insuranceExpiresOn };
+}
+
+/** Expiry staff recorded on the current approved certificate of insurance, if any. */
+export async function currentInsuranceExpiry(sql: QuerySql, marketId: string, applicationId: string): Promise<string | null> {
+  const [row] = await sql<{ expires_on: string | null }[]>`
+    SELECT expires_on::text AS expires_on FROM fame_application_documents
+    WHERE application_id = ${applicationId} AND market_id = ${marketId}
+      AND kind = 'insurance' AND is_current AND review_state = 'approved'
+    LIMIT 1`;
+  return row?.expires_on ?? null;
+}
+
+/** Dates a certificate that expires on `expiresOn` does not cover. */
+export function datesAfterInsuranceExpiry(dates: readonly string[], expiresOn: string | null | undefined): string[] {
+  return expiresOn ? dates.filter(date => date > expiresOn) : [];
 }
 
 export interface FinalReservationWriteInput {
@@ -274,6 +292,33 @@ async function occupancyForDate(
   };
 }
 
+/** Occupancy for many dates in one query (read-only; no locks). */
+export async function seasonOccupancy(
+  sql: QuerySql,
+  marketId: string,
+  dates: readonly string[],
+): Promise<{ date: string; booths: number; foodTrucks: number; foodTruckBooths: number; nonprofits: number }[]> {
+  if (!dates.length) return [];
+  const rows = await sql<(OccupancyRow & { market_date: string })[]>`
+    SELECT a.market_date::text AS market_date,
+      COALESCE(SUM(a.booth_quantity), 0)::int AS booths,
+      COALESCE(COUNT(*) FILTER (WHERE f.vendor_category = 'Food Truck'), 0)::int AS food_trucks,
+      COALESCE(SUM(a.booth_quantity) FILTER (WHERE f.vendor_category = 'Food Truck'), 0)::int AS food_truck_booths,
+      COALESCE(COUNT(*) FILTER (WHERE f.applicant_type = 'Non-Profit Organization'), 0)::int AS nonprofits
+    FROM fame_reservation_allocations a
+    JOIN fame_reservations r ON r.id = a.reservation_id AND r.market_id = a.market_id
+    JOIN fame_reservation_finalizations f ON f.reservation_id = a.reservation_id AND f.market_id = a.market_id
+    WHERE a.market_id = ${marketId}
+      AND a.market_date = ANY(${[...dates]}::date[])
+      AND r.state IN ('held', 'payment_pending', 'paid', 'confirmed', 'manual_review')
+    GROUP BY a.market_date`;
+  const byDate = new Map(rows.map(row => [row.market_date, row]));
+  return dates.map(date => {
+    const row = byDate.get(date);
+    return { date, booths: Number(row?.booths ?? 0), foodTrucks: Number(row?.food_trucks ?? 0), foodTruckBooths: Number(row?.food_truck_booths ?? 0), nonprofits: Number(row?.nonprofits ?? 0) };
+  });
+}
+
 function approvedCurrentDocument(
   documents: CurrentDocumentRow[],
   kind: CurrentDocumentRow["kind"],
@@ -367,7 +412,7 @@ export async function reserveFinalApplication(
         AND season_id = ${application.season_id}
       FOR KEY SHARE`;
     const documents = await tx<CurrentDocumentRow[]>`
-      SELECT id, kind, version, review_revision, validation_state, review_state
+      SELECT id, kind, version, review_revision, validation_state, review_state, expires_on::text AS expires_on
       FROM fame_application_documents
       WHERE application_id = ${application.id}
         AND market_id = ${application.market_id}
@@ -409,6 +454,9 @@ export async function reserveFinalApplication(
     }
     const overlap = preflight.dates.filter(date => heldDates.has(date));
     if (overlap.length) return { kind: "overlap", dates: overlap };
+    // The certificate on file must cover every booked Saturday.
+    const uncovered = datesAfterInsuranceExpiry(preflight.dates, insurance.expires_on);
+    if (uncovered.length) return { kind: "insurance_expires", expiresOn: insurance.expires_on as string, dates: uncovered };
     for (const date of preflight.dates) {
       await tx`SELECT pg_advisory_xact_lock(hashtextextended(${`fame-reservation-capacity:${input.marketId}:${date}`}, 0))`;
     }

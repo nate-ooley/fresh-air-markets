@@ -71,6 +71,7 @@ before(async () => {
       '027-payment-order-reissue.sql',
       '028-payment-order-reissue-after-failure.sql',
       '029-vendor-bookings.sql',
+      '030-vendor-booking-requests.sql',
     ]) await migration.unsafe(fs.readFileSync(path.join(__dirname, '../../docs/migrations', file), 'utf8'));
   } finally {
     await migration.end();
@@ -234,7 +235,7 @@ test('a provenance-ledger failure rolls back reservation and allocations before 
 test('manager reload returns only committed same-market reservation and no raw evidence', async () => {
   const app = await seedEligibleApplication();
   const applicationId = app.applicationId;
-  assert.deepEqual(await getFinalApplicationReservation(marketId, applicationId, first), { reservation: null, reservations: [] });
+  assert.deepEqual(await getFinalApplicationReservation(marketId, applicationId, first), { reservation: null, reservations: [], insuranceExpiresOn: null });
   const result = await reserveFinalApplication({ marketId, applicationId, actorAccountId: marketId, selection: selection(), config: config(), now }, first);
   assert.equal(result.kind, 'created');
   const reloaded = await getFinalApplicationReservation(marketId, applicationId, first);
@@ -375,4 +376,77 @@ test('withdrawing an application records a terminal review event, blocks on live
   assert.deepEqual(await withdrawApplication({ marketId, applicationId: randomUUID(), actorAccountId: marketId, note: 'x', now }, first), { kind: 'not_found' });
   // A withdrawn vendor cannot get a new booking until they re-apply (the evidence guard needs the approved state).
   assert.equal((await reserve(applicationId, selection({ selectedDates: ['2026-10-10'] }))).kind, 'not_eligible');
+});
+
+const { vendorBookingOverview, createBookingRequest, settleBookingRequest, listPendingBookingRequests, getBookingRequest } = require('../../.test-build/vendor-booking-pg.js');
+
+test('a vendor can ask for open Saturdays; the request is validated against their bookings, insurance expiry and room', async () => {
+  const { applicationId } = await seedEligibleApplication();
+  await first`UPDATE fame_application_events SET snapshot = ${first.json({ source: 'qa', snapshot: { firstName: 'Val', lastName: 'Vendor', businessName: 'Val Crafts', email: 'val@example.org', applicantType: 'Vendor', vendorCategory: 'Arts & Crafts', selectedDates: ['2026-10-03'], boothsPerMarket: 1 } })} WHERE application_id = ${applicationId}`;
+  const today = '2026-09-22';
+  const before = await vendorBookingOverview({ marketId, applicationId, config: config(1), today }, first);
+  assert.equal(before.eligible, true);
+  assert.equal(before.profile.fromBooking, false);
+  assert.deepEqual(before.days.map(d => [d.date, d.available, d.booked, d.uninsured]), [['2026-10-03', true, false, false], ['2026-10-10', true, false, false]]);
+  // First booking by staff fixes the profile and takes a Saturday.
+  const made = await reserve(applicationId, selection({ selectedDates: ['2026-10-03'] }), first, 1);
+  assert.equal(made.kind, 'created');
+  const after = await vendorBookingOverview({ marketId, applicationId, config: config(1), today }, first);
+  assert.deepEqual([after.profile.fromBooking, after.profile.vendorCategory, after.bookings.length], [true, 'Arts & Crafts', 1]);
+  assert.deepEqual(after.days.map(d => [d.date, d.booked]), [['2026-10-03', true], ['2026-10-10', false]]);
+  // Bad requests are refused with reasons; nothing is written.
+  const bad = await createBookingRequest({ marketId, applicationId, dates: ['2026-10-03', '2026-10-10', '2026-12-25'], booths: 9, note: 'x', config: config(1), today }, first);
+  assert.equal(bad.kind, 'invalid');
+  assert.ok(bad.problems.some(p => /already in one of your bookings/.test(p)) && bad.problems.some(p => /not a market Saturday/.test(p)) && bad.problems.some(p => /Booths per Saturday/.test(p)));
+  assert.equal(rows(await first`SELECT 1 FROM fame_booking_requests`).length, 0);
+  // Insurance that expires before the date blocks it.
+  await first`UPDATE fame_application_documents SET expires_on = '2026-10-05' WHERE application_id = ${applicationId} AND kind = 'insurance'`;
+  const uninsured = await createBookingRequest({ marketId, applicationId, dates: ['2026-10-10'], booths: 1, note: '', config: config(1), today }, first);
+  assert.equal(uninsured.kind, 'invalid');
+  assert.match(uninsured.problems[0], /insurance certificate expires \(2026-10-05\)/);
+  assert.equal((await vendorBookingOverview({ marketId, applicationId, config: config(1), today }, first)).days[1].uninsured, true);
+  await first`UPDATE fame_application_documents SET expires_on = '2027-06-01' WHERE application_id = ${applicationId} AND kind = 'insurance'`;
+  // Another vendor fills the only booth on Oct 10: no room.
+  const other = await seedEligibleApplication();
+  assert.equal((await reserve(other.applicationId, selection({ selectedDates: ['2026-10-10'] }), first, 1)).kind, 'created');
+  const full = await createBookingRequest({ marketId, applicationId, dates: ['2026-10-10'], booths: 1, note: '', config: config(1), today }, first);
+  assert.equal(full.kind, 'invalid');
+  assert.match(full.problems[0], /no longer has room/);
+  // With two booths of capacity the request goes through, once.
+  const ok = await createBookingRequest({ marketId, applicationId, dates: ['2026-10-10'], booths: 1, note: 'Please and thanks', config: config(2), today }, first);
+  assert.equal(ok.kind, 'created');
+  assert.deepEqual([ok.request.dates, ok.request.booths, ok.request.status, ok.request.vendorNote], [['2026-10-10'], 1, 'pending', 'Please and thanks']);
+  const again = await createBookingRequest({ marketId, applicationId, dates: ['2026-10-10'], booths: 1, note: '', config: config(2), today }, first);
+  assert.equal(again.kind, 'already_pending');
+  assert.equal(again.request.id, ok.request.id);
+  const pending = await listPendingBookingRequests(marketId, first);
+  assert.deepEqual([pending.length, pending[0].businessName, pending[0].id], [1, 'Val Crafts', ok.request.id]);
+  assert.equal((await vendorBookingOverview({ marketId, applicationId, config: config(2), today }, first)).pendingRequest.id, ok.request.id);
+  // Staff settle it; a settled request cannot be settled twice.
+  const declined = await settleBookingRequest({ marketId, requestId: ok.request.id, status: 'declined', staffNote: 'Full that week', actorAccountId: marketId, now }, first);
+  assert.deepEqual([declined.kind, declined.request.status, declined.request.staffNote], ['settled', 'declined', 'Full that week']);
+  assert.deepEqual(await settleBookingRequest({ marketId, requestId: ok.request.id, status: 'declined', staffNote: 'x', actorAccountId: marketId, now }, first), { kind: 'not_pending', status: 'declined' });
+  assert.equal((await getBookingRequest(marketId, ok.request.id, first)).status, 'declined');
+  assert.equal(await getBookingRequest('other-market', ok.request.id, first), null);
+  // Confirmed requests must point at the booking they became.
+  const second = await createBookingRequest({ marketId, applicationId, dates: ['2026-10-10'], booths: 1, note: '', config: config(2), today }, first);
+  assert.equal(second.kind, 'created');
+  await assert.rejects(settleBookingRequest({ marketId, requestId: second.request.id, status: 'confirmed', actorAccountId: marketId, now }, first));
+  const booked = await reserve(applicationId, selection({ selectedDates: ['2026-10-10'] }), first, 2);
+  assert.equal(booked.kind, 'created');
+  const confirmed = await settleBookingRequest({ marketId, requestId: second.request.id, status: 'confirmed', reservationId: booked.reservation.id, actorAccountId: marketId, now }, first);
+  assert.deepEqual([confirmed.kind, confirmed.request.status, confirmed.request.reservationId], ['settled', 'confirmed', booked.reservation.id]);
+  // Not eligible once withdrawn.
+  await first`UPDATE fame_applications SET review_state = 'withdrawn' WHERE id = ${applicationId}`;
+  assert.equal((await createBookingRequest({ marketId, applicationId, dates: ['2026-10-03'], booths: 1, note: '', config: config(2), today }, first)).kind, 'not_eligible');
+});
+
+test('a booking refuses Saturdays after the insurance certificate expires and reports the expiry to staff', async () => {
+  const { applicationId } = await seedEligibleApplication();
+  await first`UPDATE fame_application_documents SET expires_on = '2026-10-05' WHERE application_id = ${applicationId} AND kind = 'insurance'`;
+  assert.equal((await getFinalApplicationReservation(marketId, applicationId, first)).insuranceExpiresOn, '2026-10-05');
+  const blocked = await reserve(applicationId, selection({ selectedDates: ['2026-10-03', '2026-10-10'] }));
+  assert.deepEqual(blocked, { kind: 'insurance_expires', expiresOn: '2026-10-05', dates: ['2026-10-10'] });
+  assert.equal(rows(await first`SELECT 1 FROM fame_reservations WHERE application_id = ${applicationId}`).length, 0);
+  assert.equal((await reserve(applicationId, selection({ selectedDates: ['2026-10-03'] }))).kind, 'created');
 });

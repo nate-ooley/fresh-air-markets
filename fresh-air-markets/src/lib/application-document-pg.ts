@@ -63,6 +63,8 @@ export interface ApplicationDocumentReviewInput {
   idempotencyKey: string;
   action: DocumentReviewAction;
   reason: string;
+  /** Insurance approvals record when the certificate expires (YYYY-MM-DD). */
+  expiresOn?: string;
 }
 
 export type ApplicationDocumentReviewResult =
@@ -668,7 +670,8 @@ export async function recordApplicationDocumentReview(
       UPDATE fame_application_documents
       SET review_state = ${reviewState}, review_revision = review_revision + 1,
           reviewed_at = statement_timestamp(), reviewed_by_account_id = ${input.actorAccountId},
-          review_reason = ${input.reason}
+          review_reason = ${input.reason},
+          expires_on = ${reviewState === "approved" && input.expiresOn ? input.expiresOn : null}
       WHERE id = ${document.id}`;
     const outboxRows = await tx`
       INSERT INTO fame_document_outbox (id, market_id, topic, dedupe_key, payload)

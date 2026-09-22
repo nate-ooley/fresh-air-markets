@@ -32,7 +32,7 @@ before(async () => {
       '005-agreement-completion-outbox.sql', '006-application-document-ledger.sql',
       '011-square-payment-checkout-ledger.sql', '012-square-webhook-events.sql',
       '013-final-reservation-writer.sql', '014-square-payment-expiry.sql',
-      '017-vendor-payment-access.sql',
+      '017-vendor-payment-access.sql', '029-vendor-bookings.sql', '030-vendor-booking-requests.sql',
     ]) await migration.unsafe(fs.readFileSync(path.join(__dirname, '../../docs/migrations', file), 'utf8'));
   } finally { await migration.end(); }
 });

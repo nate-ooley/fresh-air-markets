@@ -92,13 +92,44 @@ export function paymentRequestEmail(input: { name: string; totalCents: number; d
   ]) };
 }
 
-export function bookingWithdrawnEmail(input: { name: string; dates: string[]; note?: string }): EmailContent {
+function bookMoreLine(link: string | null | undefined): string[] {
+  return link ? [`Want more Saturdays this season? Pick them here and we'll send a payment link; your insurance and agreement stay on file: ${link}`] : [];
+}
+
+export function bookingWithdrawnEmail(input: { name: string; dates: string[]; note?: string; bookMoreLink?: string | null }): EmailContent {
   const list = input.dates.length ? input.dates.map(day).join(", ") : "your reserved market dates";
   return { subject: `Booking withdrawn: ${MARKET}`, ...wrap([
     `Hi ${input.name},`,
     `As requested, we've withdrawn your booking for ${list}. No payment is due for these dates and any earlier payment link no longer works.`,
     ...(input.note ? [input.note] : []),
-    "Your application stays on file for the season. If you'd like to book different dates, just reply to this email or call us and we'll send a new payment link.",
+    input.bookMoreLink
+      ? `Your application stays on file for the season. To book different dates, choose them here and we'll send a new payment link: ${input.bookMoreLink}`
+      : "Your application stays on file for the season. If you'd like to book different dates, just reply to this email or call us and we'll send a new payment link.",
+  ]) };
+}
+
+export function bookingRequestReceivedEmail(input: { name: string; dates: string[]; booths: number }): EmailContent {
+  return { subject: `We got your date request: ${MARKET}`, ...wrap([
+    `Hi ${input.name},`,
+    `Thanks! You asked for ${input.booths} booth${input.booths === 1 ? "" : "s"} on ${input.dates.map(day).join(", ")}.`,
+    "Market staff will confirm the dates and email you a secure Square payment link, usually within a day or two. Nothing is reserved until you pay; payment is due within 48 hours of that email.",
+  ]) };
+}
+
+export function bookingRequestDeclinedEmail(input: { name: string; dates: string[]; note: string; bookMoreLink?: string | null }): EmailContent {
+  return { subject: `About your date request: ${MARKET}`, ...wrap([
+    `Hi ${input.name},`,
+    `We couldn't confirm your request for ${input.dates.map(day).join(", ")}.`,
+    input.note,
+    ...bookMoreLine(input.bookMoreLink),
+  ]) };
+}
+
+export function staffBookingRequestEmail(input: { name: string; businessName: string; email: string; dates: string[]; booths: number; note: string; applicationId: string; origin: string }): EmailContent {
+  return { subject: `Date request: ${input.businessName} (${input.dates.length} Saturday${input.dates.length === 1 ? "" : "s"})`, ...wrap([
+    `${input.name} (${input.businessName}, ${input.email}) asked for ${input.booths} booth${input.booths === 1 ? "" : "s"} on ${input.dates.map(day).join(", ")}.`,
+    ...(input.note ? [`Their note: ${input.note}`] : []),
+    `Confirm or decline it here (confirming reserves the dates and emails the payment link): ${input.origin}/applications/${input.applicationId}`,
   ]) };
 }
 
@@ -111,11 +142,12 @@ export function applicationWithdrawnEmail(input: { name: string; businessName: s
   ]) };
 }
 
-export function paymentReceivedEmail(input: { name: string; totalCents: number }): EmailContent {
+export function paymentReceivedEmail(input: { name: string; totalCents: number; bookMoreLink?: string | null }): EmailContent {
   return { subject: `Payment received: ${MARKET}`, ...wrap([
     `Hi ${input.name},`,
     `We received your payment of ${money(input.totalCents)}. Your booth is confirmed.`,
     "You'll receive your booth assignment, market map, and Vendor Pass before your first market day, plus a reminder with setup instructions a few days ahead. Setup begins at 6:30 AM; booths must be ready by 8:00 AM.",
+    ...bookMoreLine(input.bookMoreLink),
   ]) };
 }
 
