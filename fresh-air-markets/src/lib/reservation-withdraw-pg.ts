@@ -1,6 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
 import postgres from "postgres";
-import type { SquarePaymentLinkRetirementResult } from "./square";
 
 type Sql = ReturnType<typeof postgres>;
 type QuerySql = Sql | postgres.TransactionSql;
@@ -13,8 +12,13 @@ function configuredClient(): Sql {
   return client;
 }
 
-/** Bookings a manager may withdraw: nothing has been paid yet. */
-const WITHDRAWABLE_STATES = ["held", "payment_pending", "expired", "manual_review"] as const;
+/**
+ * Bookings a manager may withdraw: nothing has been paid yet. A booking in
+ * manager review is deliberately excluded: that state is where a payment
+ * Square reported but the app could not reconcile is parked, so it must be
+ * settled by hand (reopened, or refunded in Square) before anything else.
+ */
+export const WITHDRAWABLE_STATES = ["held", "payment_pending", "expired"] as const;
 /** Payment orders that could still turn into a payment. */
 const LIVE_ORDER_STATES = ["pending_checkout", "processing_checkout", "checkout_created"] as const;
 
@@ -23,6 +27,8 @@ export type WithdrawReservationResult =
   | { kind: "not_found" }
   | { kind: "not_withdrawable"; state: string }
   | { kind: "link_closing" }
+  | { kind: "checkout_in_progress" }
+  | { kind: "cancellation_unproven"; squareOrderId: string }
   | { kind: "square_unavailable" };
 
 export interface WithdrawReservationInput {
@@ -31,8 +37,12 @@ export interface WithdrawReservationInput {
   /** Short manager note, e.g. "Vendor emailed 9/20: only wants spring dates." */
   note: string;
   now?: Date;
-  /** Deletes a hosted Square link; omitted when Square is not configured. */
-  deleteLink?: (paymentLinkId: string) => Promise<SquarePaymentLinkRetirementResult>;
+  /**
+   * Cancels a hosted Square link and proves it: "cancelled" only when Square
+   * confirmed the exact order is cancelled. Omitted when Square is not
+   * configured, in which case a booking with a live link cannot be withdrawn.
+   */
+  cancelLink?: (link: { paymentLinkId: string; squareOrderId: string }) => Promise<"cancelled" | "unproven">;
 }
 
 interface LockedReservation {
@@ -44,6 +54,7 @@ interface LiveOrderRow {
   id: string;
   status: string;
   square_payment_link_id: string | null;
+  square_order_id: string | null;
 }
 
 async function lockReservation(tx: QuerySql, marketId: string, reservationId: string): Promise<LockedReservation | null> {
@@ -58,7 +69,7 @@ async function lockReservation(tx: QuerySql, marketId: string, reservationId: st
 
 async function liveOrders(tx: QuerySql, marketId: string, reservationId: string): Promise<LiveOrderRow[]> {
   return tx<LiveOrderRow[]>`
-    SELECT id, status, square_payment_link_id
+    SELECT id, status, square_payment_link_id, square_order_id
     FROM fame_payment_orders
     WHERE reservation_id = ${reservationId} AND market_id = ${marketId}
       AND status IN ('pending_checkout', 'processing_checkout', 'checkout_created', 'expiry_pending')
@@ -88,19 +99,23 @@ export async function withdrawReservation(
     const orders = await liveOrders(tx, input.marketId, reservation.id);
     // The expiry worker is deleting this link right now; let it finish.
     if (orders.some(order => order.status === "expiry_pending")) return { kind: "link_closing" } as const;
+    // A checkout worker is creating a link right now; cancelling under it would orphan that link.
+    if (orders.some(order => order.status === "processing_checkout")) return { kind: "checkout_in_progress" } as const;
     return { kind: "plan", orders } as const;
   });
   if (plan.kind !== "plan") return plan;
 
-  const links = plan.orders.filter(order => order.square_payment_link_id);
-  if (links.length && !input.deleteLink) return { kind: "square_unavailable" };
+  const links = plan.orders.filter(order => order.square_payment_link_id && order.square_order_id);
+  if (links.length && !input.cancelLink) return { kind: "square_unavailable" };
   for (const order of links) {
+    let proof: "cancelled" | "unproven";
     try {
-      // "not_found" means the link is already gone, which is what we want.
-      await input.deleteLink!(order.square_payment_link_id!);
+      proof = await input.cancelLink!({ paymentLinkId: order.square_payment_link_id!, squareOrderId: order.square_order_id! });
     } catch {
       return { kind: "square_unavailable" };
     }
+    // Without proof the order may already be paid; never release its dates.
+    if (proof !== "cancelled") return { kind: "cancellation_unproven", squareOrderId: order.square_order_id! };
   }
 
   // Pass 2: the links are dead; record the withdrawal.
@@ -127,7 +142,7 @@ export async function withdrawReservation(
     await tx`UPDATE fame_vendor_payment_invitations SET revoked_at = ${now}
       WHERE market_id = ${input.marketId} AND reservation_id = ${reservation.id} AND revoked_at IS NULL`;
     await tx`UPDATE fame_payment_email_outbox
-      SET state = 'cancelled', invitation_ciphertext = NULL, safe_error = 'reservation_withdrawn',
+      SET state = 'cancelled', invitation_ciphertext = NULL, safe_error = 'payment_email_reservation_withdrawn',
           lease_id = NULL, lease_expires_at = NULL, updated_at = ${now}
       WHERE market_id = ${input.marketId} AND reservation_id = ${reservation.id}
         AND state IN ('pending', 'preparing')`;
@@ -135,19 +150,19 @@ export async function withdrawReservation(
   });
 }
 
-/** Live (unpaid or paid) bookings that block withdrawing a whole application. */
+/** Bookings that must be settled by hand (paid, confirmed or in manager review) and those a withdrawal can cancel. */
 export async function applicationBookingSummary(
   marketId: string,
   applicationId: string,
   sql: Sql = configuredClient(),
-): Promise<{ paidOrConfirmed: number; unpaid: string[] }> {
+): Promise<{ blocking: number; unpaid: string[] }> {
   const rows = await sql<{ id: string; state: string }[]>`
     SELECT r.id, r.state
     FROM fame_reservations r
     JOIN fame_reservation_finalizations f ON f.reservation_id = r.id AND f.market_id = r.market_id
     WHERE r.market_id = ${marketId} AND r.application_id = ${applicationId}`;
   return {
-    paidOrConfirmed: rows.filter(row => row.state === "paid" || row.state === "confirmed").length,
+    blocking: rows.filter(row => row.state === "paid" || row.state === "confirmed" || row.state === "manual_review").length,
     unpaid: rows.filter(row => (WITHDRAWABLE_STATES as readonly string[]).includes(row.state)).map(row => row.id),
   };
 }

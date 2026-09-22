@@ -3,7 +3,7 @@
 ## Live today
 
 Site: https://freshairmarketsandevents.com (staff sign in at `/login`).
-Hosting: Vercel project `farmers-market`. Database: Neon PostgreSQL, migrations 001–029.
+Hosting: Vercel project `farmers-market`. Database: Neon PostgreSQL, migrations 001–030.
 Payments: Square production, merchant ML16MNPG8Z0R5, webhook on the custom domain.
 Email: Resend from `hello@freshairmarketsandevents.com` (domain verified).
 Scheduler: GitHub Actions every 5 minutes, releases unpaid 48-hour holds.
@@ -25,7 +25,15 @@ or more Saturdays in a row, $30 only for a full season). Staff can "Add
 dates" from the application page, withdraw an unpaid booking (Square link
 cancelled, dates released, vendor emailed) and withdraw a whole application
 (it goes to "Withdrawn"; the vendor comes back onto the list if they apply
-again). Paid bookings stay locked; refunds happen in Square.
+again). Paid bookings stay locked; refunds happen in Square. Same day:
+vendors get a personal "book more dates" link in their payment-received
+and booking-withdrawn emails; they pick open Saturdays and staff confirm the
+request with one click (dates booked, Square request created, payment link
+emailed) or decline it with a note. Staff record the certificate of
+insurance's expiry date when approving it; Saturdays after that cannot be
+booked by anyone until a renewed certificate is approved. A vendor who
+sends in a new application after being approved goes back on the list as
+"Updated · needs review" and must be approved again before new dates.
 
 ## Before handing to the client's market manager
 
@@ -56,11 +64,9 @@ again). Paid bookings stay locked; refunds happen in Square.
 
 ## Later improvements
 
-- Vendor self-serve "book more dates" link in the payment emails (Part 2 of
-  the bookings plan): the vendor picks open Saturdays, staff confirm with one
-  click, the payment link goes out.
-- Record the insurance certificate's expiry date and block new dates past it
-  until a fresh certificate is uploaded (client decision on Sept 21).
+- A staff list of open date requests across all vendors (today each shows
+  on its vendor's application page and in the staff email).
+- Insurance expiry reminders to vendors before their certificate lapses.
 - More vendor emails: document decision, hold expired, market-day reminder,
   booth assignment and Vendor Pass (the payment email promises these).
 - "Payment received" on the return-from-Square page without a session.

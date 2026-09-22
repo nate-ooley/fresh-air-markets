@@ -265,6 +265,15 @@ test('an expired hold can be reopened, keeps its dates, price and revision, resp
   const blocked = await reopenExpiredReservation({ marketId, reservationId: id, config: config(1), now }, first);
   assert.deepEqual(blocked, { kind: 'unavailable', unavailableDates: ['2026-10-03'] });
   assert.equal((await first`SELECT state FROM fame_reservations WHERE id = ${id}`)[0].state, 'expired');
+  // The vendor was booked again for the same Saturday while this hold lapsed: reopening would double-book them.
+  const again = await reserve(applicationId, selection({ selectedDates: ['2026-10-03'] }), first, 3, new Date(now.valueOf() + 60_000));
+  assert.equal(again.kind, 'created');
+  assert.deepEqual(await reopenExpiredReservation({ marketId, reservationId: id, config: config(3), now }, first), { kind: 'overlap', dates: ['2026-10-03'] });
+  await first`UPDATE fame_reservations SET state = 'cancelled' WHERE id = ${again.reservation.id}`;
+  // A certificate that no longer covers the Saturday blocks the reopen too.
+  await first`UPDATE fame_application_documents SET expires_on = '2026-10-01' WHERE application_id = ${applicationId} AND kind = 'insurance'`;
+  assert.deepEqual(await reopenExpiredReservation({ marketId, reservationId: id, config: config(2), now }, first), { kind: 'insurance_expires', expiresOn: '2026-10-01', dates: ['2026-10-03'] });
+  await first`UPDATE fame_application_documents SET expires_on = NULL WHERE application_id = ${applicationId} AND kind = 'insurance'`;
   // With room, the hold reopens with no deadline and the same revision.
   const reopened = await reopenExpiredReservation({ marketId, reservationId: id, config: config(2), now }, first);
   assert.deepEqual(reopened, { kind: 'reopened', reservation: { id, state: 'held', finalDates: ['2026-10-03'], finalBoothQuantity: 1, totalCents: 4000 } });
@@ -329,17 +338,36 @@ test('withdrawing a booking cancels its Square link first, releases the dates an
   await first`UPDATE fame_reservations SET state = 'payment_pending', payment_due_at = ${now} WHERE id = ${id}`;
   await first`INSERT INTO fame_vendor_payment_invitations (token_hash, market_id, reservation_id, reservation_revision, expires_at, created_at)
     VALUES (${'d'.repeat(64)}, ${marketId}, ${id}, 1, ${new Date(now.valueOf() + 3600_000)}, ${now})`;
+  await first`INSERT INTO fame_vendor_payment_sessions (token_hash, invitation_hash, market_id, reservation_id, reservation_revision, created_at, expires_at)
+    VALUES (${'e'.repeat(64)}, ${'d'.repeat(64)}, ${marketId}, ${id}, 1, ${now}, ${new Date(now.valueOf() + 3600_000)})`;
+  // A queued (not yet sent) payment email must be cancelled by the withdrawal; the outbox guard needs exact payment evidence.
+  const sentAt = new Date(now.valueOf() - 60_000);
+  const dueAt = new Date(sentAt.valueOf() + 48 * 3600_000);
+  await first`UPDATE fame_payment_orders SET payment_request_sent_at = ${sentAt}, payment_due_at = ${dueAt}, expected_total_cents = 4000 WHERE id = ${claim.order.id}`;
+  await first`UPDATE fame_reservations SET payment_request_sent_at = ${sentAt}, payment_due_at = ${dueAt} WHERE id = ${id}`;
+  await first`UPDATE fame_application_events SET snapshot = ${first.json({ source: 'qa', email: 'vendor@example.org', snapshot: { email: 'vendor@example.org' } })} WHERE application_id = ${applicationId}`;
+  const [source] = await first`SELECT f.application_source_location_id AS location_id, f.application_source_event_id AS event_id, g.contact_id, g.opportunity_id
+    FROM fame_reservation_finalizations f JOIN fame_agreement_completions g ON g.id = f.agreement_completion_id WHERE f.reservation_id = ${id}`;
+  await first`INSERT INTO fame_payment_email_outbox (id, market_id, application_id, reservation_id, reservation_revision, source_location_id, source_event_id, contact_id, opportunity_id,
+      recipient_email, total_cents, payment_due_at, invitation_hash, invitation_ciphertext, state, next_attempt_at, created_at, updated_at)
+    VALUES (${randomUUID()}, ${marketId}, ${applicationId}, ${id}, 1, ${source.location_id}, ${source.event_id}, ${source.contact_id}, ${source.opportunity_id},
+      'vendor@example.org', 4000, ${dueAt}, ${'d'.repeat(64)}, 'ciphertext', 'pending', ${now}, ${now}, ${now})`;
   // Square refuses: nothing changes.
-  const failed = await withdrawReservation({ marketId, reservationId: id, note: 'Vendor asked.', now, deleteLink: async () => { throw new Error('square down'); } }, first);
+  const failed = await withdrawReservation({ marketId, reservationId: id, note: 'Vendor asked.', now, cancelLink: async () => { throw new Error('square down'); } }, first);
   assert.deepEqual(failed, { kind: 'square_unavailable' });
   assert.equal((await first`SELECT state FROM fame_reservations WHERE id = ${id}`)[0].state, 'payment_pending');
   // No Square adapter while a link is live: also refused.
   assert.deepEqual(await withdrawReservation({ marketId, reservationId: id, note: 'x', now }, first), { kind: 'square_unavailable' });
-  // Square deletes the link: booking cancelled, order cancelled, invitation revoked, capacity free.
+  // Square could not prove the order was cancelled (it may be paid): refused, dates stay held.
+  assert.deepEqual(await withdrawReservation({ marketId, reservationId: id, note: 'x', now, cancelLink: async () => 'unproven' }, first), { kind: 'cancellation_unproven', squareOrderId: 'ORD-qa' });
+  assert.equal((await first`SELECT state FROM fame_reservations WHERE id = ${id}`)[0].state, 'payment_pending');
+  // Square proves the link is cancelled: booking cancelled, order cancelled, invitation + session revoked, queued email cancelled, capacity free.
   const deleted = [];
-  const done = await withdrawReservation({ marketId, reservationId: id, note: 'Vendor emailed 9/20: spring only.', now, deleteLink: async linkId => { deleted.push(linkId); return { kind: 'deleted', paymentLinkId: linkId, cancelledOrderId: 'ORD-qa' }; } }, first);
+  const done = await withdrawReservation({ marketId, reservationId: id, note: 'Vendor emailed 9/20: spring only.', now, cancelLink: async link => { deleted.push([link.paymentLinkId, link.squareOrderId]); return 'cancelled'; } }, first);
   assert.deepEqual(done, { kind: 'withdrawn', reservationId: id, linksCancelled: 1 });
-  assert.deepEqual(deleted, ['PL-qa']);
+  assert.deepEqual(deleted, [['PL-qa', 'ORD-qa']]);
+  assert.equal((await first`SELECT revoked_at FROM fame_vendor_payment_sessions WHERE reservation_id = ${id}`)[0].revoked_at.toISOString(), now.toISOString());
+  assert.deepEqual(rows(await first`SELECT state, safe_error, invitation_ciphertext FROM fame_payment_email_outbox WHERE reservation_id = ${id}`), [{ state: 'cancelled', safe_error: 'payment_email_reservation_withdrawn', invitation_ciphertext: null }]);
   const [reservation] = await first`SELECT state, withdrawn_at, withdrawal_note, payment_due_at FROM fame_reservations WHERE id = ${id}`;
   assert.deepEqual([reservation.state, reservation.withdrawn_at.toISOString(), reservation.withdrawal_note, reservation.payment_due_at], ['cancelled', now.toISOString(), 'Vendor emailed 9/20: spring only.', null]);
   assert.deepEqual(rows(await first`SELECT status, last_error_code FROM fame_payment_orders WHERE reservation_id = ${id}`), [{ status: 'cancelled', last_error_code: 'withdrawn_by_manager' }]);
@@ -347,24 +375,37 @@ test('withdrawing a booking cancels its Square link first, releases the dates an
   assert.equal(rows(await first`SELECT 1 FROM fame_reservation_allocations WHERE reservation_id = ${id}`).length, 1, 'allocation rows stay as audit evidence');
   const other = await seedEligibleApplication();
   assert.equal((await reserve(other.applicationId, selection({ selectedDates: ['2026-10-03'] }), first, 1)).kind, 'created', 'the withdrawn booth is free again');
-  // Already withdrawn, paid, or unknown.
+  // Already withdrawn, paid, in manager review (a payment may be parked there), or unknown.
   assert.deepEqual(await withdrawReservation({ marketId, reservationId: id, note: 'x', now }, first), { kind: 'not_withdrawable', state: 'cancelled' });
   await first`UPDATE fame_reservations SET state = 'paid' WHERE id = ${id}`;
   assert.deepEqual(await withdrawReservation({ marketId, reservationId: id, note: 'x', now }, first), { kind: 'not_withdrawable', state: 'paid' });
+  await first`UPDATE fame_reservations SET state = 'manual_review' WHERE id = ${id}`;
+  assert.deepEqual(await withdrawReservation({ marketId, reservationId: id, note: 'x', now }, first), { kind: 'not_withdrawable', state: 'manual_review' });
+  assert.deepEqual(await applicationBookingSummary(marketId, applicationId, first), { blocking: 1, unpaid: [] });
   assert.deepEqual(await withdrawReservation({ marketId, reservationId: randomUUID(), note: 'x', now }, first), { kind: 'not_found' });
   assert.deepEqual(await withdrawReservation({ marketId: 'other-market', reservationId: id, note: 'x', now }, first), { kind: 'not_found' });
-  // A hold with no link yet needs no Square call at all.
+  // A hold whose checkout is being created right now is left alone; one with no link needs no Square call at all.
   const plain = await reserve(other.applicationId, selection({ selectedDates: ['2026-10-10'] }), first, 1);
+  const inflight = await claimSquarePaymentCheckout({ marketId, reservationId: plain.reservation.id, square, now, leaseSeconds: 60 }, first);
+  assert.equal(inflight.kind, 'checkout_required');
+  assert.deepEqual(await withdrawReservation({ marketId, reservationId: plain.reservation.id, note: 'x', now }, first), { kind: 'checkout_in_progress' });
+  await first`UPDATE fame_payment_orders SET status = 'failed', lease_token = NULL, locked_until = NULL WHERE id = ${inflight.order.id}`;
   assert.deepEqual(await withdrawReservation({ marketId, reservationId: plain.reservation.id, note: 'Changed mind.', now }, first), { kind: 'withdrawn', reservationId: plain.reservation.id, linksCancelled: 0 });
+  // An expired hold withdraws without any Square call (its link is already retired).
+  const third = await seedEligibleApplication();
+  const lapsed = await reserve(third.applicationId, selection({ selectedDates: ['2026-10-03'] }), first, 3);
+  assert.equal(lapsed.kind, 'created');
+  await first`UPDATE fame_reservations SET state = 'expired' WHERE id = ${lapsed.reservation.id}`;
+  assert.deepEqual(await withdrawReservation({ marketId, reservationId: lapsed.reservation.id, note: 'Gave up.', now }, first), { kind: 'withdrawn', reservationId: lapsed.reservation.id, linksCancelled: 0 });
 });
 
-test('withdrawing an application records a terminal review event, blocks on live bookings and comes back on re-application', async () => {
+test('withdrawing an application records a terminal review event and blocks on live bookings (re-application is covered in application-handoff)', async () => {
   const { applicationId } = await seedEligibleApplication();
   const made = await reserve(applicationId, selection({ selectedDates: ['2026-10-03'] }));
-  assert.deepEqual(await applicationBookingSummary(marketId, applicationId, first), { paidOrConfirmed: 0, unpaid: [made.reservation.id] });
+  assert.deepEqual(await applicationBookingSummary(marketId, applicationId, first), { blocking: 0, unpaid: [made.reservation.id] });
   assert.deepEqual(await withdrawApplication({ marketId, applicationId, actorAccountId: marketId, note: 'Out this season.', now }, first), { kind: 'has_live_booking', states: ['held'] });
   await first`UPDATE fame_reservations SET state = 'paid' WHERE id = ${made.reservation.id}`;
-  assert.deepEqual(await applicationBookingSummary(marketId, applicationId, first), { paidOrConfirmed: 1, unpaid: [] });
+  assert.deepEqual(await applicationBookingSummary(marketId, applicationId, first), { blocking: 1, unpaid: [] });
   await first`UPDATE fame_reservations SET state = 'cancelled' WHERE id = ${made.reservation.id}`;
   const done = await withdrawApplication({ marketId, applicationId, actorAccountId: marketId, note: 'Out this season.', now }, first);
   assert.deepEqual(done, { kind: 'withdrawn', applicationId, fromState: 'approved' });
@@ -387,6 +428,12 @@ test('a vendor can ask for open Saturdays; the request is validated against thei
   const before = await vendorBookingOverview({ marketId, applicationId, config: config(1), today }, first);
   assert.equal(before.eligible, true);
   assert.equal(before.profile.fromBooking, false);
+  // A Saturday that already happened is flagged and refused.
+  const later = await vendorBookingOverview({ marketId, applicationId, config: config(1), today: '2026-10-05' }, first);
+  assert.deepEqual(later.days.map(d => [d.date, d.past]), [['2026-10-03', true], ['2026-10-10', false]]);
+  const gone = await createBookingRequest({ marketId, applicationId, dates: ['2026-10-03'], booths: 1, note: '', config: config(1), today: '2026-10-05' }, first);
+  assert.equal(gone.kind, 'invalid');
+  assert.match(gone.problems[0], /already happened/);
   assert.deepEqual(before.days.map(d => [d.date, d.available, d.booked, d.uninsured]), [['2026-10-03', true, false, false], ['2026-10-10', true, false, false]]);
   // First booking by staff fixes the profile and takes a Saturday.
   const made = await reserve(applicationId, selection({ selectedDates: ['2026-10-03'] }), first, 1);

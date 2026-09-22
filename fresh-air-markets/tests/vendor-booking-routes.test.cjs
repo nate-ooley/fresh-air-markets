@@ -49,11 +49,13 @@ test('vendor booking page reads only with a valid booking token and never return
   const overview = { applicationId, businessName: 'Val Crafts', vendorName: 'Val', email: 'val@example.org', eligible: true, reasons: [], profile: { applicantType: 'Vendor', vendorCategory: 'Arts & Crafts', foodLicenseRequired: false, boothsPerMarket: 1, fromBooking: true }, insuranceExpiresOn: null, bookings: [], pendingRequest: null, days: [] };
   const calls = [];
   const route = load('vendor/booking', { ...limiter, '@/lib/vendor-booking-pg': { vendorBookingOverview: async input => { calls.push(input); return overview; }, createBookingRequest: async () => { throw new Error('no'); }, marketToday: () => '2026-09-22' }, '@/lib/notifications': {} });
-  const bad = await route.GET(new NextRequest(`${origin}/api/vendor/booking?token=nope`));
+  const view = t => json(`${origin}/api/vendor/booking`, { token: t, view: true });
+  assert.equal(route.GET, undefined, 'the bearer token never travels in a query string');
+  const bad = await route.POST(view('nope'));
   assert.equal(bad.status, 401);
   const foreign = createApplicationLinkToken('booking', applicationId, 'other-market');
-  assert.equal((await route.GET(new NextRequest(`${origin}/api/vendor/booking?token=${foreign}`))).status, 401);
-  const ok = await route.GET(new NextRequest(`${origin}/api/vendor/booking?token=${token}`));
+  assert.equal((await route.POST(view(foreign))).status, 401);
+  const ok = await route.POST(view(token));
   assert.equal(ok.status, 200);
   const body = await ok.json();
   assert.equal(body.businessName, 'Val Crafts');
@@ -114,15 +116,16 @@ test('staff confirm reserves the requested dates with the vendor profile, create
   const reservation = { id: reservationId, state: 'held', paymentRequired: true, totalCents: 16000, finalDates: request.dates, finalBoothQuantity: 2, quoteVersion: 'v1' };
   const order = { id: 'order-1', checkoutUrl: 'https://square.link/u/abc', paymentDueAt: '2026-09-24T12:00:00.000Z', status: 'checkout_created' };
   const log = [];
+  const keys = [];
   const make = (overrides = {}) => load('admin/booking-requests/[id]/confirm', {
     '@/lib/auth': { getSessionAccountId: async () => 'fame-market' },
     '@/lib/vendor-booking-pg': {
       getBookingRequest: async () => overrides.request ?? request,
       vendorBookingOverview: async () => ({ applicationId, profile, eligible: true, reasons: [], insuranceExpiresOn: null, bookings: [], pendingRequest: request, days: [] }),
       settleBookingRequest: async input => { log.push(['settle', input.status, input.reservationId]); return { kind: 'settled', request: { ...request, status: 'confirmed' } }; },
-      marketToday: () => '2026-09-22',
+      marketToday: () => overrides.today ?? '2026-09-22',
     },
-    '@/lib/final-reservation-pg': { ...require('../.test-build/final-reservation-pg.js'), reserveFinalApplication: async input => { log.push(['reserve', input.selection.selectedDates, input.selection.boothsPerMarket, input.selection.vendorCategory, input.selection.applicantType, input.selection.foodLicenseRequired]); return overrides.reserve ?? { kind: 'created', reservation }; } },
+    '@/lib/final-reservation-pg': { ...require('../.test-build/final-reservation-pg.js'), reserveFinalApplication: async input => { log.push(['reserve', input.selection.selectedDates, input.selection.boothsPerMarket, input.selection.vendorCategory, input.selection.applicantType, input.selection.foodLicenseRequired]); keys.push(input.selection.idempotencyKey); return overrides.reserve ?? { kind: 'created', reservation }; } },
     '@/lib/square': { ...require('../.test-build/square.js'), verifySquareIdentity: async () => ({ environment: 'production', merchantId: 'M1', locationId: 'L1' }) },
     '@/lib/square-payment': { dispatchSquareCheckout: async input => { log.push(['checkout', input.reservationId]); return overrides.checkout ?? { kind: 'created', order }; } },
     '@/lib/square-payment-pg': { postgresSquarePaymentCheckoutStore: {} },
@@ -162,6 +165,58 @@ test('staff confirm reserves the requested dates with the vendor profile, create
   assert.equal(partial.status, 503);
   const partialBody = await partial.json();
   assert.deepEqual(partialBody.reservation, reservation);
+  assert.equal(partialBody.paymentOrder, null);
   assert.equal(partialBody.step, 'Create payment request');
   assert.deepEqual(log.map(e => e[0]), ['reserve', 'settle', 'checkout']);
+  // Checkout made but the link email failed: the panel gets the order so it can show "Email the payment link".
+  const later = await make({ access: { kind: 'not_payable' } }).POST(json(url, {}), params(requestId));
+  const laterBody = await later.json();
+  assert.equal(later.status, 503);
+  assert.deepEqual(laterBody.paymentOrder, order);
+  assert.equal(laterBody.reservation.state, 'payment_pending');
+  assert.equal(laterBody.step, 'Email the payment link');
+  // Every attempt for the same request reuses one idempotency key, so a retry replays the booking instead of overlapping it.
+  assert.equal(new Set(keys).size, 1);
+  assert.match(keys[0], /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+  const replay = await make({ reserve: { kind: 'duplicate', reservation } }).POST(json(url, {}), params(requestId));
+  assert.equal(replay.status, 201);
+  // A Saturday that passed since the request is refused before anything is written.
+  log.length = 0;
+  const stale = await make({ today: '2026-11-10' }).POST(json(url, {}), params(requestId));
+  assert.equal(stale.status, 409);
+  assert.match((await stale.json()).error, /2026-11-07 has already happened/);
+  assert.equal(log.length, 0);
+  // All 35 Saturdays are priced as a full season, not 35 single days.
+  const everything = { ...request, dates: [...require('../.test-build/fresh-air-season.js').FRESH_AIR_SEASON_DATES] };
+  await make({ request: everything }).POST(json(url, {}), params(requestId));
+  const full = log.find(e => e[0] === 'reserve');
+  assert.deepEqual(full[1], []);
+  // A nonprofit booking has nothing to pay: no Square call, request settled.
+  log.length = 0;
+  const free = await make({ reserve: { kind: 'created', reservation: { ...reservation, paymentRequired: false, totalCents: 0, state: 'confirmed' } } }).POST(json(url, {}), params(requestId));
+  assert.equal(free.status, 201);
+  assert.deepEqual((await free.json()).paymentOrder, null);
+  assert.deepEqual(log.map(e => e[0]), ['reserve', 'settle']);
 }));
+
+test('the Square link canceller returns "cancelled" only with proof of the exact order', async () => {
+  const { squareLinkCanceller } = require('../.test-build/square-link-cancel.js');
+  const link = { paymentLinkId: 'PL1', squareOrderId: 'O1' };
+  const transport = responses => async (url, init) => {
+    const step = responses.shift();
+    if (!step) throw new Error('unexpected call ' + url);
+    assert.equal(init.method, step.method);
+    return new Response(JSON.stringify(step.body), { status: step.status ?? 200 });
+  };
+  await withEnv(env, async () => {
+    assert.equal(await squareLinkCanceller(process.env, transport([{ method: 'DELETE', body: { id: 'PL1', cancelled_order_id: 'O1' } }]))(link), 'cancelled');
+    // Delete says a different order was cancelled: check the order itself.
+    assert.equal(await squareLinkCanceller(process.env, transport([{ method: 'DELETE', body: { id: 'PL1', cancelled_order_id: 'O2' } }, { method: 'GET', body: { order: { id: 'O1', state: 'CANCELED' } } }]))(link), 'cancelled');
+    // Link already gone and the order is COMPLETED (paid): no proof, never release the dates.
+    assert.equal(await squareLinkCanceller(process.env, transport([{ method: 'DELETE', body: {}, status: 404 }, { method: 'GET', body: { order: { id: 'O1', state: 'COMPLETED' } } }]))(link), 'unproven');
+    await assert.rejects(squareLinkCanceller(process.env, transport([{ method: 'DELETE', body: {}, status: 500 }]))(link));
+  });
+  await withEnv({ ...env, SQUARE_ACCESS_TOKEN: '' }, async () => {
+    assert.equal(squareLinkCanceller(process.env), undefined, 'no Square configuration: no canceller');
+  });
+});

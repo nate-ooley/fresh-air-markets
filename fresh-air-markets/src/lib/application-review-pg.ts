@@ -71,7 +71,8 @@ export type ApplicationReviewResult =
   | { kind: "missing_identity_snapshot" }
   | { kind: "stale_source"; sourceEventId: string | null }
   | { kind: "terminal"; reviewState: ApplicationReviewState }
-  | { kind: "awaiting_resubmission" };
+  | { kind: "awaiting_resubmission" }
+  | { kind: "has_live_booking"; states: string[] };
 
 export interface ApplicationReviewOutboxPayload {
   applicationId: string;
@@ -483,6 +484,17 @@ export async function recordApplicationReview(
     const resubmitted = Boolean(lastReview) && lastReview!.source_event_id !== input.sourceEventId;
     if (currentState === "withdrawn" || ((currentState === "approved" || currentState === "declined") && !resubmitted)) {
       return { kind: "terminal", reviewState: currentState };
+    }
+    // An approved vendor with live bookings cannot be declined or sent back
+    // for changes on a newer submission: their dates, Square links and
+    // capacity would keep running with every control hidden. Settle the
+    // bookings first (withdraw, or refund in Square).
+    if (currentState === "approved" && input.action !== "approve") {
+      const live = await tx<{ state: string }[]>`
+        SELECT state FROM fame_reservations
+        WHERE market_id = ${application.market_id} AND application_id = ${application.id}
+          AND state IN ('held', 'payment_pending', 'paid', 'confirmed', 'manual_review')`;
+      if (live.length) return { kind: "has_live_booking", states: live.map(row => row.state) };
     }
     if (currentState === "changes_requested") {
       if (lastReview?.source_event_id === input.sourceEventId) {

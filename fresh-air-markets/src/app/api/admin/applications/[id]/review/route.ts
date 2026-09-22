@@ -60,6 +60,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
     if (result.kind === "missing_opportunity") return NextResponse.json({ error: "Application is missing its CRM opportunity identity." }, { status: 409 });
     if (result.kind === "stale_source") return NextResponse.json({ error: "The vendor updated this application after the page was opened. It has been reloaded; check the updated details and decide again.", code: "stale_source" }, { status: 409 });
     if (result.kind === "terminal") return NextResponse.json({ error: `Application is already ${result.reviewState}.` }, { status: 409 });
+    if (result.kind === "has_live_booking") return NextResponse.json({ error: "This vendor has a live booking (held, awaiting payment or paid). Withdraw it, or refund it in Square, before declining or sending the application back.", code: "has_live_booking" }, { status: 409 });
     if (result.kind === "awaiting_resubmission") return NextResponse.json({ error: "Changes were already requested on this submission. The vendor was emailed; a new decision becomes possible when they re-submit.", code: "awaiting_resubmission" }, { status: 409 });
     if (result.kind === "conflict") return NextResponse.json({ error: "This review key was already used for different content." }, { status: 409 });
     // A saved decision must remain visible even if HighLevel is unavailable.

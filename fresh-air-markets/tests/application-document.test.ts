@@ -123,6 +123,10 @@ test("review and scanner contracts require an exact version, meaningful correcti
   const clean = parseApplicationDocumentScan({ expectedVersion: 2, sourceEventId: "qa-scan-1", outcome: "clean" });
   const rejected = parseApplicationDocumentScan({ expectedVersion: 2, sourceEventId: "qa-scan-2", outcome: "rejected", reason: "parser_invalid" });
   assert.deepEqual(approval, { expectedVersion: 2, action: "approve", reason: "", idempotencyKey });
+  assert.deepEqual(parseApplicationDocumentReview({ expectedVersion: 2, action: "approve", expiresOn: "2027-03-31" }, idempotencyKey), { expectedVersion: 2, action: "approve", reason: "", idempotencyKey, expiresOn: "2027-03-31" });
+  assert.equal(parseApplicationDocumentReview({ expectedVersion: 2, action: "approve", expiresOn: "2027-02-30" }, idempotencyKey), null);
+  assert.equal(parseApplicationDocumentReview({ expectedVersion: 2, action: "approve", expiresOn: "03/31/2027" }, idempotencyKey), null);
+  assert.equal(parseApplicationDocumentReview({ expectedVersion: 2, action: "request_changes", reason: "Expired.", expiresOn: "2027-03-31" }, idempotencyKey)?.expiresOn, undefined);
   assert.deepEqual(correction, { expectedVersion: 2, action: "request_changes", reason: "Please upload a current certificate.", idempotencyKey });
   assert.equal(missingNote, null);
   assert.equal(noKey, null);

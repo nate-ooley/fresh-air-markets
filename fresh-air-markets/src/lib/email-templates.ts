@@ -112,7 +112,7 @@ export function bookingRequestReceivedEmail(input: { name: string; dates: string
   return { subject: `We got your date request: ${MARKET}`, ...wrap([
     `Hi ${input.name},`,
     `Thanks! You asked for ${input.booths} booth${input.booths === 1 ? "" : "s"} on ${input.dates.map(day).join(", ")}.`,
-    "Market staff will confirm the dates and email you a secure Square payment link, usually within a day or two. Nothing is reserved until you pay; payment is due within 48 hours of that email.",
+    "Market staff will confirm the dates and email you a secure Square payment link, usually within a day or two. Once confirmed, your dates are held for 48 hours and released if the link isn't used in time.",
   ]) };
 }
 

@@ -42,6 +42,10 @@ before(async () => {
     await migration.unsafe(fs.readFileSync(path.join(__dirname, '../../docs/migrations/004-application-review-outbox.sql'), 'utf8'));
     await migration.unsafe(fs.readFileSync(path.join(__dirname, '../../docs/migrations/006-application-document-ledger.sql'), 'utf8'));
     await migration.unsafe(fs.readFileSync(path.join(__dirname, '../../docs/migrations/010-application-review-terminal-state.sql'), 'utf8'));
+    // A decision on a re-submitted approved vendor looks at their bookings; the withdrawn state comes with 029.
+    for (const file of ['005-agreement-completion-outbox.sql', '011-square-payment-checkout-ledger.sql', '012-square-webhook-events.sql', '013-final-reservation-writer.sql', '029-vendor-bookings.sql']) {
+      await migration.unsafe(fs.readFileSync(path.join(__dirname, '../../docs/migrations', file), 'utf8'));
+    }
   } finally {
     await migration.end();
   }
@@ -488,4 +492,44 @@ test('a newer submission after approval or decline reopens the decision; the old
   assert.deepEqual(events.map(e => [e.from_state, e.to_state, e.source_event_id]), [['unreviewed', 'approved', eventId], ['approved', 'approved', newer]]);
   // Now approved for the current submission again: a further decision is final.
   assert.equal((await recordApplicationReview(decision({ ...application, eventId: newer }, { action: 'decline', reason: 'No' }), first)).kind, 'terminal');
+});
+
+test('a re-submitted approved vendor with a live booking cannot be declined or sent back; declined and withdrawn vendors follow their own rules', async () => {
+  const application = await seedApplication({ contactId: 'contact-live', opportunityId: 'opportunity-live' });
+  const { applicationId, marketId, eventId } = application;
+  assert.equal((await recordApplicationReview(decision(application), first)).kind, 'applied');
+  const newer = `application:qa:live-${randomUUID()}`;
+  await first`INSERT INTO fame_application_events (location_id, event_id, market_id, application_id, payload_hash, snapshot, created_at)
+    SELECT location_id, ${newer}, market_id, application_id, ${`hash:${newer}`}, snapshot, now() + interval '1 second'
+    FROM fame_application_events WHERE application_id = ${applicationId} AND event_id = ${eventId}`;
+  // A held booking (bare reservation row; the writer's evidence is exercised in final-reservation.test.cjs).
+  const reservationId = randomUUID();
+  await first`INSERT INTO fame_reservations (id, market_id, application_id, revision, state, payment_required, total_cents, checkout_description, quote_version, final_booth_quantity, final_dates)
+    VALUES (${reservationId}, ${marketId}, ${applicationId}, 1, 'held', TRUE, 4000, 'qa', 'qa', 1, ${first.json(['2026-10-03'])})`;
+  const blocked = await recordApplicationReview(decision({ ...application, eventId: newer }, { action: 'decline', reason: 'No' }), first);
+  assert.deepEqual(blocked, { kind: 'has_live_booking', states: ['held'] });
+  assert.equal((await recordApplicationReview(decision({ ...application, eventId: newer }, { action: 'request_changes', reason: 'Fix' }), first)).kind, 'has_live_booking');
+  assert.equal((await getApplicationReviewDetail(applicationId, marketId, first)).reviewState, 'approved');
+  // Approving the newer submission is always allowed.
+  assert.equal((await recordApplicationReview(decision({ ...application, eventId: newer }), first)).kind, 'applied');
+  await first`UPDATE fame_reservations SET state = 'cancelled' WHERE id = ${reservationId}`;
+  const yetAnother = `application:qa:again-${randomUUID()}`;
+  await first`INSERT INTO fame_application_events (location_id, event_id, market_id, application_id, payload_hash, snapshot, created_at)
+    SELECT location_id, ${yetAnother}, market_id, application_id, ${`hash:${yetAnother}`}, snapshot, now() + interval '1500 milliseconds'
+    FROM fame_application_events WHERE application_id = ${applicationId} AND event_id = ${eventId}`;
+  application.eventId = yetAnother;
+  // No live booking: the newer submission can be declined; then a further re-submission can be decided again.
+  const declined = await recordApplicationReview(decision(application, { action: 'decline', reason: 'No' }), first);
+  assert.equal(declined.kind, 'applied');
+  assert.equal(declined.reviewState, 'declined');
+  const third = `application:qa:third-${randomUUID()}`;
+  await first`INSERT INTO fame_application_events (location_id, event_id, market_id, application_id, payload_hash, snapshot, created_at)
+    SELECT location_id, ${third}, market_id, application_id, ${`hash:${third}`}, snapshot, now() + interval '2 seconds'
+    FROM fame_application_events WHERE application_id = ${applicationId} AND event_id = ${eventId}`;
+  assert.equal((await getApplicationReviewDetail(applicationId, marketId, first)).resubmittedSinceReview, true);
+  const reconsidered = await recordApplicationReview(decision({ ...application, eventId: third }), first);
+  assert.deepEqual([reconsidered.kind, reconsidered.reviewState], ['applied', 'approved']);
+  // Withdrawn is final until the vendor applies again (the handoff resets it).
+  await first`UPDATE fame_applications SET review_state = 'withdrawn' WHERE id = ${applicationId}`;
+  assert.deepEqual(await recordApplicationReview(decision({ ...application, eventId: third }), first), { kind: 'terminal', reviewState: 'withdrawn' });
 });

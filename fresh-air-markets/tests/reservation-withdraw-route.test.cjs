@@ -20,6 +20,7 @@ function loadRoute(file, { session = 'fame-market', withdraw = {}, notifications
     if (id === '@/lib/reservation-withdraw-pg') return withdraw;
     if (id === '@/lib/notifications') return { notifyBookingWithdrawn: async () => 'sent', notifyApplicationWithdrawn: async () => 'sent', ...notifications };
     if (id === '@/lib/square') return { ...require('../.test-build/square.js'), ...square };
+    if (id === '@/lib/square-link-cancel') return { squareLinkCanceller: () => square.cancelLink };
     if (id.startsWith('@/lib/')) return require('../.test-build/' + id.slice(6) + '.js');
     return require(id);
   };
@@ -40,8 +41,8 @@ test('booking withdraw needs a manager, same origin and a note; cancels the Squa
   const calls = [];
   const deletes = [];
   const route = loadRoute('reservations/[id]', {
-    withdraw: { withdrawReservation: async input => { calls.push(input); await input.deleteLink('PL1'); return { kind: 'withdrawn', reservationId, linksCancelled: 1 }; } },
-    square: { deleteSquarePaymentLink: async (config, id) => { deletes.push([config.environment, id]); return { kind: 'deleted', paymentLinkId: id, cancelledOrderId: 'O1' }; } },
+    withdraw: { withdrawReservation: async input => { calls.push(input); assert.equal(await input.cancelLink({ paymentLinkId: 'PL1', squareOrderId: 'O1' }), 'cancelled'); return { kind: 'withdrawn', reservationId, linksCancelled: 1 }; } },
+    square: { cancelLink: async link => { deletes.push([link.paymentLinkId, link.squareOrderId]); return 'cancelled'; } },
   });
   assert.equal((await loadRoute('reservations/[id]', { session: null }).POST(post(reservationUrl, { note: 'x' }), params(reservationId))).status, 401);
   assert.equal((await route.POST(post(reservationUrl, { note: 'x' }, { origin: 'https://evil.example' }), params(reservationId))).status, 403);
@@ -57,7 +58,7 @@ test('booking withdraw needs a manager, same origin and a note; cancels the Squa
   assert.equal(calls[0].marketId, 'fame-market');
   assert.equal(calls[0].reservationId, reservationId);
   assert.equal(calls[0].note, 'Vendor asked for spring only.');
-  assert.deepEqual(deletes, [['production', 'PL1']]);
+  assert.deepEqual(deletes, [['PL1', 'O1']]);
 }));
 
 test('booking withdraw maps every store outcome to a manager-readable answer', () => withEnv(env, async () => {
@@ -73,6 +74,12 @@ test('booking withdraw maps every store outcome to a manager-readable answer', (
   assert.equal(cancelled[0], 409); assert.match(cancelled[1], /already cancelled/);
   const closing = await run({ kind: 'link_closing' });
   assert.equal(closing[0], 409); assert.match(closing[1], /few minutes/);
+  const review = await run({ kind: 'not_withdrawable', state: 'manual_review' });
+  assert.equal(review[0], 409); assert.match(review[1], /manager's look/);
+  const inflight = await run({ kind: 'checkout_in_progress' });
+  assert.equal(inflight[0], 409); assert.match(inflight[1], /being created/);
+  const unproven = await run({ kind: 'cancellation_unproven', squareOrderId: 'O9' });
+  assert.equal(unproven[0], 409); assert.match(unproven[1], /order O9 in Square/);
   const square = await run({ kind: 'square_unavailable' });
   assert.equal(square[0], 503); assert.match(square[1], /Nothing was changed/);
   const broken = loadRoute('reservations/[id]', { withdraw: { withdrawReservation: async () => { throw new Error('db'); } } });
@@ -86,7 +93,7 @@ test('application withdraw releases every unpaid booking first and refuses while
   const withdrawn = [];
   let recorded = null;
   const route = loadRoute('applications/[id]', { withdraw: {
-    applicationBookingSummary: async () => ({ paidOrConfirmed: 0, unpaid: ['r1', 'r2'] }),
+    applicationBookingSummary: async () => ({ blocking: 0, unpaid: ['r1', 'r2'] }),
     withdrawReservation: async input => { withdrawn.push(input.reservationId); return { kind: 'withdrawn', reservationId: input.reservationId, linksCancelled: 0 }; },
     withdrawApplication: async input => { recorded = input; return { kind: 'withdrawn', applicationId, fromState: 'approved' }; },
   } });
@@ -101,22 +108,22 @@ test('application withdraw releases every unpaid booking first and refuses while
   assert.equal(recorded.note, 'Out for the season.');
 
   const paid = loadRoute('applications/[id]', { withdraw: {
-    applicationBookingSummary: async () => ({ paidOrConfirmed: 1, unpaid: [] }),
+    applicationBookingSummary: async () => ({ blocking: 1, unpaid: [] }),
     withdrawReservation: async () => { throw new Error('must not run'); },
     withdrawApplication: async () => { throw new Error('must not run'); },
   } });
   const blocked = await paid.POST(post(applicationUrl, { note: 'x' }), params(applicationId));
   assert.equal(blocked.status, 409);
-  assert.match((await blocked.json()).error, /paid booking/);
+  assert.match((await blocked.json()).error, /paid or waiting on a manager/);
 
   const already = loadRoute('applications/[id]', { withdraw: {
-    applicationBookingSummary: async () => ({ paidOrConfirmed: 0, unpaid: [] }),
+    applicationBookingSummary: async () => ({ blocking: 0, unpaid: [] }),
     withdrawApplication: async () => ({ kind: 'already_withdrawn' }),
   } });
   assert.equal((await already.POST(post(applicationUrl, { note: 'x' }), params(applicationId))).status, 409);
 
   const squareDown = loadRoute('applications/[id]', { withdraw: {
-    applicationBookingSummary: async () => ({ paidOrConfirmed: 0, unpaid: ['r1'] }),
+    applicationBookingSummary: async () => ({ blocking: 0, unpaid: ['r1'] }),
     withdrawReservation: async () => ({ kind: 'square_unavailable' }),
     withdrawApplication: async () => { throw new Error('must not run'); },
   } });

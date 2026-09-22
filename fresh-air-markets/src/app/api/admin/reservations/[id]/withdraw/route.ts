@@ -3,8 +3,9 @@ import { getSessionAccountId } from "@/lib/auth";
 import { readInquiryBody } from "@/lib/inquiry-body";
 import { notifyBookingWithdrawn } from "@/lib/notifications";
 import { withdrawReservation } from "@/lib/reservation-withdraw-pg";
+import { squareLinkCanceller } from "@/lib/square-link-cancel";
 import { validSquareReservationId } from "@/lib/square-payment";
-import { deleteSquarePaymentLink, squarePaymentRuntimeConfig, squarePortalOrigin } from "@/lib/square";
+import { squarePortalOrigin } from "@/lib/square";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -36,24 +37,22 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
 
   // Square is optional only when there is no live link to cancel; the
   // withdraw transaction refuses to proceed without it otherwise.
-  let deleteLink;
-  try {
-    const square = squarePaymentRuntimeConfig(process.env);
-    deleteLink = (paymentLinkId: string) => deleteSquarePaymentLink(square, paymentLinkId);
-  } catch {
-    deleteLink = undefined;
-  }
+  const cancelLink = squareLinkCanceller(process.env);
 
   let result;
-  try { result = await withdrawReservation({ marketId, reservationId: id, note, deleteLink }); }
+  try { result = await withdrawReservation({ marketId, reservationId: id, note, cancelLink }); }
   catch { return NextResponse.json({ error: "The booking could not be withdrawn right now." }, { status: 503, headers }); }
   if (result.kind === "not_found") return NextResponse.json({ error: "Reservation not found." }, { status: 404, headers });
   if (result.kind === "not_withdrawable") {
     return NextResponse.json({ error: result.state === "paid" || result.state === "confirmed"
       ? "This booking is paid. Refund it in Square first; the dates stay reserved until then."
-      : `This booking is already ${result.state.replace("_", " ")}.` }, { status: 409, headers });
+      : result.state === "manual_review"
+        ? "This booking needs a manager's look first (a payment may have arrived that could not be matched). Check it in Square, then reopen or refund it."
+        : `This booking is already ${result.state.replace("_", " ")}.` }, { status: 409, headers });
   }
-  if (result.kind === "link_closing") return NextResponse.json({ error: "The payment window on this booking is closing right now. Try again in a few minutes." }, { status: 409, headers });
+  if (result.kind === "link_closing") return NextResponse.json({ error: "The payment window on this booking is closing right now. Try again in a few minutes. If this keeps happening, the payment request needs a manager's look in Square." }, { status: 409, headers });
+  if (result.kind === "checkout_in_progress") return NextResponse.json({ error: "A payment request is being created for this booking right now. Try again in a minute." }, { status: 409, headers });
+  if (result.kind === "cancellation_unproven") return NextResponse.json({ error: `Square could not confirm that this payment link was cancelled; the vendor may already have paid. Check order ${result.squareOrderId} in Square before trying again. Nothing was changed.` }, { status: 409, headers });
   if (result.kind === "square_unavailable") return NextResponse.json({ error: "Square did not confirm that the payment link was cancelled. Nothing was changed; try again." }, { status: 503, headers });
   const vendorNotification = await notifyBookingWithdrawn({ reservationId: id, marketId, note });
   return NextResponse.json({ reservation: { id: result.reservationId, state: "cancelled" }, linksCancelled: result.linksCancelled, vendorNotification }, { status: 200, headers });

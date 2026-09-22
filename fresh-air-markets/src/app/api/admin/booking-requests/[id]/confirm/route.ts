@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
 import { getSessionAccountId } from "@/lib/auth";
 import { parseFinalReservationSelection } from "@/lib/final-reservation";
@@ -17,6 +17,17 @@ export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 const headers = { "Cache-Control": "no-store" };
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+/**
+ * One request maps to one booking attempt, so a retry after a crash or a
+ * double click replays the same reservation instead of writing a second one
+ * (which the writer would refuse as an overlap of the vendor's own booking).
+ */
+function requestIdempotencyKey(requestId: string): string {
+  const hex = createHash("sha256").update(`booking-request:${requestId}`).digest("hex");
+  const variant = ["8", "9", "a", "b"][parseInt(hex[16], 16) % 4];
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-${variant}${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
+}
 
 /**
  * One click for staff: turn a vendor's date request into a booking, create
@@ -58,14 +69,20 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   catch { return NextResponse.json({ error: "Booking requests are unavailable." }, { status: 503, headers }); }
   if (!overview) return NextResponse.json({ error: "Application not found." }, { status: 404, headers });
   const body = decoded.body;
+  // A Saturday can pass between the request and the confirmation.
+  const today = marketToday();
+  const passed = bookingRequest.dates.filter(date => date < today);
+  if (passed.length) return NextResponse.json({ error: `${passed.join(", ")} ${passed.length === 1 ? "has" : "have"} already happened. Decline this request and ask the vendor to pick upcoming Saturdays.` }, { status: 409, headers });
+  // Every Saturday of the season is the full-season rate, not 35 separate days.
+  const fullSeason = config.calendarDates.every(date => bookingRequest.dates.includes(date));
   const selection = parseFinalReservationSelection({
     applicantType: typeof body.applicantType === "string" ? body.applicantType : overview.profile.applicantType,
     vendorCategory: typeof body.vendorCategory === "string" ? body.vendorCategory : overview.profile.vendorCategory,
-    selectedDates: bookingRequest.dates,
-    fullSeason: false,
+    selectedDates: fullSeason ? [] : bookingRequest.dates,
+    fullSeason,
     boothsPerMarket: bookingRequest.booths,
     foodLicenseRequired: typeof body.foodLicenseRequired === "boolean" ? body.foodLicenseRequired : overview.profile.foodLicenseRequired,
-  }, typeof body.idempotencyKey === "string" ? body.idempotencyKey : randomUUID());
+  }, requestIdempotencyKey(id));
   if (!selection) return NextResponse.json({ error: "The request could not be turned into a valid booking. Reserve the dates with the form below instead." }, { status: 400, headers });
 
   // 1. Reserve.
@@ -78,12 +95,16 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   if (reserved.kind === "insurance_expires") return NextResponse.json({ error: `Their insurance certificate expires on ${reserved.expiresOn}; ${reserved.dates.join(", ")} cannot be booked until a renewed certificate is on file.` }, { status: 409, headers });
   if (reserved.kind === "unavailable") return NextResponse.json({ error: `No longer room on ${reserved.availability.filter(a => !a.available).map(a => a.date).join(", ")}. Decline this request and ask the vendor to pick other dates.` }, { status: 409, headers });
   if (reserved.kind === "invalid_selection" || reserved.kind === "conflict") return NextResponse.json({ error: "The request could not be turned into a valid booking. Reserve the dates with the form below instead." }, { status: 400, headers });
+  // "duplicate" is a retry of this same request: carry on with the booking it already made.
   const reservation = reserved.reservation;
   // The request became a booking; later steps only add the payment link.
   await settleBookingRequest({ marketId, requestId: id, status: "confirmed", reservationId: reservation.id, actorAccountId: marketId }).catch(() => null);
 
+  let paymentOrder: { id: string; checkoutUrl: string | null; paymentDueAt: string | null; status: string } | null = null;
   const partial = (step: string, error: string, status = 503) => NextResponse.json({
-    error: `${error} The booking itself was saved; continue from "${step}" below.`, reservation, step,
+    error: `${error} The booking itself was saved; continue from "${step}" below.`,
+    reservation: paymentOrder ? { ...reservation, state: "payment_pending" } : reservation,
+    paymentOrder, step,
   }, { status, headers });
 
   // A nonprofit booking has nothing to pay; it is confirmed as soon as it is saved.
@@ -103,6 +124,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   catch { return partial("Create payment request", "The Square payment request could not be created."); }
   if (checkout.kind !== "created" && checkout.kind !== "existing") return partial("Create payment request", "The Square payment request is still being prepared.");
   if (checkout.order.status !== "checkout_created") return partial("Create payment request", "The Square payment request needs attention.");
+  paymentOrder = { id: checkout.order.id, checkoutUrl: checkout.order.checkoutUrl, paymentDueAt: checkout.order.paymentDueAt, status: checkout.order.status };
 
   // 3. Private link + email.
   let access;
@@ -112,7 +134,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   const vendorNotification = await notifyPaymentRequest({ reservationId: reservation.id, marketId, invitationUrl: access.invitationUrl, expiresAt: access.expiresAt });
   return NextResponse.json({
     reservation: { ...reservation, state: "payment_pending" },
-    paymentOrder: { id: checkout.order.id, checkoutUrl: checkout.order.checkoutUrl, paymentDueAt: checkout.order.paymentDueAt, status: checkout.order.status },
+    paymentOrder,
     vendorNotification,
   }, { status: 201, headers });
 }

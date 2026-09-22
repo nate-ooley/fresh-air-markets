@@ -535,6 +535,8 @@ export type ReopenReservationResult =
   | { kind: "reopened"; reservation: { id: string; state: "held"; finalDates: string[]; finalBoothQuantity: number; totalCents: number } }
   | { kind: "not_found" }
   | { kind: "not_expired"; state: string }
+  | { kind: "overlap"; dates: string[] }
+  | { kind: "insurance_expires"; expiresOn: string; dates: string[] }
   | { kind: "unavailable"; unavailableDates: string[] };
 
 /**
@@ -550,8 +552,8 @@ export async function reopenExpiredReservation(
 ): Promise<ReopenReservationResult> {
   const now = input.now ?? new Date();
   return sql.begin(async tx => {
-    const [row] = await tx<{ id: string; state: string; revision: number; final_dates: unknown; final_booth_quantity: number; total_cents: string | number; applicant_type: string; vendor_category: string }[]>`
-      SELECT r.id, r.state, r.revision, r.final_dates, r.final_booth_quantity, r.total_cents, f.applicant_type, f.vendor_category
+    const [row] = await tx<{ id: string; application_id: string; state: string; revision: number; final_dates: unknown; final_booth_quantity: number; total_cents: string | number; applicant_type: string; vendor_category: string }[]>`
+      SELECT r.id, r.application_id, r.state, r.revision, r.final_dates, r.final_booth_quantity, r.total_cents, f.applicant_type, f.vendor_category
       FROM fame_reservations r
       JOIN fame_reservation_finalizations f ON f.reservation_id = r.id AND f.market_id = r.market_id
       WHERE r.id = ${input.reservationId} AND r.market_id = ${input.marketId}
@@ -566,6 +568,18 @@ export async function reopenExpiredReservation(
     if ((live?.n ?? 0) > 0) return { kind: "not_expired", state: row.state } as ReopenReservationResult;
     const dates = Array.isArray(row.final_dates) ? row.final_dates.filter((d): d is string => typeof d === "string").sort() : [];
     const booths = Number(row.final_booth_quantity);
+    // While this hold lapsed the vendor may have been booked again for some
+    // of its Saturdays; a reopened hold must not double-book them.
+    const siblings = await existingFinalizationsForApplication(tx, input.marketId, row.application_id);
+    const heldElsewhere = new Set(siblings
+      .filter(sibling => sibling.reservation_id !== row.id && (LIVE_RESERVATION_STATES as readonly string[]).includes(sibling.state))
+      .flatMap(sibling => asFinalDates(sibling.final_dates) ?? []));
+    const overlap = dates.filter(date => heldElsewhere.has(date));
+    if (overlap.length) return { kind: "overlap", dates: overlap } as ReopenReservationResult;
+    // The certificate on file must still cover every Saturday.
+    const expiresOn = await currentInsuranceExpiry(tx, input.marketId, row.application_id);
+    const uncovered = datesAfterInsuranceExpiry(dates, expiresOn);
+    if (uncovered.length) return { kind: "insurance_expires", expiresOn: expiresOn as string, dates: uncovered } as ReopenReservationResult;
     // Count everyone else: an expired row is already excluded, a manual-review row is not.
     const occupancy = [];
     for (const date of dates) occupancy.push(await occupancyForDate(tx, input.marketId, date, row.id));

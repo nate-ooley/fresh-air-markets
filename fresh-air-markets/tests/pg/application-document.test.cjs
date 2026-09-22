@@ -233,9 +233,11 @@ test('review cannot bypass scanning; exact scanner/reviewer retries enqueue only
   assert.equal(scanReplay.kind, 'duplicate');
   const review = await recordApplicationDocumentReview({
     documentId, marketId, actorAccountId, expectedVersion: 1,
-    idempotencyKey: '22222222-2222-4222-8222-222222222222', action: 'approve', reason: '',
+    idempotencyKey: '22222222-2222-4222-8222-222222222222', action: 'approve', reason: '', expiresOn: '2027-03-31',
   }, first);
   assert.equal(review.kind, 'applied');
+  // An insurance approval records the certificate's expiry for the booking rules.
+  assert.equal((await first`SELECT expires_on::text AS expires_on FROM fame_application_documents WHERE id = ${documentId}`)[0].expires_on, '2027-03-31');
   const replay = await recordApplicationDocumentReview({
     documentId, marketId, actorAccountId, expectedVersion: 1,
     idempotencyKey: '22222222-2222-4222-8222-222222222222', action: 'approve', reason: '',

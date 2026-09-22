@@ -35,6 +35,7 @@ const STATE_LABEL: Record<FinalReservationView["state"], string> = {
   declined: "Declined",
   manual_review: "Manager attention required",
 };
+const LAST_MARKET_DATE = FRESH_AIR_SEASON_DATES[FRESH_AIR_SEASON_DATES.length - 1];
 /** Bookings that still occupy their dates. */
 const LIVE_STATES = new Set<FinalReservationView["state"]>(["held", "payment_pending", "paid", "confirmed", "manual_review"]);
 /** Bookings a manager may withdraw (nothing paid yet). */
@@ -117,7 +118,7 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [unavailable, setUnavailable] = useState<Array<{ date: string; reasons: string[] }>>([]);
-  const [replaceLinkConfirmed, setReplaceLinkConfirmed] = useState(false);
+  const [replaceLinkConfirmed, setReplaceLinkConfirmed] = useState<string | null>(null);
   const [copyNotice, setCopyNotice] = useState("");
   const [addingDates, setAddingDates] = useState(false);
   const [withdrawNote, setWithdrawNote] = useState("");
@@ -139,7 +140,7 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
     setUnavailable([]);
     setInvitations({});
     setCopyNotice("");
-    setReplaceLinkConfirmed(false);
+    setReplaceLinkConfirmed(null);
     setAddingDates(false);
     setWithdrawTarget(null);
     try {
@@ -155,7 +156,17 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
       setReservations(list);
       setPaymentOrders({});
       const expiry = reservationRecord(payload)?.insuranceExpiresOn;
-      setInsuranceExpiresOn(typeof expiry === "string" ? expiry : null);
+      const expiresOn = typeof expiry === "string" ? expiry : null;
+      setInsuranceExpiresOn(expiresOn);
+      // The form was seeded from the vendor's request before the expiry was
+      // known; drop what the certificate does not cover so nothing is stuck checked.
+      if (expiresOn) {
+        setForm(current => ({
+          ...current,
+          selectedDates: current.selectedDates.filter(date => date <= expiresOn),
+          fullSeason: current.fullSeason && expiresOn >= LAST_MARKET_DATE,
+        }));
+      }
       try {
         const pending = await fetch(`/api/admin/applications/${encodeURIComponent(applicationId)}/booking-request`, { headers: { Accept: "application/json" }, cache: "no-store", signal });
         const body = reservationRecord(await jsonBody(pending));
@@ -191,6 +202,7 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
   const liveReservations = reservations.filter(item => LIVE_STATES.has(item.state));
   const heldDates = new Set(liveReservations.flatMap(item => item.finalDates));
   const uninsured = (date: string) => Boolean(insuranceExpiresOn && date > insuranceExpiresOn);
+  const fullSeasonCovered = !insuranceExpiresOn || insuranceExpiresOn >= LAST_MARKET_DATE;
   const showForm = addingDates || liveReservations.length === 0;
 
   async function reserve(event: FormEvent<HTMLFormElement>) {
@@ -306,7 +318,7 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
   }
 
   async function createAccess(reservation: FinalReservationView) {
-    if (inFlight.current || statusRead.current.pending || loadError || !canCreateAccess(reservation) || !replaceLinkConfirmed) return;
+    if (inFlight.current || statusRead.current.pending || loadError || !canCreateAccess(reservation) || replaceLinkConfirmed !== reservation.id) return;
     inFlight.current = true;
     setBusy("access");
     setError("");
@@ -336,7 +348,7 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
     } finally {
       inFlight.current = false;
       setBusy(null);
-      setReplaceLinkConfirmed(false);
+      setReplaceLinkConfirmed(null);
     }
   }
 
@@ -476,7 +488,7 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
           <h3 className="font-semibold text-pine-deep">The vendor asked for more dates</h3>
           <p className="mt-2 text-sm text-pine-deep">{bookingRequest.booths} booth{bookingRequest.booths === 1 ? "" : "s"} on {bookingRequest.dates.map(reservationDateLabel).join(" · ")}{bookingRequest.createdAt ? ` (asked ${deadlineLabel(bookingRequest.createdAt)})` : ""}</p>
           {bookingRequest.vendorNote && <p className="mt-2 text-sm text-ink/70">Their note: {bookingRequest.vendorNote}</p>}
-          <p className="mt-3 text-sm leading-relaxed text-ink/65">Confirm books these dates using the type, category and booth count from their last booking, creates the Square payment request and emails them the link, all in one go.</p>
+          <p className="mt-3 text-sm leading-relaxed text-ink/65">Confirm books exactly these dates and booths (type, category and food-license decision carry over from their last booking, or from their application if this is their first), creates the Square payment request and emails them the link, all in one go.</p>
           {!declining && <div className="mt-4 flex flex-wrap gap-3">
             <button type="button" disabled={disabled} onClick={() => void confirmRequest(bookingRequest)} className={BUTTON}>{busy === "reserve" ? "Confirming…" : "Confirm and send payment link"}</button>
             <button type="button" disabled={disabled} onClick={() => { setDeclining(true); setDeclineNote(""); }} className={QUIET_BUTTON}>Decline</button>
@@ -540,10 +552,10 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
                     <h4 className="font-semibold text-pine-deep">Email the payment link</h4>
                     <p className="mt-2 text-sm leading-relaxed text-ink/65">Emails the vendor their private reservation page with the total, their dates and the 48-hour deadline. The link is only for this vendor; anyone who has it can open this reservation. Sending again issues a fresh link and revokes the old one.</p>
                     <label className="mt-4 flex items-start gap-3 text-sm text-ink/75">
-                      <input type="checkbox" checked={replaceLinkConfirmed} disabled={disabled} onChange={event => setReplaceLinkConfirmed(event.target.checked)} className="mt-0.5" />
+                      <input type="checkbox" checked={replaceLinkConfirmed === reservation.id} disabled={disabled} onChange={event => setReplaceLinkConfirmed(event.target.checked ? reservation.id : null)} className="mt-0.5" />
                       I understand that sending a link replaces any earlier link and signs the vendor out of existing sessions.
                     </label>
-                    <button type="button" disabled={disabled || !replaceLinkConfirmed} onClick={() => void createAccess(reservation)} className={`${BUTTON} mt-4`}>{busy === "access" ? "Sending…" : invitation ? "Send a new payment link" : "Email payment link to vendor"}</button>
+                    <button type="button" disabled={disabled || replaceLinkConfirmed !== reservation.id} onClick={() => void createAccess(reservation)} className={`${BUTTON} mt-4`}>{busy === "access" ? "Sending…" : invitation ? "Send a new payment link" : "Email payment link to vendor"}</button>
                     {invitation && <div className="mt-4 rounded-xl bg-parchment/70 p-4">
                       <label className="block text-sm font-semibold text-pine-deep">Private link (in case you need to send it another way)
                         <input type="text" readOnly value={invitation.invitationUrl} onFocus={event => event.target.select()} autoComplete="off" spellCheck={false} className={`${FIELD} font-mono text-xs`} />
@@ -620,8 +632,8 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
               <legend className="text-sm font-semibold text-pine-deep">Final market dates</legend>
               <p className="mt-1 text-xs leading-relaxed text-ink/60">35 Saturdays, October 3, 2026 through May 29, 2027. Requested dates are suggestions; confirm the final selection with the vendor.{reservations.length ? " This booking is priced on its own dates: $40 per Saturday, $35 when it covers 4 or more Saturdays in a row." : ""}</p>
               {hasUnmappedRequestedDates && <p className="mt-3 rounded-xl bg-amber/15 p-3 text-sm text-clay">Some requested values do not match the confirmed calendar. Review the original request above and choose the final dates here.</p>}
-              {insuranceExpiresOn && <p className="mt-3 rounded-xl bg-amber/15 p-3 text-sm text-clay">Their certificate of insurance expires {reservationDateLabel(insuranceExpiresOn)}. Saturdays after that are greyed out until a renewed certificate is approved.</p>}
-              {heldDates.size === 0 && !insuranceExpiresOn && <label className="mt-3 flex items-start gap-3 rounded-xl border border-pine/20 bg-parchment/40 p-4 text-sm font-semibold text-pine-deep">
+              {insuranceExpiresOn && !fullSeasonCovered && <p className="mt-3 rounded-xl bg-amber/15 p-3 text-sm text-clay">Their certificate of insurance expires {reservationDateLabel(insuranceExpiresOn)}. Saturdays after that are greyed out until a renewed certificate is approved.</p>}
+              {heldDates.size === 0 && fullSeasonCovered && <label className="mt-3 flex items-start gap-3 rounded-xl border border-pine/20 bg-parchment/40 p-4 text-sm font-semibold text-pine-deep">
                 <input type="checkbox" checked={form.fullSeason} onChange={event => edit({ fullSeason: event.target.checked, selectedDates: [] })} className="mt-0.5" />
                 Full season — all 35 dates through Saturday, May 29, 2027
               </label>}

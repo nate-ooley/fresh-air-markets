@@ -4,7 +4,8 @@ import { getSessionAccountId } from "@/lib/auth";
 import { readInquiryBody } from "@/lib/inquiry-body";
 import { notifyApplicationWithdrawn } from "@/lib/notifications";
 import { applicationBookingSummary, withdrawApplication, withdrawReservation } from "@/lib/reservation-withdraw-pg";
-import { deleteSquarePaymentLink, squarePaymentRuntimeConfig, squarePortalOrigin } from "@/lib/square";
+import { squareLinkCanceller } from "@/lib/square-link-cancel";
+import { squarePortalOrigin } from "@/lib/square";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -34,25 +35,20 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   const note = typeof decoded.body.note === "string" ? decoded.body.note.trim() : "";
   if (!note || note.length > 500) return NextResponse.json({ error: "Add a short note saying why the application is being withdrawn (up to 500 characters)." }, { status: 400, headers });
 
-  let deleteLink;
-  try {
-    const square = squarePaymentRuntimeConfig(process.env);
-    deleteLink = (paymentLinkId: string) => deleteSquarePaymentLink(square, paymentLinkId);
-  } catch {
-    deleteLink = undefined;
-  }
+  const cancelLink = squareLinkCanceller(process.env);
+  const BLOCKED = "This vendor has a booking that is paid or waiting on a manager's look in Square. Settle that booking first; until then the application stays active.";
 
   try {
     const bookings = await applicationBookingSummary(marketId, id);
-    if (bookings.paidOrConfirmed > 0) {
-      return NextResponse.json({ error: "This vendor has a paid booking. Refund it in Square first; until then the application stays active." }, { status: 409, headers });
-    }
+    if (bookings.blocking > 0) return NextResponse.json({ error: BLOCKED }, { status: 409, headers });
     for (const reservationId of bookings.unpaid) {
-      const result = await withdrawReservation({ marketId, reservationId, note, deleteLink });
+      const result = await withdrawReservation({ marketId, reservationId, note, cancelLink });
       if (result.kind === "link_closing") return NextResponse.json({ error: "A payment window on this vendor's booking is closing right now. Try again in a few minutes." }, { status: 409, headers });
+      if (result.kind === "checkout_in_progress") return NextResponse.json({ error: "A payment request is being created for this vendor right now. Try again in a minute." }, { status: 409, headers });
+      if (result.kind === "cancellation_unproven") return NextResponse.json({ error: `Square could not confirm that a payment link was cancelled; the vendor may already have paid. Check order ${result.squareOrderId} in Square before trying again. Nothing was changed.` }, { status: 409, headers });
       if (result.kind === "square_unavailable") return NextResponse.json({ error: "Square did not confirm that the payment link was cancelled. Nothing was changed; try again." }, { status: 503, headers });
-      if (result.kind === "not_withdrawable" && (result.state === "paid" || result.state === "confirmed")) {
-        return NextResponse.json({ error: "This vendor has a paid booking. Refund it in Square first; until then the application stays active." }, { status: 409, headers });
+      if (result.kind === "not_withdrawable" && result.state !== "cancelled" && result.state !== "declined" && result.state !== "expired") {
+        return NextResponse.json({ error: BLOCKED }, { status: 409, headers });
       }
     }
     const result = await withdrawApplication({ marketId, applicationId: id, actorAccountId: marketId, note });

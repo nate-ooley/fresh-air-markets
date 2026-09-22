@@ -86,9 +86,11 @@ Wording lives in `src/lib/email-templates.ts`; triggers in `src/lib/notification
 > We received your payment of {amount}. Your booth is confirmed.
 >
 > You'll receive your booth assignment, market map, and Vendor Pass before your first market day, plus a reminder with setup instructions a few days ahead. Setup begins at 6:30 AM; booths must be ready by 8:00 AM.
+>
+> Want more Saturdays this season? Pick them here and we'll send a payment link; your insurance and agreement stay on file: {book more dates link}
 
 ### 7. Booking withdrawn
-**Trigger:** staff press "Withdraw this booking" on an unpaid booking (held, awaiting payment, expired or needing attention). The Square link is cancelled and the dates released first.
+**Trigger:** staff press "Withdraw this booking" on an unpaid booking (held, awaiting payment or expired; a booking waiting on manager review must be settled first). Square must confirm the payment link is cancelled before the dates are released.
 **Subject:** Booking withdrawn: North Port Farmer's Market
 
 > Hi {first name},
@@ -97,7 +99,7 @@ Wording lives in `src/lib/email-templates.ts`; triggers in `src/lib/notification
 >
 > {staff note}
 >
-> Your application stays on file for the season. If you'd like to book different dates, just reply to this email or call us and we'll send a new payment link.
+> Your application stays on file for the season. To book different dates, choose them here and we'll send a new payment link: {book more dates link}
 
 ### 8. Application withdrawn
 **Trigger:** staff press "Withdraw this application" on the application page. Every unpaid booking is withdrawn first; a paid booking blocks it until refunded in Square.
@@ -110,6 +112,29 @@ Wording lives in `src/lib/email-templates.ts`; triggers in `src/lib/notification
 > {staff note}
 >
 > If this was a mistake or you change your mind, reply to this email or call us and we'll get you back in.
+
+### 9. Date request received
+**Trigger:** the vendor sends a "book more dates" request from their personal link (`/vendor/book`, in the payment-received and booking-withdrawn emails; link works 120 days). Staff get "Date request: {business}" at the same time.
+**Subject:** We got your date request: North Port Farmer's Market
+
+> Hi {first name},
+>
+> Thanks! You asked for {n} booth(s) on {dates}.
+>
+> Market staff will confirm the dates and email you a secure Square payment link, usually within a day or two. Once confirmed, your dates are held for 48 hours and released if the link isn't used in time.
+
+Confirming the request sends the normal **Payment request** email (5). Declining sends:
+
+### 10. Date request declined
+**Subject:** About your date request: North Port Farmer's Market
+
+> Hi {first name},
+>
+> We couldn't confirm your request for {dates}.
+>
+> {staff note}
+>
+> Want more Saturdays this season? Pick them here and we'll send a payment link; your insurance and agreement stay on file: {book more dates link}
 
 ### 0. Finish your application (invitation)
 **Trigger:** the owner sends a pre-filled application link (used for vendors who applied through the old HighLevel forms).
@@ -134,6 +159,7 @@ Wording lives in `src/lib/email-templates.ts`; triggers in `src/lib/notification
 | Website message | visitor uses the contact form | Website message from {name} ({topic}) |
 | Password reset | staff use "Forgot your password?" | Reset your Fresh Air Markets & Events staff password |
 | Staff invitation (to the invitee) | owner invites a manager on `/staff` | You're invited to manage {market} on Fresh Air Markets |
+| Date request | vendor sends a "book more dates" request | Date request: {business} ({n} Saturdays) |
 
 ## Not sent (yet)
 

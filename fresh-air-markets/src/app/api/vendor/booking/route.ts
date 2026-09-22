@@ -29,22 +29,10 @@ function configOrNull() {
   } catch { return null; }
 }
 
-export async function GET(request: NextRequest) {
-  const config = configOrNull();
-  if (!config) return NextResponse.json({ error: "Booking is not available right now." }, { status: 503, headers });
-  const grant = grantFor(request.nextUrl.searchParams.get("token"), config.marketId);
-  if (!grant) return NextResponse.json({ error: EXPIRED }, { status: 401, headers });
-  try {
-    const overview = await vendorBookingOverview({ marketId: config.marketId, applicationId: grant.applicationId, config, today: marketToday() });
-    if (!overview) return NextResponse.json({ error: EXPIRED }, { status: 401, headers });
-    // The vendor sees their own name, bookings and calendar; never internal IDs beyond the request.
-    const { applicationId: _omit, email: _email, ...visible } = overview;
-    return NextResponse.json(visible, { headers });
-  } catch {
-    return NextResponse.json({ error: "Booking is not available right now. Try again in a few minutes." }, { status: 503, headers });
-  }
-}
-
+/**
+ * Both reads and requests are POSTs with the token in the body: a 120-day
+ * bearer token must never sit in a query string where request logs keep it.
+ */
 export async function POST(request: NextRequest) {
   const config = configOrNull();
   if (!config) return NextResponse.json({ error: "Booking is not available right now." }, { status: 503, headers });
@@ -57,6 +45,17 @@ export async function POST(request: NextRequest) {
   if (!body) return NextResponse.json({ error: "A JSON object body is required." }, { status: 400, headers });
   const grant = grantFor(body.token, config.marketId);
   if (!grant) return NextResponse.json({ error: EXPIRED }, { status: 401, headers });
+  if (body.view === true) {
+    try {
+      const overview = await vendorBookingOverview({ marketId: config.marketId, applicationId: grant.applicationId, config, today: marketToday() });
+      if (!overview) return NextResponse.json({ error: EXPIRED }, { status: 401, headers });
+      // The vendor sees their own name, bookings and calendar; never internal IDs beyond the request.
+      const { applicationId: _omit, email: _email, ...visible } = overview;
+      return NextResponse.json(visible, { headers });
+    } catch {
+      return NextResponse.json({ error: "Booking is not available right now. Try again in a few minutes." }, { status: 503, headers });
+    }
+  }
   let result;
   try {
     result = await createBookingRequest({ marketId: config.marketId, applicationId: grant.applicationId, dates: body.dates, booths: body.booths, note: body.note, config, today: marketToday() });

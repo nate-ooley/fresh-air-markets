@@ -50,7 +50,7 @@ export default function VendorBookingPage() {
     let cancelled = false;
     (async () => {
       try {
-        const response = await fetch(`/api/vendor/booking?token=${encodeURIComponent(token)}`, { headers: { Accept: "application/json" }, cache: "no-store" });
+        const response = await fetch("/api/vendor/booking", { method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json" }, body: JSON.stringify({ token, view: true }), cache: "no-store" });
         const payload = await response.json().catch(() => null);
         if (cancelled) return;
         if (!response.ok || !isOverview(payload)) { setLoadError((payload as { error?: string } | null)?.error ?? "Your booking page could not be loaded. Try the link again in a few minutes."); return; }
@@ -105,7 +105,7 @@ export default function VendorBookingPage() {
       {pending && (
         <section role="status" className="rounded-2xl bg-pine/10 p-5 text-sm text-pine">
           <h2 className="font-semibold text-pine-deep">{done ? "Request sent" : "Request waiting for market staff"}</h2>
-          <p className="mt-2">You asked for {pending.booths} booth{pending.booths === 1 ? "" : "s"} on {pending.dates.map(reservationDateLabel).join(", ")}. Staff will confirm and email your payment link, usually within a day or two. Nothing is reserved until you pay.</p>
+          <p className="mt-2">You asked for {pending.booths} booth{pending.booths === 1 ? "" : "s"} on {pending.dates.map(reservationDateLabel).join(", ")}. Staff will confirm and email your payment link, usually within a day or two. Once confirmed, your dates are held for 48 hours; they&rsquo;re released if the payment link isn&rsquo;t used in time.</p>
         </section>
       )}
 

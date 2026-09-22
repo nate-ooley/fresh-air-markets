@@ -35,6 +35,8 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   catch { return NextResponse.json({ error: "The reservation could not be reopened right now." }, { status: 503, headers }); }
   if (result.kind === "not_found") return NextResponse.json({ error: "Reservation not found." }, { status: 404, headers });
   if (result.kind === "not_expired") return NextResponse.json({ error: `Only expired holds (or holds waiting on manager review with no live payment attempt) can be reopened. This reservation is ${result.state.replace("_", " ")}.` }, { status: 409, headers });
+  if (result.kind === "overlap") return NextResponse.json({ error: `The vendor already holds ${result.dates.join(", ")} in another booking, so this hold cannot be reopened. Withdraw it and add any missing dates to the newer booking instead.`, overlapDates: result.dates }, { status: 409, headers });
+  if (result.kind === "insurance_expires") return NextResponse.json({ error: `Their insurance certificate expires on ${result.expiresOn}; ${result.dates.join(", ")} cannot be booked until a renewed certificate is approved. Withdraw this hold and book the covered dates instead.`, insuranceExpiresOn: result.expiresOn, uncoveredDates: result.dates }, { status: 409, headers });
   if (result.kind === "unavailable") return NextResponse.json({ error: `These dates no longer have room: ${result.unavailableDates.join(", ")}. Create a new reservation with different dates instead.`, unavailableDates: result.unavailableDates }, { status: 409, headers });
   return NextResponse.json({ reservation: result.reservation }, { status: 200, headers });
 }
