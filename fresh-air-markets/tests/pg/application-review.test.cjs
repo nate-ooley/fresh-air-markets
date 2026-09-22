@@ -256,6 +256,7 @@ test('manager detail and list use only the latest same-market, same-location sou
     hasOpportunity: true,
     submittedAt: undefined,
     updatedSinceReview: false,
+    resubmittedSinceReview: false,
     identitySnapshot: {
       vendorName: 'Current vendor', businessName: 'Current business', email: 'current@example.com', phone: '',
       applicantType: 'Vendor', dates: ['2027-05-29'], fullSeason: false, requiresFinalDateConfirmation: false, boothsRequested: 1,
@@ -458,4 +459,33 @@ test('a document uploaded after a change request counts as the vendor\'s answer:
   assert.equal((await getApplicationReviewDetail(applicationId, marketId, first)).updatedSinceReview, true);
   assert.equal((await listApplicationReviewDetails(marketId, 50, first)).find(a => a.id === applicationId).updatedSinceReview, true);
   assert.equal((await recordApplicationReview(decision({ ...application, eventId }), first)).kind, 'applied');
+});
+
+test('a newer submission after approval or decline reopens the decision; the old decision stays final for its own submission', async () => {
+  const application = await seedApplication({ contactId: 'contact-reapprove', opportunityId: 'opportunity-reapprove' });
+  const { applicationId, marketId, eventId } = application;
+  assert.equal((await recordApplicationReview(decision(application), first)).kind, 'applied');
+  // Same submission: approved is final.
+  assert.equal((await recordApplicationReview(decision(application, { action: 'decline', reason: 'Too late' }), first)).kind, 'terminal');
+  const settled = await getApplicationReviewDetail(applicationId, marketId, first);
+  assert.deepEqual([settled.reviewState, settled.resubmittedSinceReview], ['approved', false]);
+  // The vendor submits the form again (new dates, say).
+  const newer = `application:qa:reapply-${randomUUID()}`;
+  await first`INSERT INTO fame_application_events (location_id, event_id, market_id, application_id, payload_hash, snapshot, created_at)
+    SELECT location_id, ${newer}, market_id, application_id, ${`hash:${newer}`}, snapshot, now() + interval '1 second'
+    FROM fame_application_events WHERE application_id = ${applicationId} AND event_id = ${eventId}`;
+  const reopened = await getApplicationReviewDetail(applicationId, marketId, first);
+  assert.deepEqual([reopened.reviewState, reopened.sourceEventId, reopened.resubmittedSinceReview, reopened.updatedSinceReview], ['approved', newer, true, true]);
+  assert.equal((await listApplicationReviewDetails(marketId, 50, first)).find(a => a.id === applicationId).resubmittedSinceReview, true);
+  // A decision aimed at the old submission is stale; one on the new submission is accepted.
+  assert.equal((await recordApplicationReview(decision(application), first)).kind, 'stale_source');
+  const again = await recordApplicationReview(decision({ ...application, eventId: newer }), first);
+  assert.equal(again.kind, 'applied');
+  assert.equal(again.reviewState, 'approved');
+  const after = await getApplicationReviewDetail(applicationId, marketId, first);
+  assert.deepEqual([after.reviewState, after.reviewRevision, after.resubmittedSinceReview], ['approved', 2, false]);
+  const events = await first`SELECT from_state, to_state, source_event_id FROM fame_application_review_events WHERE application_id = ${applicationId} ORDER BY created_at, id`;
+  assert.deepEqual(events.map(e => [e.from_state, e.to_state, e.source_event_id]), [['unreviewed', 'approved', eventId], ['approved', 'approved', newer]]);
+  // Now approved for the current submission again: a further decision is final.
+  assert.equal((await recordApplicationReview(decision({ ...application, eventId: newer }, { action: 'decline', reason: 'No' }), first)).kind, 'terminal');
 });

@@ -27,6 +27,7 @@ interface ApplicationReviewDetail {
   sourceEventId: string | null;
   submittedAt?: string | null;
   updatedSinceReview?: boolean;
+  resubmittedSinceReview?: boolean;
   reviewState: ReviewState;
   reviewRevision: number;
   hasOpportunity: boolean;
@@ -340,7 +341,9 @@ export default function ApplicationReviewPanel({ applicationId }: { applicationI
     }
   };
 
-  const terminal = application?.reviewState === "approved" || application?.reviewState === "declined" || application?.reviewState === "withdrawn";
+  // Approved/declined are final for the submission they judged; a newer submission gets a fresh decision.
+  const resubmittedAfterDecision = Boolean(application && (application.reviewState === "approved" || application.reviewState === "declined") && application.resubmittedSinceReview);
+  const terminal = application?.reviewState === "withdrawn" || ((application?.reviewState === "approved" || application?.reviewState === "declined") && !resubmittedAfterDecision);
   const canWithdraw = Boolean(application && application.reviewState !== "declined" && application.reviewState !== "withdrawn");
   const waitingOnVendor = application?.reviewState === "changes_requested" && !application.updatedSinceReview;
   const canReview = Boolean(application?.sourceEventId && application.hasOpportunity && application.identitySnapshot && !terminal && !awaitingResubmission && !waitingOnVendor);
@@ -482,6 +485,11 @@ export default function ApplicationReviewPanel({ applicationId }: { applicationI
               {terminal && (
                 <p role="status" className="mt-5 rounded-2xl bg-pine/10 p-4 text-sm text-pine">
                   This application is already {STATE_LABEL[application.reviewState].toLowerCase()}. Terminal decisions cannot be changed here.
+                </p>
+              )}
+              {resubmittedAfterDecision && (
+                <p role="status" className="mt-5 rounded-2xl bg-amber/15 p-4 text-sm text-clay">
+                  The vendor sent in a new application after it was {STATE_LABEL[application.reviewState].toLowerCase()}. Check the details above (dates, booths, category may have changed) and save a decision on this new submission. {application.reviewState === "approved" ? "Until you approve it again, new dates cannot be reserved for them." : ""}
                 </p>
               )}
               {application.reviewState === "changes_requested" && application.updatedSinceReview && (

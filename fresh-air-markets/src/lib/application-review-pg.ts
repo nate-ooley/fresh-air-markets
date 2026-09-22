@@ -34,6 +34,8 @@ export interface ApplicationReviewDetail {
   submittedAt: string | null;
   /** True when the vendor re-submitted after the last decision, so a new decision is possible. */
   updatedSinceReview: boolean;
+  /** True when a newer form submission exists than the one the last decision covered (documents alone do not count). */
+  resubmittedSinceReview: boolean;
   /**
    * A deliberately small projection of the snapshot on the exact current
    * source event. Internal CRM identifiers, tokens, unknown form answers and
@@ -329,6 +331,7 @@ export async function getApplicationReviewDetail(
     hasOpportunity: Boolean(application.opportunity_id),
     submittedAt: iso(latest?.created_at),
     updatedSinceReview: updatedSinceReview(sourceEventId, lastReview?.source_event_id ?? null) || (documentAfterReview?.n ?? 0) > 0,
+    resubmittedSinceReview: updatedSinceReview(sourceEventId, lastReview?.source_event_id ?? null),
     identitySnapshot: sourceEventId ? reviewIdentitySnapshot(latest?.snapshot) : null,
   };
 }
@@ -384,6 +387,7 @@ export async function listApplicationReviewDetails(
       hasOpportunity: Boolean(row.opportunity_id),
       submittedAt: iso(row.submitted_at),
       updatedSinceReview: updatedSinceReview(sourceEventId, row.reviewed_source_event_id) || Number(row.documents_after_review ?? 0) > 0,
+      resubmittedSinceReview: updatedSinceReview(sourceEventId, row.reviewed_source_event_id),
       identitySnapshot: sourceEventId ? reviewIdentitySnapshot(row.snapshot) : null,
     };
   });
@@ -467,16 +471,20 @@ export async function recordApplicationReview(
     if (!application.opportunity_id) return { kind: "missing_opportunity" };
 
     const currentState = applicationState(application.review_state);
-    if (currentState === "approved" || currentState === "declined" || currentState === "withdrawn") {
+    const [lastReview] = await tx<(ReviewEventRow & { created_at: Date })[]>`
+      SELECT id, payload_hash, outbox_id, source_event_id, created_at
+      FROM fame_application_review_events
+      WHERE application_id = ${application.id}
+      ORDER BY created_at DESC, id DESC
+      LIMIT 1`;
+    // Approved and declined are final for the submission they judged. A vendor
+    // who submits the form again after that gets a fresh decision on the new
+    // content; reserving dates needs an approval that covers the current one.
+    const resubmitted = Boolean(lastReview) && lastReview!.source_event_id !== input.sourceEventId;
+    if (currentState === "withdrawn" || ((currentState === "approved" || currentState === "declined") && !resubmitted)) {
       return { kind: "terminal", reviewState: currentState };
     }
     if (currentState === "changes_requested") {
-      const [lastReview] = await tx<(ReviewEventRow & { created_at: Date })[]>`
-        SELECT id, payload_hash, outbox_id, source_event_id, created_at
-        FROM fame_application_review_events
-        WHERE application_id = ${application.id}
-        ORDER BY created_at DESC, id DESC
-        LIMIT 1`;
       if (lastReview?.source_event_id === input.sourceEventId) {
         // The vendor may answer a change request by uploading a document
         // instead of re-submitting the form; that counts as their reply.
