@@ -91,7 +91,13 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     if (result.kind === "duplicate") return reservationResponse(200, result.reservation, true);
     if (result.kind === "not_found") return NextResponse.json({ error: "Application not found." }, { status: 404 });
     if (result.kind === "conflict") {
-      return NextResponse.json({ error: "This application already has a different final reservation." }, { status: 409 });
+      return NextResponse.json({ error: "This request key was already used for a different booking. Reload and try again." }, { status: 409 });
+    }
+    if (result.kind === "overlap") {
+      return NextResponse.json({
+        error: `The vendor already holds ${result.dates.length === 1 ? "this date" : "these dates"}: ${result.dates.join(", ")}. Choose different dates, or withdraw the earlier booking first.`,
+        overlapDates: result.dates,
+      }, { status: 409 });
     }
     if (result.kind === "invalid_selection") {
       return NextResponse.json({ error: "The final reservation selection is not valid for this market." }, { status: 400 });

@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 
-type ReviewState = "unreviewed" | "needs_review" | "changes_requested" | "approved" | "declined";
+type ReviewState = "unreviewed" | "needs_review" | "changes_requested" | "approved" | "declined" | "withdrawn";
 
 interface ApplicationReviewIdentitySnapshot {
   vendorName: string;
@@ -36,6 +36,7 @@ const STATE_LABEL: Record<ReviewState, string> = {
   changes_requested: "Changes requested",
   approved: "Approved",
   declined: "Declined",
+  withdrawn: "Withdrawn",
 };
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -46,7 +47,7 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 
 function isState(value: unknown): value is ReviewState {
   return value === "unreviewed" || value === "needs_review" || value === "changes_requested"
-    || value === "approved" || value === "declined";
+    || value === "approved" || value === "declined" || value === "withdrawn";
 }
 
 function isSnapshot(value: unknown): value is ApplicationReviewIdentitySnapshot {

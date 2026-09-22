@@ -28,6 +28,9 @@ export interface FinalReservationView {
   finalDates: string[];
   finalBoothQuantity: number;
   quoteVersion: string;
+  createdAt?: string;
+  withdrawnAt?: string | null;
+  withdrawalNote?: string | null;
 }
 
 export interface ReservationPaymentView {

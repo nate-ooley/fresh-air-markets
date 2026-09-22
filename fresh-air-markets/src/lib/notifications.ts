@@ -2,7 +2,7 @@ import postgres from "postgres";
 import { applicantContact, emailConfigured, sendEmail, sendStaffEmail, type SendEmailResult } from "./email";
 import { EMAILED_UPLOAD_TTL_MS, createApplicationUploadToken } from "./application-upload-token";
 import {
-  applicationInvitationEmail, applicationApprovedEmail, documentUploadLinkEmail, applicationChangesRequestedEmail, applicationDeclinedEmail, applicationReceivedEmail,
+  applicationInvitationEmail, applicationApprovedEmail, applicationWithdrawnEmail, bookingWithdrawnEmail, documentUploadLinkEmail, applicationChangesRequestedEmail, applicationDeclinedEmail, applicationReceivedEmail,
   paymentReceivedEmail, paymentRequestEmail, passwordResetEmail, staffContactMessageEmail, staffInvitationEmail, staffNewApplicationEmail, staffPaymentReceivedEmail,
 } from "./email-templates";
 
@@ -172,5 +172,33 @@ export async function notifyDocumentUploadLink(input: { applicationId: string; m
     if (!link) return "failed";
     const content = documentUploadLinkEmail({ name: contact.name, businessName: contact.businessName, link });
     return outcome(await sendEmail({ kind: "document_upload_link", to: contact.email, marketId: input.marketId, referenceId: input.applicationId, ...content }, { sql: db }));
+  } catch { return "failed"; }
+}
+
+/** Manager withdrew one unpaid booking at the vendor's request. */
+export async function notifyBookingWithdrawn(input: { reservationId: string; marketId: string; note?: string }, sql?: Sql): Promise<NotificationOutcome> {
+  if (!emailConfigured()) return "not_sent";
+  try {
+    const db = sql ?? configuredClient();
+    const [reservation] = await db<{ application_id: string | null; final_dates: unknown }[]>`
+      SELECT application_id, final_dates FROM fame_reservations WHERE id = ${input.reservationId} AND market_id = ${input.marketId}`;
+    if (!reservation?.application_id) return "not_sent";
+    const contact = await applicantContact(reservation.application_id, input.marketId, db);
+    if (!contact) return "not_sent";
+    const dates = Array.isArray(reservation.final_dates) ? reservation.final_dates.filter((d): d is string => typeof d === "string").sort() : [];
+    const content = bookingWithdrawnEmail({ name: contact.name, dates, note: input.note });
+    return outcome(await sendEmail({ kind: "booking_withdrawn", to: contact.email, marketId: input.marketId, referenceId: input.reservationId, ...content }, { sql: db }));
+  } catch { return "failed"; }
+}
+
+/** Manager withdrew the whole application for the season. */
+export async function notifyApplicationWithdrawn(input: { applicationId: string; marketId: string; note?: string }, sql?: Sql): Promise<NotificationOutcome> {
+  if (!emailConfigured()) return "not_sent";
+  try {
+    const db = sql ?? configuredClient();
+    const contact = await applicantContact(input.applicationId, input.marketId, db);
+    if (!contact) return "not_sent";
+    const content = applicationWithdrawnEmail({ name: contact.name, businessName: contact.businessName, note: input.note });
+    return outcome(await sendEmail({ kind: "application_withdrawn", to: contact.email, marketId: input.marketId, referenceId: input.applicationId, ...content }, { sql: db }));
   } catch { return "failed"; }
 }

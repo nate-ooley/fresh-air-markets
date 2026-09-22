@@ -8,8 +8,12 @@ const { persistApplicationHandoff } = require('../../.test-build/application-han
 // These destructive fixtures are restricted to the disposable local CI database.
 const url = new URL(process.env.DATABASE_TEST_URL || 'postgres://invalid/');
 assert.ok(['localhost', '127.0.0.1'].includes(url.hostname) && url.pathname === '/fresh_air_test', 'Set DATABASE_TEST_URL to local fresh_air_test only');
-const first = postgres(url.toString(), { max: 10, prepare: false });
-const second = postgres(url.toString(), { max: 10, prepare: false });
+// This suite creates and drops only a private schema inside the disposable CI DB.
+const schema = 'qa_application_handoff';
+const admin = postgres(url.toString(), { max: 1, prepare: false });
+const connect = () => postgres(url.toString(), { max: 10, prepare: false, connection: { search_path: schema } });
+const first = connect();
+const second = connect();
 const event = (patch = {}) => ({
   eventId: 'qa-event', locationId: 'qa-location', marketId: 'qa-market-a',
   seasonId: '2026-2027', contactId: 'qa-contact', opportunityId: 'qa-original-opportunity',
@@ -17,16 +21,24 @@ const event = (patch = {}) => ({
   ...patch,
 });
 before(async () => {
+  await admin.unsafe(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
+  await admin.unsafe(`CREATE SCHEMA ${schema}`);
   // The handoff migration depends only on accounts(id), not the rest of the portal schema.
   await first`CREATE TABLE IF NOT EXISTS accounts (id TEXT PRIMARY KEY)`;
   await first`INSERT INTO accounts (id) VALUES ('qa-market-a'), ('qa-market-b') ON CONFLICT DO NOTHING`;
-  // The migration contains BEGIN/COMMIT, so pin its entire script to one connection.
-  const migration = postgres(url.toString(), { max: 1, prepare: false });
-  try { await migration.unsafe(fs.readFileSync(path.join(__dirname, '../../docs/migrations/001-application-handoff.sql'), 'utf8')); }
-  finally { await migration.end(); }
+  // Each migration contains BEGIN/COMMIT, so pin the scripts to one connection.
+  const migration = postgres(url.toString(), { max: 1, prepare: false, connection: { search_path: schema } });
+  // 004 adds review_state, which the upsert reads to re-list a withdrawn vendor who applies again;
+  // 029 (and the chain it depends on) admits the 'withdrawn' value.
+  try {
+    for (const file of ['001-application-handoff.sql', '004-application-review-outbox.sql', '005-agreement-completion-outbox.sql', '006-application-document-ledger.sql',
+      '011-square-payment-checkout-ledger.sql', '012-square-webhook-events.sql', '013-final-reservation-writer.sql', '029-vendor-bookings.sql']) {
+      await migration.unsafe(fs.readFileSync(path.join(__dirname, '../../docs/migrations', file), 'utf8'));
+    }
+  } finally { await migration.end(); }
 });
-beforeEach(async () => { await first`TRUNCATE fame_application_events, fame_applications`; });
-after(async () => { await first.end(); await second.end(); });
+beforeEach(async () => { await first`TRUNCATE fame_application_events, fame_applications CASCADE`; });
+after(async () => { await first.end(); await second.end(); await admin.unsafe(`DROP SCHEMA ${schema} CASCADE`); await admin.end(); });
 
 test('100 concurrent deliveries capture one application and one event across separate pools', async () => {
   const results = await Promise.all(Array.from({ length: 100 }, (_, i) => persistApplicationHandoff(event(), i % 2 ? first : second)));
@@ -90,10 +102,20 @@ test('failed final write rolls back the application and event; exact retry survi
   } finally {
     await first`ALTER TABLE fame_application_events DROP CONSTRAINT qa_injected_failure`;
   }
-  const transient = postgres(url.toString(), { max: 1, prepare: false });
+  const transient = postgres(url.toString(), { max: 1, prepare: false, connection: { search_path: schema } });
   try { assert.equal(await persistApplicationHandoff(event(), transient), 'captured'); }
   finally { await transient.end(); }
   assert.equal(await persistApplicationHandoff(event(), second), 'duplicate');
   assert.equal((await first`SELECT * FROM fame_applications`).length, 1);
   assert.equal((await first`SELECT * FROM fame_application_events`).length, 1);
+});
+
+test('a withdrawn vendor who applies again returns to needs_review; other states are left alone', async () => {
+  assert.equal(await persistApplicationHandoff(event(), first), 'captured');
+  await first`UPDATE fame_applications SET review_state = 'withdrawn'`;
+  assert.equal(await persistApplicationHandoff(event({ eventId: 'qa-event-2', payloadHash: 'qa-hash-2' }), first), 'captured');
+  assert.equal((await first`SELECT review_state FROM fame_applications`)[0].review_state, 'needs_review');
+  await first`UPDATE fame_applications SET review_state = 'approved'`;
+  assert.equal(await persistApplicationHandoff(event({ eventId: 'qa-event-3', payloadHash: 'qa-hash-3' }), first), 'captured');
+  assert.equal((await first`SELECT review_state FROM fame_applications`)[0].review_state, 'approved');
 });

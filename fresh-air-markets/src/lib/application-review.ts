@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 
 export type ApplicationReviewAction = "approve" | "request_changes" | "decline";
-export type ApplicationReviewState = "unreviewed" | "needs_review" | "changes_requested" | "approved" | "declined";
+export type ApplicationReviewState = "unreviewed" | "needs_review" | "changes_requested" | "approved" | "declined" | "withdrawn";
 
 export interface ParsedApplicationReview {
   action: ApplicationReviewAction;

@@ -99,7 +99,13 @@ interface ExistingFinalizationRow {
   final_booth_quantity: number;
   final_dates: unknown;
   quote_version: string;
+  created_at?: Date;
+  withdrawn_at?: Date | null;
+  withdrawal_note?: string | null;
 }
+
+/** States in which a booking still occupies its dates. */
+const LIVE_RESERVATION_STATES = ["held", "payment_pending", "paid", "confirmed", "manual_review"] as const;
 
 interface OccupancyRow {
   booths: number | string;
@@ -117,6 +123,9 @@ export interface FinalReservationRecord {
   finalDates: string[];
   finalBoothQuantity: number;
   quoteVersion: string;
+  createdAt?: string;
+  withdrawnAt?: string | null;
+  withdrawalNote?: string | null;
 }
 
 export type FinalReservationResult =
@@ -124,30 +133,43 @@ export type FinalReservationResult =
   | { kind: "duplicate"; reservation: FinalReservationRecord }
   | { kind: "not_found" }
   | { kind: "conflict" }
+  | { kind: "overlap"; dates: string[] }
   | { kind: "invalid_selection" }
   | { kind: "not_eligible"; reason: FinalReservationIneligibility }
   | { kind: "unavailable"; availability: { date: string; available: boolean; reasons: string[] }[] };
 
-/** Read a committed quote after a manager reloads; never allocate or create checkout. */
+/**
+ * Read every booking for an application after a manager reloads; never
+ * allocate or create checkout. `reservation` is the most recent booking that
+ * has not been withdrawn (or the most recent one at all), kept for callers
+ * written when a vendor could hold only one.
+ */
 export async function getFinalApplicationReservation(
   marketId: string,
   applicationId: string,
   sql: Sql = configuredClient(),
-): Promise<{ reservation: FinalReservationRecord | null } | null> {
+): Promise<{ reservation: FinalReservationRecord | null; reservations: FinalReservationRecord[] } | null> {
   if (!marketId || marketId === DEMO_MARKET_ID || !validFinalReservationApplicationId(applicationId)) return null;
   const [application] = await sql`SELECT id FROM fame_applications
     WHERE id = ${applicationId} AND market_id = ${marketId}`;
   if (!application) return null;
-  const [row] = await sql<ExistingFinalizationRow[]>`
+  const rows = await sql<ExistingFinalizationRow[]>`
     SELECT f.reservation_id, f.selection_fingerprint, f.idempotency_key,
-      r.state, r.payment_required, r.total_cents, r.final_booth_quantity, r.final_dates, r.quote_version
+      r.state, r.payment_required, r.total_cents, r.final_booth_quantity, r.final_dates, r.quote_version,
+      r.created_at, r.withdrawn_at, r.withdrawal_note
     FROM fame_reservation_finalizations f
     JOIN fame_reservations r ON r.id = f.reservation_id AND r.market_id = f.market_id
       AND r.application_id = f.application_id
-    WHERE f.market_id = ${marketId} AND f.application_id = ${applicationId}`;
-  const reservation = row ? recordFromExisting(row) : null;
-  if (row && !reservation) throw new Error("Stored final reservation is invalid.");
-  return { reservation };
+    WHERE f.market_id = ${marketId} AND f.application_id = ${applicationId}
+    ORDER BY r.created_at, f.reservation_id`;
+  const reservations = rows.map(row => {
+    const record = recordFromExisting(row);
+    if (!record) throw new Error("Stored final reservation is invalid.");
+    return record;
+  });
+  const reservation = [...reservations].reverse().find(record => record.state !== "cancelled")
+    ?? reservations[reservations.length - 1] ?? null;
+  return { reservation, reservations };
 }
 
 export interface FinalReservationWriteInput {
@@ -185,15 +207,19 @@ function recordFromExisting(row: ExistingFinalizationRow): FinalReservationRecor
     finalDates,
     finalBoothQuantity: Number(row.final_booth_quantity),
     quoteVersion: row.quote_version,
+    ...(row.created_at instanceof Date ? { createdAt: row.created_at.toISOString() } : {}),
+    ...(row.withdrawn_at !== undefined ? { withdrawnAt: row.withdrawn_at instanceof Date ? row.withdrawn_at.toISOString() : null } : {}),
+    ...(row.withdrawal_note !== undefined ? { withdrawalNote: row.withdrawal_note ?? null } : {}),
   };
 }
 
-async function existingFinalizationForApplication(
+/** Every booking already written for this application, locked for the transaction. */
+async function existingFinalizationsForApplication(
   tx: QuerySql,
   marketId: string,
   applicationId: string,
-): Promise<ExistingFinalizationRow | null> {
-  const [row] = await tx<ExistingFinalizationRow[]>`
+): Promise<ExistingFinalizationRow[]> {
+  return tx<ExistingFinalizationRow[]>`
     SELECT f.reservation_id, f.selection_fingerprint, f.idempotency_key,
            r.state, r.payment_required, r.total_cents, r.final_booth_quantity,
            r.final_dates, r.quote_version
@@ -201,8 +227,8 @@ async function existingFinalizationForApplication(
     JOIN fame_reservations r
       ON r.id = f.reservation_id AND r.market_id = f.market_id
     WHERE f.market_id = ${marketId} AND f.application_id = ${applicationId}
+    ORDER BY r.created_at, f.reservation_id
     FOR UPDATE OF f, r`;
-  return row ?? null;
 }
 
 async function idempotencyAlreadyUsed(
@@ -301,16 +327,21 @@ export async function reserveFinalApplication(
     if (!application) return { kind: "not_found" };
     if (application.season_id !== input.config.seasonId) return { kind: "not_eligible", reason: "application_not_approved" };
 
-    const existing = await existingFinalizationForApplication(tx, input.marketId, input.applicationId);
-    if (existing) {
-      const record = recordFromExisting(existing);
+    // A vendor may hold several bookings in one season. A replay of an earlier
+    // booking is answered with that booking; a different selection becomes a
+    // new booking as long as it does not double-book a date the vendor already
+    // holds (withdrawn, expired and declined bookings no longer count).
+    const existing = await existingFinalizationsForApplication(tx, input.marketId, input.applicationId);
+    const replay = existing.find(row => row.selection_fingerprint === fingerprint && row.idempotency_key === input.selection.idempotencyKey);
+    if (replay) {
+      const record = recordFromExisting(replay);
       if (!record) throw new Error("Stored final reservation is invalid.");
-      return existing.selection_fingerprint === fingerprint
-        && existing.idempotency_key === input.selection.idempotencyKey
-        ? { kind: "duplicate", reservation: record }
-        : { kind: "conflict" };
+      return { kind: "duplicate", reservation: record };
     }
     if (await idempotencyAlreadyUsed(tx, input.marketId, input.selection.idempotencyKey)) return { kind: "conflict" };
+    const heldDates = new Set(existing
+      .filter(row => (LIVE_RESERVATION_STATES as readonly string[]).includes(row.state))
+      .flatMap(row => asFinalDates(row.final_dates) ?? []));
 
     const [latestSource] = await tx<{ location_id: string; event_id: string }[]>`
       SELECT location_id, event_id
@@ -376,6 +407,8 @@ export async function reserveFinalApplication(
     } catch {
       return { kind: "invalid_selection" };
     }
+    const overlap = preflight.dates.filter(date => heldDates.has(date));
+    if (overlap.length) return { kind: "overlap", dates: overlap };
     for (const date of preflight.dates) {
       await tx`SELECT pg_advisory_xact_lock(hashtextextended(${`fame-reservation-capacity:${input.marketId}:${date}`}, 0))`;
     }

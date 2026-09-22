@@ -87,6 +87,30 @@ Wording lives in `src/lib/email-templates.ts`; triggers in `src/lib/notification
 >
 > You'll receive your booth assignment, market map, and Vendor Pass before your first market day, plus a reminder with setup instructions a few days ahead. Setup begins at 6:30 AM; booths must be ready by 8:00 AM.
 
+### 7. Booking withdrawn
+**Trigger:** staff press "Withdraw this booking" on an unpaid booking (held, awaiting payment, expired or needing attention). The Square link is cancelled and the dates released first.
+**Subject:** Booking withdrawn: North Port Farmer's Market
+
+> Hi {first name},
+>
+> As requested, we've withdrawn your booking for {dates}. No payment is due for these dates and any earlier payment link no longer works.
+>
+> {staff note}
+>
+> Your application stays on file for the season. If you'd like to book different dates, just reply to this email or call us and we'll send a new payment link.
+
+### 8. Application withdrawn
+**Trigger:** staff press "Withdraw this application" on the application page. Every unpaid booking is withdrawn first; a paid booking blocks it until refunded in Square.
+**Subject:** Application withdrawn: North Port Farmer's Market
+
+> Hi {first name},
+>
+> As requested, we've withdrawn {business name}'s application for this season. Any unpaid booking and payment link have been cancelled.
+>
+> {staff note}
+>
+> If this was a mistake or you change your mind, reply to this email or call us and we'll get you back in.
+
 ### 0. Finish your application (invitation)
 **Trigger:** the owner sends a pre-filled application link (used for vendors who applied through the old HighLevel forms).
 **Subject:** Finish your North Port Farmer's Market vendor application

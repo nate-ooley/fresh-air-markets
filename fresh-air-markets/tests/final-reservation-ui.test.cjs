@@ -97,8 +97,9 @@ test('private invitation presentation accepts only matching HTTPS fragment links
 
 function renderPanel(options = {}) {
   const states = [
-    { ...form, ...options.form }, options.reservation ?? null, options.order ?? null, null,
-    false, null, '', '', '', [], options.replaceConfirmed ?? false, '',
+    { ...form, ...options.form }, options.reservation ? [options.reservation] : [],
+    options.order && options.reservation ? { [options.reservation.id]: options.order } : {}, {},
+    false, null, '', '', '', [], options.replaceConfirmed ?? false, '', false, '', null,
   ];
   let index = 0;
   const updates = [];
@@ -160,7 +161,7 @@ test('rapid reserve clicks produce one request and only the server-calculated sa
   assert.equal(JSON.parse(calls[0][1].body).totalCents, undefined);
   release(new Response(JSON.stringify({ reservation, duplicate: false }), { status: 201 }));
   await Promise.all([first, second, third]);
-  assert.deepEqual(panel.updates.find(([index, value]) => index === 1 && value), [1, reservation]);
+  assert.deepEqual(panel.updates.find(([index, value]) => index === 1 && value)[1]([]), [reservation]);
 }));
 
 test('uncertain reserve retries and same-tab reload retain identity; changed decisions get another key without storing application data', async () => browserBoundary(async storage => {
@@ -210,6 +211,7 @@ test('private access requires explicit replacement consent and keeps the returne
   assert.equal(calls, 1);
   assert.equal(storage.size, 0);
   assert.match(panel.updates.find(([index, value]) => index === 8 && value)[1], /emailed to the vendor/);
-  assert.deepEqual(panel.updates.find(([index, value]) => index === 3 && value)[1], { invitationUrl: payload.invitationUrl, expiresAt: payload.expiresAt });
+  const links = panel.updates.filter(([index, value]) => index === 3 && typeof value === 'function').map(([, update]) => update({}));
+  assert.deepEqual(links.find(value => value[reservation.id]), { [reservation.id]: { invitationUrl: payload.invitationUrl, expiresAt: payload.expiresAt } });
 }));
 

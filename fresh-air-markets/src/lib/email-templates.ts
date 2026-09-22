@@ -92,6 +92,25 @@ export function paymentRequestEmail(input: { name: string; totalCents: number; d
   ]) };
 }
 
+export function bookingWithdrawnEmail(input: { name: string; dates: string[]; note?: string }): EmailContent {
+  const list = input.dates.length ? input.dates.map(day).join(", ") : "your reserved market dates";
+  return { subject: `Booking withdrawn: ${MARKET}`, ...wrap([
+    `Hi ${input.name},`,
+    `As requested, we've withdrawn your booking for ${list}. No payment is due for these dates and any earlier payment link no longer works.`,
+    ...(input.note ? [input.note] : []),
+    "Your application stays on file for the season. If you'd like to book different dates, just reply to this email or call us and we'll send a new payment link.",
+  ]) };
+}
+
+export function applicationWithdrawnEmail(input: { name: string; businessName: string; note?: string }): EmailContent {
+  return { subject: `Application withdrawn: ${MARKET}`, ...wrap([
+    `Hi ${input.name},`,
+    `As requested, we've withdrawn ${input.businessName}'s application for this season. Any unpaid booking and payment link have been cancelled.`,
+    ...(input.note ? [input.note] : []),
+    "If this was a mistake or you change your mind, reply to this email or call us and we'll get you back in.",
+  ]) };
+}
+
 export function paymentReceivedEmail(input: { name: string; totalCents: number }): EmailContent {
   return { subject: `Payment received: ${MARKET}`, ...wrap([
     `Hi ${input.name},`,

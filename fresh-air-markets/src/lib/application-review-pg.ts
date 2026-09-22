@@ -288,7 +288,7 @@ function configuredClient(): Sql {
 }
 
 function applicationState(value: string): ApplicationReviewState {
-  if (value === "needs_review" || value === "changes_requested" || value === "approved" || value === "declined") return value;
+  if (value === "needs_review" || value === "changes_requested" || value === "approved" || value === "declined" || value === "withdrawn") return value;
   return "unreviewed";
 }
 
@@ -467,7 +467,7 @@ export async function recordApplicationReview(
     if (!application.opportunity_id) return { kind: "missing_opportunity" };
 
     const currentState = applicationState(application.review_state);
-    if (currentState === "approved" || currentState === "declined") {
+    if (currentState === "approved" || currentState === "declined" || currentState === "withdrawn") {
       return { kind: "terminal", reviewState: currentState };
     }
     if (currentState === "changes_requested") {

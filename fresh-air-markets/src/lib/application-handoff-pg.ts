@@ -38,7 +38,9 @@ export async function persistApplicationHandoff(event: ApplicationHandoff, sql?:
     await tx`INSERT INTO fame_applications (id, market_id, location_id, contact_id, season_id, opportunity_id)
       VALUES (${randomUUID()}, ${event.marketId}, ${event.locationId}, ${event.contactId}, ${event.seasonId}, ${event.opportunityId})
       ON CONFLICT (market_id, location_id, contact_id, season_id)
-      DO UPDATE SET opportunity_id = COALESCE(fame_applications.opportunity_id, EXCLUDED.opportunity_id)`;
+      DO UPDATE SET opportunity_id = COALESCE(fame_applications.opportunity_id, EXCLUDED.opportunity_id),
+        -- A withdrawn vendor who applies again comes back onto the review list.
+        review_state = CASE WHEN fame_applications.review_state = 'withdrawn' THEN 'needs_review' ELSE fame_applications.review_state END`;
     const [application] = await tx`SELECT id FROM fame_applications WHERE market_id = ${event.marketId}
       AND location_id = ${event.locationId} AND contact_id = ${event.contactId} AND season_id = ${event.seasonId}`;
     await tx`UPDATE fame_application_events SET application_id = ${application.id}

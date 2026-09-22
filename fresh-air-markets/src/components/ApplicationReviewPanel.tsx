@@ -6,7 +6,7 @@ import FinalReservationPanel from "./FinalReservationPanel";
 import ApplicationDocumentsPanel from "./ApplicationDocumentsPanel";
 
 type ReviewAction = "approve" | "request_changes" | "decline";
-type ReviewState = "unreviewed" | "needs_review" | "changes_requested" | "approved" | "declined";
+type ReviewState = "unreviewed" | "needs_review" | "changes_requested" | "approved" | "declined" | "withdrawn";
 
 interface ApplicationReviewIdentitySnapshot {
   vendorName: string;
@@ -73,6 +73,7 @@ const STATE_LABEL: Record<ReviewState, string> = {
   changes_requested: "Changes requested",
   approved: "Approved",
   declined: "Declined",
+  withdrawn: "Withdrawn",
 };
 
 function reviewEndpoint(applicationId: string): string {
@@ -87,7 +88,7 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 
 function isReviewState(value: unknown): value is ReviewState {
   return value === "unreviewed" || value === "needs_review" || value === "changes_requested"
-    || value === "approved" || value === "declined";
+    || value === "approved" || value === "declined" || value === "withdrawn";
 }
 
 function isIdentitySnapshot(value: unknown): value is ApplicationReviewIdentitySnapshot {
@@ -180,6 +181,11 @@ export default function ApplicationReviewPanel({ applicationId }: { applicationI
   const [saveError, setSaveError] = useState("");
   const [notice, setNotice] = useState<ReviewNotice | null>(null);
   const [awaitingResubmission, setAwaitingResubmission] = useState(false);
+  const [withdrawOpen, setWithdrawOpen] = useState(false);
+  const [withdrawNote, setWithdrawNote] = useState("");
+  const [withdrawing, setWithdrawing] = useState(false);
+  const [withdrawError, setWithdrawError] = useState("");
+  const [withdrawNotice, setWithdrawNotice] = useState("");
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -306,7 +312,36 @@ export default function ApplicationReviewPanel({ applicationId }: { applicationI
     }
   };
 
-  const terminal = application?.reviewState === "approved" || application?.reviewState === "declined";
+  const withdrawApplication = async () => {
+    const note = withdrawNote.trim();
+    if (!application || withdrawing || !note) return;
+    setWithdrawing(true);
+    setWithdrawError("");
+    setWithdrawNotice("");
+    try {
+      const response = await fetch(`/api/admin/applications/${encodeURIComponent(application.id)}/withdraw`, {
+        method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json" }, body: JSON.stringify({ note }),
+      });
+      const payload = asRecord(await readJson(response));
+      if (response.status === 401) { router.replace("/login"); return; }
+      if (!response.ok) {
+        setWithdrawError(typeof payload?.error === "string" ? payload.error : "The application could not be withdrawn.");
+        return;
+      }
+      setApplication(current => current ? { ...current, reviewState: "withdrawn", reviewRevision: current.reviewRevision + 1 } : current);
+      setWithdrawOpen(false);
+      setWithdrawNote("");
+      const bookings = typeof payload?.bookingsWithdrawn === "number" ? payload.bookingsWithdrawn : 0;
+      setWithdrawNotice(`${bookings ? `${bookings} unpaid booking${bookings === 1 ? "" : "s"} withdrawn and ` : ""}${payload?.vendorNotification === "sent" ? "the vendor was emailed a confirmation." : "the vendor could not be emailed, so let them know yourself."}`);
+    } catch {
+      setWithdrawError("The application could not be withdrawn. Reload and try again.");
+    } finally {
+      setWithdrawing(false);
+    }
+  };
+
+  const terminal = application?.reviewState === "approved" || application?.reviewState === "declined" || application?.reviewState === "withdrawn";
+  const canWithdraw = Boolean(application && application.reviewState !== "declined" && application.reviewState !== "withdrawn");
   const waitingOnVendor = application?.reviewState === "changes_requested" && !application.updatedSinceReview;
   const canReview = Boolean(application?.sourceEventId && application.hasOpportunity && application.identitySnapshot && !terminal && !awaitingResubmission && !waitingOnVendor);
   const requiresReason = action !== "approve";
@@ -549,6 +584,29 @@ export default function ApplicationReviewPanel({ applicationId }: { applicationI
               </form>
 
               <ApplicationDocumentsPanel applicationId={application.id} />
+
+              {(canWithdraw || withdrawNotice) && (
+                <section aria-labelledby="withdraw-application-title" className="mt-8 border-t border-pine/15 pt-8">
+                  <h2 id="withdraw-application-title" className="font-display text-2xl text-pine-deep">Withdraw application</h2>
+                  <p className="mt-2 text-sm leading-relaxed text-ink/65">Use this when the vendor tells you they are out for the season. Any unpaid booking is withdrawn, its payment link cancelled and the dates released; the vendor gets a confirmation email. A paid booking blocks this until it is refunded in Square. If they apply again later, they come back onto the list.</p>
+                  {withdrawNotice && <p role="status" className="mt-4 rounded-2xl bg-pine/10 p-4 text-sm text-pine">Application withdrawn: {withdrawNotice}</p>}
+                  {canWithdraw && !withdrawOpen && (
+                    <button type="button" disabled={withdrawing} onClick={() => { setWithdrawOpen(true); setWithdrawNote(""); setWithdrawError(""); }} className="mt-4 rounded-full border border-pine/20 px-4 py-2 text-sm font-semibold text-pine disabled:opacity-45">Withdraw this application</button>
+                  )}
+                  {canWithdraw && withdrawOpen && (
+                    <div className="mt-4">
+                      <label className="block text-sm font-semibold text-pine-deep">Why is it being withdrawn? (sent to the vendor)
+                        <textarea value={withdrawNote} disabled={withdrawing} maxLength={500} rows={2} onChange={event => setWithdrawNote(event.target.value)} placeholder="Example: You let us know on 9/20 that you can't do the market this season." className="mt-2 w-full rounded-xl border border-pine/20 bg-white px-3 py-3 text-sm font-normal text-ink outline-none focus:border-amber focus:ring-2 focus:ring-amber/25 disabled:opacity-50" />
+                      </label>
+                      <div className="mt-3 flex flex-wrap gap-3">
+                        <button type="button" disabled={withdrawing || !withdrawNote.trim()} onClick={() => void withdrawApplication()} className="rounded-full bg-pine px-5 py-3 text-sm font-semibold text-cream enabled:hover:bg-leaf disabled:cursor-not-allowed disabled:opacity-45">{withdrawing ? "Withdrawing…" : "Confirm withdrawal"}</button>
+                        <button type="button" disabled={withdrawing} onClick={() => { setWithdrawOpen(false); setWithdrawNote(""); }} className="rounded-full border border-pine/20 px-4 py-2 text-sm font-semibold text-pine disabled:opacity-45">Keep the application</button>
+                      </div>
+                    </div>
+                  )}
+                  {withdrawError && <p role="alert" className="mt-4 rounded-2xl bg-clay/10 p-4 text-sm text-clay">{withdrawError}</p>}
+                </section>
+              )}
 
               {application.reviewState === "approved" && application.sourceEventId && application.identitySnapshot && (
                 <FinalReservationPanel

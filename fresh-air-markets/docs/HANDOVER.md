@@ -1,9 +1,9 @@
-# Fresh Air Markets portal — status and handover (September 11, 2026)
+# Fresh Air Markets portal — status and handover (September 21, 2026)
 
 ## Live today
 
 Site: https://freshairmarketsandevents.com (staff sign in at `/login`).
-Hosting: Vercel project `farmers-market`. Database: Neon PostgreSQL, migrations 001–027.
+Hosting: Vercel project `farmers-market`. Database: Neon PostgreSQL, migrations 001–029.
 Payments: Square production, merchant ML16MNPG8Z0R5, webhook on the custom domain.
 Email: Resend from `hello@freshairmarketsandevents.com` (domain verified).
 Scheduler: GitHub Actions every 5 minutes, releases unpaid 48-hour holds.
@@ -16,8 +16,16 @@ vendor and staff confirmation emails.
 Also live: vendor upload of insurance right after applying, 1–4 booths per
 market day, contact form and newsletter, staff password reset by emailed link,
 an admin endpoint that keeps Square's webhook URL aligned with the site,
-staff accounts (the owner invites managers from `/staff`), and the market
-roster at `/roster` with a per-date spreadsheet download.
+staff accounts (the owner invites managers from `/staff`), the market
+roster at `/roster` with a per-date spreadsheet download, and vendor
+bookings (September 21): an approved application is the vendor's profile for
+the season and can hold several bookings, each with its own payment link and
+priced on its own dates ($40 a Saturday, $35 when the booking itself is four
+or more Saturdays in a row, $30 only for a full season). Staff can "Add
+dates" from the application page, withdraw an unpaid booking (Square link
+cancelled, dates released, vendor emailed) and withdraw a whole application
+(it goes to "Withdrawn"; the vendor comes back onto the list if they apply
+again). Paid bookings stay locked; refunds happen in Square.
 
 ## Before handing to the client's market manager
 
@@ -48,7 +56,11 @@ roster at `/roster` with a per-date spreadsheet download.
 
 ## Later improvements
 
-- Archive or withdraw an approved application or reservation.
+- Vendor self-serve "book more dates" link in the payment emails (Part 2 of
+  the bookings plan): the vendor picks open Saturdays, staff confirm with one
+  click, the payment link goes out.
+- Record the insurance certificate's expiry date and block new dates past it
+  until a fresh certificate is uploaded (client decision on Sept 21).
 - More vendor emails: document decision, hold expired, market-day reminder,
   booth assignment and Vendor Pass (the payment email promises these).
 - "Payment received" on the return-from-Square page without a session.
