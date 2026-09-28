@@ -234,6 +234,16 @@ export async function verifySquareSandboxSetup(config: SquareSandboxSetupConfig,
 }
 
 export const PAYMENT_WINDOW_MS = 48 * 60 * 60 * 1000;
+
+/**
+ * Whether the 48-hour payment window is enforced by the system. Off unless
+ * FAME_PAYMENT_AUTO_EXPIRY is exactly "true": payment links then stay payable
+ * until the vendor pays or staff withdraw the booking, and the date printed
+ * in the payment email is a requested pay-by date, not a cut-off.
+ */
+export function paymentDeadlineEnforced(env: Record<string, string | undefined> = process.env): boolean {
+  return env.FAME_PAYMENT_AUTO_EXPIRY === "true";
+}
 export function paymentDeadline(paymentRequestSentAt: string): string {
   const timestamp = Date.parse(paymentRequestSentAt);
   if (!Number.isFinite(timestamp)) throw new Error("A valid payment-request timestamp is required.");

@@ -32,7 +32,7 @@ before(async () => {
       '005-agreement-completion-outbox.sql', '006-application-document-ledger.sql',
       '011-square-payment-checkout-ledger.sql', '012-square-webhook-events.sql',
       '013-final-reservation-writer.sql', '014-square-payment-expiry.sql',
-      '017-vendor-payment-access.sql', '029-vendor-bookings.sql', '030-vendor-booking-requests.sql',
+      '017-vendor-payment-access.sql', '029-vendor-bookings.sql', '030-vendor-booking-requests.sql', '031-open-payment-links.sql',
     ]) await migration.unsafe(fs.readFileSync(path.join(__dirname, '../../docs/migrations', file), 'utf8'));
   } finally { await migration.end(); }
 });
@@ -269,4 +269,35 @@ test('payment stop hides previously issued checkout but leaves verified paid rec
   await first`UPDATE fame_payment_orders SET status = 'paid', payment_id = 'verified-payment', payment_status = 'COMPLETED' WHERE reservation_id = ${id}`;
   assert.equal((await read(session.sessionHash, { config: disabled })).status, 'paid');
   assert.equal((await invitation(id, { config: disabled })).kind, 'issued');
+});
+
+test('with the payment window not enforced, a link stays payable past its pay-by date, can be reopened from the same email, and lasts a year', async () => {
+  const saved = process.env.FAME_PAYMENT_AUTO_EXPIRY;
+  delete process.env.FAME_PAYMENT_AUTO_EXPIRY;
+  try {
+    const id = await finalReservation();
+    const link = await invitation(id);
+    assert.equal(link.kind, 'issued');
+    assert.equal(Date.parse(link.expiresAt), now.valueOf() + 365 * 24 * 3600_000);
+    const weekLater = new Date(due.valueOf() + 7 * 24 * 3600_000);
+    // First open, a week after the pay-by date: still payable.
+    const firstSession = hash();
+    assert.equal((await exchangeVendorPaymentAccess({ config, invitationHash: link.tokenHash, sessionHash: firstSession, now: weekLater }, first)).kind, 'exchanged');
+    const view = await read(firstSession, { now: weekLater });
+    assert.equal(view.status, 'pending');
+    assert.equal(view.checkoutUrl, 'https://sandbox.square.link/u/qa-private');
+    // The vendor opens the same email again on another device.
+    const secondSession = hash();
+    assert.equal((await exchangeVendorPaymentAccess({ config, invitationHash: link.tokenHash, sessionHash: secondSession, now: new Date(weekLater.valueOf() + 3600_000) }, first)).kind, 'exchanged');
+    assert.equal((await read(secondSession, { now: new Date(weekLater.valueOf() + 3600_000) })).status, 'pending');
+    // A newer link from staff replaces it; a withdrawn booking shows nothing payable.
+    const newer = await invitation(id, { now: weekLater });
+    assert.equal(newer.kind, 'issued');
+    assert.equal((await exchangeVendorPaymentAccess({ config, invitationHash: link.tokenHash, sessionHash: hash(), now: weekLater }, first)).kind, 'invalid');
+    await first`UPDATE fame_reservations SET state = 'cancelled' WHERE id = ${id}`;
+    await first`UPDATE fame_payment_orders SET status = 'cancelled' WHERE reservation_id = ${id}`;
+    assert.equal((await invitation(id, { now: weekLater })).kind, 'not_eligible');
+  } finally {
+    if (saved === undefined) delete process.env.FAME_PAYMENT_AUTO_EXPIRY; else process.env.FAME_PAYMENT_AUTO_EXPIRY = saved;
+  }
 });

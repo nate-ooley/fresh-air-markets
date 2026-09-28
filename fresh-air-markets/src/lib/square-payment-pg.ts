@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import postgres from "postgres";
-import { PAYMENT_WINDOW_MS, type ApprovedCheckout, type SquareEnvironment } from "./square";
+import { PAYMENT_WINDOW_MS, paymentDeadlineEnforced, type ApprovedCheckout, type SquareEnvironment } from "./square";
 import {
   type SquareCheckoutClaim,
   type SquareCheckoutFinalizeResult,
@@ -215,7 +215,8 @@ function claimResultForExisting(
   }
   if (order.status === "checkout_created") {
     const due = order.paymentDueAt ? new Date(order.paymentDueAt) : reservation.payment_due_at;
-    if (!validDueDate(due, now)) return { kind: "not_payable", reason: "expired" };
+    // A live link past its pay-by date is still the vendor's link unless the window is enforced.
+    if (paymentDeadlineEnforced() && !validDueDate(due, now)) return { kind: "not_payable", reason: "expired" };
     return { kind: "checkout_created", order };
   }
   return null;

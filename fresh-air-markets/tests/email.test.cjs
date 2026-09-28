@@ -46,6 +46,12 @@ test('templates carry the essentials and escape HTML', () => {
   assert.match(request.text, /Saturday, October 3, 2026/);
   assert.match(request.text, /https:\/\/portal\.example\/vendor\/payment#token=abc/);
   assert.match(request.html, /<a href="https:\/\/portal\.example\/vendor\/payment#token=abc">/);
+  assert.match(request.text, /Please pay within the next 48 hours: .* your spot may be released/);
+  assert.doesNotMatch(request.text, /expires/);
+  assert.match(templates.paymentRequestEmail({ name: 'Rosa', totalCents: 8000, dueAt: '2026-09-13T02:32:12.000Z', dates: ['2026-10-03'], booths: 1, link: 'https://portal.example/x', enforced: true }).text, /expires September 12, 2026/);
+  const reminder = templates.paymentRequestEmail({ name: 'Rosa', totalCents: 8000, dueAt: '2026-09-13T02:32:12.000Z', dates: ['2026-10-03'], booths: 2, link: 'https://portal.example/x', reminder: true });
+  assert.match(reminder.subject, /^Reminder: payment request: .*\$80\.00/);
+  assert.match(reminder.text, /reminder that your reservation is waiting for payment: 2 booths/);
   const changes = templates.applicationChangesRequestedEmail({ name: 'Rosa', reason: 'Add <b>insurance</b> & license' });
   assert.match(changes.text, /Add <b>insurance<\/b> & license/);
   assert.match(changes.html, /Add &lt;b&gt;insurance&lt;\/b&gt; &amp; license/);

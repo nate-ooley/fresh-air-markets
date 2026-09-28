@@ -82,13 +82,17 @@ export function applicationDeclinedEmail(input: { name: string; reason: string }
   ]) };
 }
 
-export function paymentRequestEmail(input: { name: string; totalCents: number; dueAt: string; dates: string[]; booths: number; link: string }): EmailContent {
+export function paymentRequestEmail(input: { name: string; totalCents: number; dueAt: string; dates: string[]; booths: number; link: string; reminder?: boolean; enforced?: boolean }): EmailContent {
   const list = input.dates.length ? input.dates.map(day).join(", ") : "your reserved market dates";
-  return { subject: `Payment request: ${MARKET} reservation (${money(input.totalCents)})`, ...wrap([
+  return { subject: `${input.reminder ? "Reminder: payment" : "Payment"} request: ${MARKET} reservation (${money(input.totalCents)})`, ...wrap([
     `Hi ${input.name},`,
-    `Your reservation is ready: ${input.booths} booth${input.booths === 1 ? "" : "s"} for ${list}. Total due: ${money(input.totalCents)}.`,
+    input.reminder
+      ? `This is a reminder that your reservation is waiting for payment: ${input.booths} booth${input.booths === 1 ? "" : "s"} for ${list}. Total due: ${money(input.totalCents)}.`
+      : `Your reservation is ready: ${input.booths} booth${input.booths === 1 ? "" : "s"} for ${list}. Total due: ${money(input.totalCents)}.`,
     `Pay securely through Square using your private link: ${input.link}`,
-    `This link is only for you and expires ${when(input.dueAt)} (Eastern). Unpaid reservations are released after that time. Booth fees are non-refundable.`,
+    input.enforced
+      ? `This link is only for you and expires ${when(input.dueAt)} (Eastern). Unpaid reservations are released after that time. Booth fees are non-refundable.`
+      : "This link is only for you. Please pay within the next 48 hours: if we have not received your payment by then, your spot may be released to another vendor. Booth fees are non-refundable.",
   ]) };
 }
 

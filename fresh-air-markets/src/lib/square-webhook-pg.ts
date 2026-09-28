@@ -1,5 +1,5 @@
 import postgres from "postgres";
-import type { SquareEnvironment } from "./square";
+import { paymentDeadlineEnforced, type SquareEnvironment } from "./square";
 import {
   getSquarePaymentOrderForWebhook,
   type SquarePaymentWebhookTarget,
@@ -106,7 +106,9 @@ export function reconcileSquarePaymentWebhook(
   if (!due) return { kind: "manual_review", reason: "payment_deadline_missing_or_mismatched" };
   // A completion exactly at the persisted deadline is eligible if the hold
   // still exists. A later provider timestamp must be reconciled manually.
-  if (observed.valueOf() > due.valueOf()) {
+  // Without an enforced window the hold is still live (checked above), so a
+  // payment after the pay-by date is simply a payment.
+  if (paymentDeadlineEnforced() && observed.valueOf() > due.valueOf()) {
     return { kind: "manual_review", reason: "payment_completed_after_deadline" };
   }
   return { kind: "paid", providerTime: observed };

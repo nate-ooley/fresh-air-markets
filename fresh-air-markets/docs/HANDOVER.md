@@ -3,10 +3,13 @@
 ## Live today
 
 Site: https://freshairmarketsandevents.com (staff sign in at `/login`).
-Hosting: Vercel project `farmers-market`. Database: Neon PostgreSQL, migrations 001–030.
+Hosting: Vercel project `farmers-market`. Database: Neon PostgreSQL, migrations 001–031.
 Payments: Square production, merchant ML16MNPG8Z0R5, webhook on the custom domain.
 Email: Resend from `hello@freshairmarketsandevents.com` (domain verified).
-Scheduler: GitHub Actions every 5 minutes, releases unpaid 48-hour holds.
+Scheduler: GitHub Actions every 5 minutes. Since September 28 it no longer
+releases unpaid holds: payment links stay open until the vendor pays or staff
+withdraw the booking (set `FAME_PAYMENT_AUTO_EXPIRY=true` to turn the 48-hour
+release back on).
 
 Proven end to end on production with a real $40 card payment:
 apply → staff approve → insurance uploaded and approved → reservation →

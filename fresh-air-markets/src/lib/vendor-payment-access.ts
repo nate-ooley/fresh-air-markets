@@ -5,6 +5,8 @@ import { squarePortalOrigin } from "./square";
 export const VENDOR_PAYMENT_COOKIE = "fame_vendor_payment";
 export const VENDOR_SESSION_MS = 7 * 24 * 60 * 60 * 1000;
 export const VENDOR_INVITATION_MS = 48 * 60 * 60 * 1000;
+/** Lifetime of an emailed payment link when the payment window is not enforced. */
+export const VENDOR_OPEN_INVITATION_MS = 365 * 24 * 60 * 60 * 1000;
 export type VendorSquareEnvironment = "sandbox" | "production";
 
 export interface VendorPaymentAccessConfig {

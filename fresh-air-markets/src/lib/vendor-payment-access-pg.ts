@@ -1,9 +1,9 @@
 import postgres from "postgres";
 import { DEMO_MARKET_ID } from "./seed";
 import { FRESH_AIR_SEASON_DATES } from "./fresh-air-season";
-import { PAYMENT_WINDOW_MS, validSquareCheckoutUrl } from "./square";
+import { PAYMENT_WINDOW_MS, paymentDeadlineEnforced, validSquareCheckoutUrl } from "./square";
 import {
-  VENDOR_INVITATION_MS, VENDOR_SESSION_MS,
+  VENDOR_INVITATION_MS, VENDOR_OPEN_INVITATION_MS, VENDOR_SESSION_MS,
   type VendorPaymentAccessConfig, type VendorPaymentAccessStore, type VendorPaymentView,
   type VendorInvitationIssueResult, type VendorInvitationExchangeResult,
 } from "./vendor-payment-access";
@@ -101,12 +101,14 @@ function paymentView(row: AccessSnapshot, config: VendorPaymentAccessConfig, now
   }
   view.environment = config.environment;
   view.paymentDueAt = new Date(due).toISOString();
+  // Without an enforced window a live Square link stays payable past its pay-by date.
+  const open = !paymentDeadlineEnforced() || due > now.valueOf();
   if (row.state === "paid" && row.order_status === "paid" && row.payment_id && row.payment_status === "COMPLETED") {
     view.status = "paid";
   } else if (["expired", "expiry_pending"].includes(row.order_status || "") || row.state === "expired"
-    || (row.state === "payment_pending" && row.order_status === "checkout_created" && due <= now.valueOf())) {
+    || (row.state === "payment_pending" && row.order_status === "checkout_created" && !open)) {
     view.status = "expired";
-  } else if (row.state === "payment_pending" && row.order_status === "checkout_created" && due > now.valueOf()
+  } else if (row.state === "payment_pending" && row.order_status === "checkout_created" && open
     && config.allowCheckout && validSquareCheckoutUrl(row.checkout_url, config.environment)) {
     view.status = "pending";
     view.checkoutUrl = row.checkout_url;
@@ -136,7 +138,9 @@ export async function issueVendorPaymentAccessWithinTransaction(
   const view = paymentView(row, input.config, input.now);
   if (!usableForInvitation(view)) return { kind: "not_eligible" };
   const expires = view.status === "pending"
-    ? new Date(Math.min(input.now.valueOf() + VENDOR_INVITATION_MS, Date.parse(view.paymentDueAt!)))
+    ? (paymentDeadlineEnforced()
+      ? new Date(Math.min(input.now.valueOf() + VENDOR_INVITATION_MS, Date.parse(view.paymentDueAt!)))
+      : new Date(input.now.valueOf() + VENDOR_OPEN_INVITATION_MS))
     : new Date(input.now.valueOf() + VENDOR_SESSION_MS);
   await tx`UPDATE fame_vendor_payment_sessions SET revoked_at = ${input.now}
     WHERE market_id = ${input.config.marketId} AND reservation_id = ${input.reservationId} AND revoked_at IS NULL`;
@@ -163,14 +167,18 @@ export async function exchangeVendorPaymentAccess(
     const [invitation] = await tx<{ reservation_revision: number; expires_at: Date; consumed_at: Date | null; revoked_at: Date | null }[]>`
       SELECT reservation_revision, expires_at, consumed_at, revoked_at FROM fame_vendor_payment_invitations
       WHERE token_hash = ${input.invitationHash} AND market_id = ${input.config.marketId} FOR UPDATE`;
-    if (!invitation || invitation.reservation_revision !== row.revision || invitation.consumed_at || invitation.revoked_at
+    // With an enforced window a link opens once. Without one the vendor may
+    // come back to the same email days later, on another device, until they
+    // pay or staff send a newer link (which revokes this one).
+    const reusable = !paymentDeadlineEnforced();
+    if (!invitation || invitation.reservation_revision !== row.revision || (invitation.consumed_at && !reusable) || invitation.revoked_at
       || epoch(invitation.expires_at) <= input.now.valueOf()) return { kind: "invalid" };
     const view = paymentView(row, input.config, input.now);
     // A paid webhook can arrive between issuance and the vendor opening the
     // link. Permit that receipt, but never revive an expired/cancelled checkout.
     if (!usableForInvitation(view)) return { kind: "invalid" };
     const expires = new Date(input.now.valueOf() + VENDOR_SESSION_MS);
-    await tx`UPDATE fame_vendor_payment_invitations SET consumed_at = ${input.now} WHERE token_hash = ${input.invitationHash}`;
+    await tx`UPDATE fame_vendor_payment_invitations SET consumed_at = COALESCE(consumed_at, ${input.now}) WHERE token_hash = ${input.invitationHash}`;
     await tx`INSERT INTO fame_vendor_payment_sessions
       (token_hash, invitation_hash, market_id, reservation_id, reservation_revision, created_at, expires_at)
       VALUES (${input.sessionHash}, ${input.invitationHash}, ${input.config.marketId}, ${locator.reservation_id}, ${row.revision}, ${input.now}, ${expires})`;

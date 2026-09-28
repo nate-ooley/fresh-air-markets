@@ -23,6 +23,7 @@ function loadRoute({ authorized = true, expiry, configured = true, verified = tr
       postgresSquarePaymentLinkRetirementStore: { qa: true },
     };
     if (id === '@/lib/square') return {
+      paymentDeadlineEnforced: () => process.env.FAME_PAYMENT_AUTO_EXPIRY === 'true',
       squarePaymentRuntimeConfig: () => {
         if (!configured) throw new Error('not configured');
         return { environment, accessToken: 'private-token', locationId: 'sandbox-location' };
@@ -207,5 +208,24 @@ test('production expiry is scoped to its provider environment and identity failu
     const failedIdentity = loadRoute({ verified: false, expiry: async input => { claim = input; return { expiryPending: 0, manualReview: 0 }; } });
     assert.equal((await failedIdentity.GET(new Request('https://unit-test.invalid'))).status, 503);
     assert.equal(claim, undefined);
+  });
+});
+
+test('with the payment window not enforced the scheduler expires nothing and touches neither Square nor the database', async () => {
+  await withSchedulerEnv(async () => {
+    const saved = process.env.FAME_PAYMENT_AUTO_EXPIRY;
+    delete process.env.FAME_PAYMENT_AUTO_EXPIRY;
+    try {
+      const route = loadRoute({
+        expiry: async () => { throw new Error('must not claim holds'); },
+        dispatch: async () => { throw new Error('must not call Square'); },
+        verified: false,
+      });
+      const response = await route.GET(new Request('https://unit-test.invalid'));
+      assert.equal(response.status, 200);
+      assert.deepEqual(await response.json(), { enabled: false, expiryPending: 0, expired: 0, deferred: 0, manualReview: 0 });
+    } finally {
+      if (saved === undefined) delete process.env.FAME_PAYMENT_AUTO_EXPIRY; else process.env.FAME_PAYMENT_AUTO_EXPIRY = saved;
+    }
   });
 });

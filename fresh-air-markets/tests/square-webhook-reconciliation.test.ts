@@ -82,6 +82,20 @@ test("a wrong amount or a completion after the deadline enters manual review", (
   assert.deepEqual(late, { kind: "manual_review", reason: "payment_completed_after_deadline" });
 });
 
+test("with the payment window not enforced, a completed payment after the pay-by date on a live hold is simply paid", () => {
+  const saved = process.env.FAME_PAYMENT_AUTO_EXPIRY;
+  delete process.env.FAME_PAYMENT_AUTO_EXPIRY;
+  try {
+    const late = reconcileSquarePaymentWebhook(target(), event({ payment: { updatedAt: "2026-10-20T12:00:00.000Z" } }));
+    assert.equal(late.kind, "paid");
+    // Amount checks and dead holds are unaffected.
+    assert.equal(reconcileSquarePaymentWebhook(target(), event({ payment: { amountCents: 27999, updatedAt: "2026-10-20T12:00:00.000Z" } })).kind, "manual_review");
+    assert.equal(reconcileSquarePaymentWebhook(target({ orderStatus: "cancelled", reservationState: "cancelled" }), event({ payment: { updatedAt: "2026-10-20T12:00:00.000Z" } })).kind, "manual_review");
+  } finally {
+    if (saved === undefined) delete process.env.FAME_PAYMENT_AUTO_EXPIRY; else process.env.FAME_PAYMENT_AUTO_EXPIRY = saved;
+  }
+});
+
 test("a failed attempt does not bind its payment ID, so a later successful retry can qualify", () => {
   const afterFailedAttempt = target({
     paymentId: null,

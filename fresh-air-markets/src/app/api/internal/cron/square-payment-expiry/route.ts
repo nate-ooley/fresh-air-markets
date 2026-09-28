@@ -4,7 +4,7 @@ import {
   postgresSquarePaymentLinkRetirementStore,
 } from "@/lib/square-payment-pg";
 import { dispatchSquarePaymentLinkRetirement } from "@/lib/square-payment";
-import { squarePaymentRuntimeConfig, verifySquareIdentity } from "@/lib/square";
+import { paymentDeadlineEnforced, squarePaymentRuntimeConfig, verifySquareIdentity } from "@/lib/square";
 import { squareQaExpiryTransport, squareQaSupportConfig } from "@/lib/square-qa-faults";
 
 export const runtime = "nodejs";
@@ -37,6 +37,11 @@ export async function GET(request: Request): Promise<Response> {
   const marketId = process.env.FAME_MARKET_ACCOUNT_ID?.trim();
   if (!marketId) {
     return Response.json({ error: "Square payment expiry market scope is not configured." }, { status: 503 });
+  }
+  // Payment links do not expire on their own unless the market turns that on;
+  // staff release an unpaid booking with "Withdraw this booking".
+  if (!paymentDeadlineEnforced()) {
+    return Response.json({ enabled: false, expiryPending: 0, expired: 0, deferred: 0, manualReview: 0 });
   }
 
   let qaSupport;

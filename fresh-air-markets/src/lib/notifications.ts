@@ -1,4 +1,5 @@
 import postgres from "postgres";
+import { paymentDeadlineEnforced } from "./square";
 import { applicantContact, emailConfigured, sendEmail, sendStaffEmail, type SendEmailResult } from "./email";
 import { BOOKING_LINK_TTL_MS, EMAILED_UPLOAD_TTL_MS, createApplicationLinkToken, createApplicationUploadToken } from "./application-upload-token";
 import {
@@ -88,7 +89,7 @@ export async function notifyApplicationDecision(input: {
 }
 
 export async function notifyPaymentRequest(input: {
-  reservationId: string; marketId: string; invitationUrl: string; expiresAt: string;
+  reservationId: string; marketId: string; invitationUrl: string; expiresAt: string; reminder?: boolean;
 }, sql?: Sql): Promise<NotificationOutcome> {
   if (!emailConfigured()) return "not_sent";
   try {
@@ -105,8 +106,9 @@ export async function notifyPaymentRequest(input: {
     const content = paymentRequestEmail({
       name: contact.name, totalCents: Number(reservation.total_cents), dueAt,
       dates: allocations.map(a => a.market_date), booths: allocations[0]?.booth_quantity ?? 1, link: input.invitationUrl,
+      reminder: input.reminder, enforced: paymentDeadlineEnforced(),
     });
-    return outcome(await sendEmail({ kind: "payment_request", to: contact.email, marketId: input.marketId, referenceId: input.reservationId, ...content }, { sql: db }));
+    return outcome(await sendEmail({ kind: input.reminder ? "payment_reminder" : "payment_request", to: contact.email, marketId: input.marketId, referenceId: input.reservationId, ...content }, { sql: db }));
   } catch { return "failed"; }
 }
 
