@@ -24,6 +24,6 @@ test('emailed upload links can carry a longer life than the post-submit token', 
   const short = createApplicationUploadToken('22222222-2222-4222-8222-222222222222', 'fame-market', env, now);
   const long = createApplicationUploadToken('22222222-2222-4222-8222-222222222222', 'fame-market', env, now, EMAILED_UPLOAD_TTL_MS);
   assert.equal(verifyApplicationUploadToken(short, env, now + 3 * 60 * 60 * 1000), null);
-  assert.deepEqual(verifyApplicationUploadToken(long, env, now + 13 * 24 * 60 * 60 * 1000), { applicationId: '22222222-2222-4222-8222-222222222222', marketId: 'fame-market' });
-  assert.equal(verifyApplicationUploadToken(long, env, now + 15 * 24 * 60 * 60 * 1000), null);
+  assert.deepEqual(verifyApplicationUploadToken(long, env, now + 119 * 24 * 60 * 60 * 1000), { applicationId: '22222222-2222-4222-8222-222222222222', marketId: 'fame-market' });
+  assert.equal(verifyApplicationUploadToken(long, env, now + 121 * 24 * 60 * 60 * 1000), null);
 });

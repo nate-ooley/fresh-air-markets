@@ -58,7 +58,7 @@ test('templates carry the essentials and escape HTML', () => {
   assert.match(templates.applicationApprovedEmail({ name: 'Rosa', businessName: 'Sunrise Farms' }).text, /Sunrise Farms/);
   assert.match(templates.applicationApprovedEmail({ name: 'Rosa', businessName: 'Sunrise Farms' }).text, /Reply to this email with it as a PDF/);
   const link = 'https://freshairmarketsandevents.com/apply/documents#token=abc.def';
-  assert.match(templates.applicationApprovedEmail({ name: 'Rosa', businessName: 'Sunrise Farms', uploadLink: link }).text, /Upload it here .*14 days.*apply\/documents#token=abc\.def/);
+  assert.match(templates.applicationApprovedEmail({ name: 'Rosa', businessName: 'Sunrise Farms', uploadLink: link }).text, /Upload it here .*120 days.*apply\/documents#token=abc\.def/);
   assert.doesNotMatch(templates.applicationApprovedEmail({ name: 'Rosa', businessName: 'Sunrise Farms', uploadLink: link }).text, /Reply to this email/);
   assert.match(templates.applicationChangesRequestedEmail({ name: 'Rosa', reason: 'Send insurance.', uploadLink: link }).text, /upload it here.*apply\/documents#token=abc\.def/);
   assert.match(templates.applicationReceivedEmail({ name: 'Rosa', businessName: 'Sunrise Farms', uploadLink: link }).text, /Upload it here .*apply\/documents#token=abc\.def/);

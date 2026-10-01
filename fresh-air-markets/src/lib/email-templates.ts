@@ -31,7 +31,7 @@ export interface EmailContent { subject: string; text: string; html: string }
 
 function uploadLine(link: string | null | undefined, lead: string): string {
   return link
-    ? `${lead} Upload it here (PDF, PNG or JPEG; the link works for 14 days): ${link}`
+    ? `${lead} Upload it here (PDF, PNG or JPEG; the link works for 120 days): ${link}`
     : `${lead} Reply to this email with it as a PDF, PNG or JPEG.`;
 }
 
@@ -68,7 +68,7 @@ export function applicationChangesRequestedEmail(input: { name: string; reason: 
     `Hi ${input.name},`,
     "We reviewed your application and need one thing before we can approve it:",
     input.reason,
-    ...(input.uploadLink ? [`If it's a document (certificate of insurance, food license), upload it here; the link works for 14 days: ${input.uploadLink}`] : []),
+    ...(input.uploadLink ? [`If it's a document (certificate of insurance, food license), upload it here; the link works for 120 days: ${input.uploadLink}`] : []),
     "If it's a detail on the application, submit the application again with the corrected details, or reply to this email.",
   ]) };
 }
@@ -217,6 +217,6 @@ export function documentUploadLinkEmail(input: { name: string; businessName: str
   return { subject: `Upload your documents for the ${MARKET}`, ...wrap([
     `Hi ${input.name},`,
     `Here is your personal link to upload your certificate of insurance and, if you sell food or drinks, your food license or permit${input.businessName ? ` for ${input.businessName}` : ""}: ${input.link}`,
-    "PDF, PNG or JPEG up to 10 MB. The link works for 14 days and you can come back to add a second file. Once market staff approve your documents we'll confirm your dates and send your payment request.",
+    "PDF, PNG or JPEG up to 10 MB. The link works for 120 days and you can come back to add a second file. Once market staff approve your documents we'll confirm your dates and send your payment request.",
   ]) };
 }

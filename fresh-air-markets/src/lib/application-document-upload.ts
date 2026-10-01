@@ -3,6 +3,7 @@ import postgres from "postgres";
 import {
   APPLICATION_DOCUMENT_KINDS,
   buildApplicationDocumentSourceEvent,
+  declaredOrExtensionContentType,
   validApplicationDocumentId,
   type ApplicationDocumentKind,
   type DocumentReviewState,
@@ -93,7 +94,7 @@ export async function uploadApplicationDocumentAsManager(
   const storageKey = `documents/${keySegment(input.marketId)}/${input.applicationId}/${uploadId}`;
   const transfer = await transferPrivateApplicationDocument({
     storageKey, sourceFileId: sourceId, filename: input.filename,
-    declaredContentType: input.declaredContentType, body: input.body,
+    declaredContentType: declaredOrExtensionContentType(input.filename, input.declaredContentType), body: input.body,
   }, store);
   if (transfer.kind !== "stored") return transfer;
 

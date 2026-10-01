@@ -34,7 +34,7 @@ export function portalOrigin(env: NodeJS.ProcessEnv = process.env): string {
   return "https://farmers-market-wine.vercel.app";
 }
 
-/** Personal 14-day upload link for this application; null when signing is unavailable. */
+/** Personal 120-day upload link for this application; null when signing is unavailable. */
 export function documentUploadLink(applicationId: string, marketId: string): string | null {
   try {
     return new URL(`/apply/documents#token=${createApplicationUploadToken(applicationId, marketId, process.env, Date.now(), EMAILED_UPLOAD_TTL_MS)}`, portalOrigin()).toString();
@@ -170,7 +170,7 @@ export async function notifyApplicationInvitation(input: {
   return outcome(await sendEmail({ kind: input.reminder ? "application_invitation_reminder" : "application_invitation", to: input.email, marketId: input.marketId, referenceId: "", ...content }, { sql }));
 }
 
-/** Staff-triggered: email the vendor their 14-day document upload link. Does not change review state. */
+/** Staff-triggered: email the vendor their 120-day document upload link. Does not change review state. */
 export async function notifyDocumentUploadLink(input: { applicationId: string; marketId: string }, sql?: Sql): Promise<NotificationOutcome | "not_found"> {
   if (!emailConfigured()) return "not_sent";
   try {

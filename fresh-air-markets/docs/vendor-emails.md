@@ -20,7 +20,7 @@ Wording lives in `src/lib/email-templates.ts`; triggers in `src/lib/notification
 >
 > Thanks for applying to the North Port Farmer's Market with {business name}. Market staff review every application and will reply to this email address with a decision.
 >
-> If you didn't attach your certificate of insurance (and food license, if you sell food) on the confirmation page: Upload it here (PDF, PNG or JPEG; the link works for 14 days): https://freshairmarketsandevents.com/apply/documents#token=…
+> If you didn't attach your certificate of insurance (and food license, if you sell food) on the confirmation page: Upload it here (PDF, PNG or JPEG; the link works for 120 days): https://freshairmarketsandevents.com/apply/documents#token=…
 >
 > If approved, we'll confirm your dates and booth count and send a payment request. Payment is due within 48 hours of that request.
 
@@ -34,7 +34,7 @@ Wording lives in `src/lib/email-templates.ts`; triggers in `src/lib/notification
 >
 > *If the vendor already uploaded a document:* We have the documents you uploaded with your application. Once market staff have checked them we'll confirm your market dates and booth count and send your payment request.
 >
-> *Otherwise:* Next step: we need your certificate of insurance and, if you sell food, your food license or permit. Upload it here (PDF, PNG or JPEG; the link works for 14 days): https://freshairmarketsandevents.com/apply/documents#token=…
+> *Otherwise:* Next step: we need your certificate of insurance and, if you sell food, your food license or permit. Upload it here (PDF, PNG or JPEG; the link works for 120 days): https://freshairmarketsandevents.com/apply/documents#token=…
 >
 > Once those are approved we'll confirm your market dates and booth count and send your payment request.
 
@@ -48,7 +48,7 @@ Wording lives in `src/lib/email-templates.ts`; triggers in `src/lib/notification
 >
 > {reason typed by staff}
 >
-> If it's a document (certificate of insurance, food license), upload it here; the link works for 14 days: https://freshairmarketsandevents.com/apply/documents#token=…
+> If it's a document (certificate of insurance, food license), upload it here; the link works for 120 days: https://freshairmarketsandevents.com/apply/documents#token=…
 >
 > If it's a detail on the application, submit the application again with the corrected details, or reply to this email.
 

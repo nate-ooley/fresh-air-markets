@@ -43,9 +43,9 @@ test('sending the upload link needs a session, binds the session market, and rep
   assert.equal((await loadRoute({ notify: async () => 'failed' }).POST(post(), { params: Promise.resolve({ id: appId }) })).status, 502);
 }));
 
-test('the upload-link email carries the link and the 14-day note', () => {
+test('the upload-link email carries the link and the 120-day note', () => {
   const email = documentUploadLinkEmail({ name: 'Kim Wallace', businessName: 'Coastal Crave Co', link: 'https://freshairmarketsandevents.com/apply/documents#token=a.b' });
   assert.match(email.subject, /Upload your documents/);
   assert.match(email.text, /for Coastal Crave Co: https:\/\/freshairmarketsandevents\.com\/apply\/documents#token=a\.b/);
-  assert.match(email.text, /14 days/);
+  assert.match(email.text, /120 days/);
 });

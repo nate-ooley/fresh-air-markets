@@ -61,7 +61,7 @@ export default function ApplicationDocumentsPanel({ applicationId }: { applicati
       const response = await fetch(`/api/admin/applications/${encodeURIComponent(applicationId)}/upload-link`, { method: "POST", headers: { Accept: "application/json" } });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) { setError(typeof payload?.error === "string" ? payload.error : "The upload link email could not be sent."); return; }
-      setNotice("Upload link emailed to the vendor. It works for 14 days.");
+      setNotice("Upload link emailed to the vendor. It works for 120 days.");
     } catch { setError("The upload link email could not be sent."); }
     finally { setBusy(false); }
   };
@@ -141,7 +141,7 @@ export default function ApplicationDocumentsPanel({ applicationId }: { applicati
       <h3 className="font-semibold text-pine-deep">Vendor documents</h3>
       <div className="mt-2 flex flex-wrap items-center gap-3">
         <button type="button" disabled={busy} onClick={() => void sendUploadLink()} className="rounded-full border border-pine/20 px-4 py-2 text-sm font-semibold text-pine hover:bg-pine/10 disabled:opacity-50">Email the vendor an upload link</button>
-        <span className="text-xs text-ink/55">Sends them a personal link (good for 14 days) to upload insurance and licenses themselves. Does not change the application status.</span>
+        <span className="text-xs text-ink/55">Sends them a personal link (good for 120 days) to upload insurance and licenses themselves. Does not change the application status.</span>
       </div>
       <p className="mt-1 text-sm text-ink/60">
         Upload the vendor&rsquo;s certificate of insurance and, when required, food license. An approved current insurance

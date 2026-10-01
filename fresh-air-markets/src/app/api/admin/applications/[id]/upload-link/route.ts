@@ -9,7 +9,7 @@ export const dynamic = "force-dynamic";
 const headers = { "Cache-Control": "no-store" };
 
 /**
- * Staff email the vendor a personal 14-day document upload link without
+ * Staff email the vendor a personal 120-day document upload link without
  * changing the application's review state. Useful when a vendor emailed or
  * texted about documents instead of uploading them.
  */

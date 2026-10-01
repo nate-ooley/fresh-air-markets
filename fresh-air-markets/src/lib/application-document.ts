@@ -136,6 +136,17 @@ function normalizedContentType(value: unknown): ApplicationDocumentContentType |
     : null;
 }
 
+/**
+ * Some browsers and phone share sheets send a PDF or photo with no MIME type
+ * (or the generic octet-stream). The extension then names the type; the
+ * byte-signature check still has to agree before the file is admitted.
+ */
+export function declaredOrExtensionContentType(filename: string, declared: string): string {
+  const type = typeof declared === "string" ? declared.split(";", 1)[0]?.trim().toLowerCase() ?? "" : "";
+  if (type && type !== "application/octet-stream") return declared;
+  return (typeof filename === "string" ? extensionFor(filename) : null) ?? declared;
+}
+
 function extensionFor(filename: string): ApplicationDocumentContentType | null {
   const extension = filename.slice(filename.lastIndexOf(".") + 1).toLowerCase();
   if (extension === "pdf") return "application/pdf";

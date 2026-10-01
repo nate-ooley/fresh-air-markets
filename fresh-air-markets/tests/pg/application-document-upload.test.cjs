@@ -98,6 +98,10 @@ test('rejected, oversized, foreign-market and unknown-kind uploads leave no priv
   const text = await upload({ filename: 'notes.txt', declaredContentType: 'text/plain', body: body(Buffer.from('hello')) });
   assert.equal(text.kind, 'rejected');
   assert.equal(text.code, 'unsupported_type');
+  // A browser that sends no MIME type: the extension names it, the bytes must still agree.
+  const untyped = await upload({ filename: 'Liability ins.PDF', declaredContentType: '', body: body(Buffer.from('not really a pdf')) });
+  assert.equal(untyped.kind, 'rejected');
+  assert.equal(untyped.code, 'signature_mismatch');
   const spoofed = await upload({ filename: 'coi.pdf', declaredContentType: 'application/pdf', body: body(Buffer.from('not really a pdf')) });
   assert.equal(spoofed.kind, 'rejected');
   assert.equal(spoofed.code, 'signature_mismatch');
@@ -121,4 +125,13 @@ test('an applicant upload is recorded with its own source id and validation reas
   const staffAgain = await upload({ actor: 'staff' });
   assert.equal(staffAgain.kind, 'duplicate');
   assert.equal(await objectCount(), 1);
+});
+
+test('a PDF sent with no MIME type and an upper-case extension is accepted on its bytes', async () => {
+  const other = Buffer.from('%PDF-1.7\n1 0 obj << /Type /Catalog /Untyped true >> endobj\ntrailer << /Root 1 0 R >>\n%%EOF\n', 'latin1');
+  for (const declaredContentType of ['', 'application/octet-stream']) {
+    const result = await upload({ kind: 'food_license', filename: 'Liability ins skin clique.PDF', declaredContentType, body: body(other) });
+    assert.ok(result.kind === 'captured' || result.kind === 'duplicate', result.code ?? result.kind);
+    assert.equal(result.document.file.contentType, 'application/pdf');
+  }
 });

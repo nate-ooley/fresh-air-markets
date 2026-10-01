@@ -8,8 +8,11 @@ import { signingSecret } from "./auth-secret";
  */
 
 const TTL_MS = 2 * 60 * 60 * 1000;
-/** Emailed upload links last longer than the post-submit one: vendors read email days later. */
-export const EMAILED_UPLOAD_TTL_MS = 14 * 24 * 60 * 60 * 1000;
+/**
+ * Emailed upload links last longer than the post-submit one: vendors come back to
+ * an old email weeks later (a 14-day link had lapsed for vendors invited in September).
+ */
+export const EMAILED_UPLOAD_TTL_MS = 120 * 24 * 60 * 60 * 1000;
 const ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 /** Each link purpose signs with its own key, so an upload link can never act as a booking link. */
