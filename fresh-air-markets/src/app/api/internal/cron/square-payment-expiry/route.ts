@@ -41,7 +41,7 @@ export async function GET(request: Request): Promise<Response> {
   // Payment links do not expire on their own unless the market turns that on;
   // staff release an unpaid booking with "Withdraw this booking".
   if (!paymentDeadlineEnforced()) {
-    return Response.json({ enabled: false, expiryPending: 0, expired: 0, deferred: 0, manualReview: 0 });
+    return Response.json({ enabled: false });
   }
 
   let qaSupport;

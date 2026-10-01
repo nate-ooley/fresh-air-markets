@@ -223,7 +223,7 @@ test('with the payment window not enforced the scheduler expires nothing and tou
       });
       const response = await route.GET(new Request('https://unit-test.invalid'));
       assert.equal(response.status, 200);
-      assert.deepEqual(await response.json(), { enabled: false, expiryPending: 0, expired: 0, deferred: 0, manualReview: 0 });
+      assert.deepEqual(await response.json(), { enabled: false });
     } finally {
       if (saved === undefined) delete process.env.FAME_PAYMENT_AUTO_EXPIRY; else process.env.FAME_PAYMENT_AUTO_EXPIRY = saved;
     }
