@@ -103,6 +103,8 @@ export interface VendorPaymentView {
   quoteTier: "standard" | "consecutive" | "full-season" | "nonprofit";
   paymentRequired: boolean;
   paymentDueAt: string | null;
+  /** False when the market does not release unpaid bookings on a timer: the pay-by date is then a request, not a cut-off. Absent means enforced. */
+  deadlineEnforced?: boolean;
   status: "pending" | "paid" | "confirmed" | "expired" | "unavailable";
   checkoutUrl: string | null;
   environment: VendorSquareEnvironment | null;

@@ -26,6 +26,10 @@ test('checkout links are restricted to Square hosts and exact Sandbox test-panel
 test('payment button closes exactly at deadline and cannot open for paid or terminal states', () => {
   assert.ok(canOpenVendorCheckout(view, Date.parse(due) - 1));
   assert.equal(canOpenVendorCheckout(view, Date.parse(due)), false);
+  assert.ok(canOpenVendorCheckout({ ...view, deadlineEnforced: false }, Date.parse(due) + 86400000));
+  assert.equal(canOpenVendorCheckout({ ...view, deadlineEnforced: true }, Date.parse(due)), false);
+  assert.ok(parseVendorPaymentView({ ...view, deadlineEnforced: false }));
+  assert.equal(parseVendorPaymentView({ ...view, deadlineEnforced: 'no' }), null);
   for (const status of ['paid', 'confirmed', 'expired', 'unavailable']) assert.equal(canOpenVendorCheckout({ ...view, status }, Date.parse(due) - 1), false);
   assert.equal(canOpenVendorCheckout({ ...view, paymentRequired: false }, Date.parse(due) - 1), false);
 });

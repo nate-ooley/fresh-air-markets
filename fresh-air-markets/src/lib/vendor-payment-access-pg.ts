@@ -101,6 +101,7 @@ function paymentView(row: AccessSnapshot, config: VendorPaymentAccessConfig, now
   }
   view.environment = config.environment;
   view.paymentDueAt = new Date(due).toISOString();
+  view.deadlineEnforced = paymentDeadlineEnforced();
   // Without an enforced window a live Square link stays payable past its pay-by date.
   const open = !paymentDeadlineEnforced() || due > now.valueOf();
   if (row.state === "paid" && row.order_status === "paid" && row.payment_id && row.payment_status === "COMPLETED") {

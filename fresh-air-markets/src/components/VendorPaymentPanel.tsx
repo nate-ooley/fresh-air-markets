@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { canOpenVendorCheckout, invitationFromFragment, parseVendorPaymentView, type VendorPaymentView } from "@/lib/vendor-payment-view";
+import { canOpenVendorCheckout, invitationFromFragment, parseVendorPaymentView, vendorPaymentWindowEnded, type VendorPaymentView } from "@/lib/vendor-payment-view";
 
 const money = (cents: number) => new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(cents / 100);
 const marketDate = (date: string) => new Intl.DateTimeFormat("en-US", { weekday: "short", month: "short", day: "numeric", year: "numeric", timeZone: "UTC" }).format(new Date(`${date}T12:00:00Z`));
@@ -110,7 +110,7 @@ export default function VendorPaymentPanel() {
   }
 
   const payable = reservation && canOpenVendorCheckout(reservation, now);
-  const expired = reservation && (reservation.status === "expired" || (reservation.status === "pending" && reservation.paymentDueAt !== null && Date.parse(reservation.paymentDueAt) <= now));
+  const expired = reservation && (reservation.status === "expired" || (reservation.status === "pending" && vendorPaymentWindowEnded(reservation, now)));
   return (
     <main className="min-h-screen bg-cream px-5 py-8 sm:py-14">
       <div className="mx-auto max-w-2xl">
@@ -147,8 +147,15 @@ export default function VendorPaymentPanel() {
               <ul className="mt-3 grid gap-2 text-sm text-ink/65 sm:grid-cols-2">{reservation.dates.map(date => <li key={date}>{marketDate(date)}</li>)}</ul>
             </details>
             {payable && <div className="mt-7 border-t border-pine/10 pt-6">
-              <p className="text-sm text-pine">Payment due <strong>{deadline(reservation.paymentDueAt!)}</strong> (Eastern time).</p>
-              <p className="mt-2 text-xs leading-relaxed text-ink/60">Your reservation has a 48-hour payment window. Square securely handles your payment details.</p>
+              {reservation.deadlineEnforced === false
+                ? <>
+                  <p className="text-sm text-pine">Please pay as soon as you can to keep your spot.</p>
+                  <p className="mt-2 text-xs leading-relaxed text-ink/60">Unpaid spots may be released to another vendor. Square securely handles your payment details.</p>
+                </>
+                : <>
+                  <p className="text-sm text-pine">Payment due <strong>{deadline(reservation.paymentDueAt!)}</strong> (Eastern time).</p>
+                  <p className="mt-2 text-xs leading-relaxed text-ink/60">Your reservation has a 48-hour payment window. Square securely handles your payment details.</p>
+                </>}
               <a href={reservation.checkoutUrl!} rel="noreferrer" className="mt-5 block rounded-full bg-amber px-6 py-4 text-center font-bold text-white hover:bg-clay">Continue to Square · {money(reservation.totalCents)}</a>
             </div>}
           </>}

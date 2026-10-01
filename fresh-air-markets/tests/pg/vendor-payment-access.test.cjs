@@ -146,7 +146,7 @@ test('100 concurrent exchanges consume one invitation and produce only one indep
   const view = await read(success.sessionHash);
   assert.deepEqual(view, {
     dates: ['2026-10-03'], boothsPerMarket: 1, rateCents: 4000, totalCents: 4000, currency: 'USD', quoteTier: 'standard',
-    paymentRequired: true, paymentDueAt: due.toISOString(), status: 'pending', checkoutUrl: 'https://sandbox.square.link/u/qa-private', environment: 'sandbox',
+    paymentRequired: true, paymentDueAt: due.toISOString(), deadlineEnforced: true, status: 'pending', checkoutUrl: 'https://sandbox.square.link/u/qa-private', environment: 'sandbox',
   });
   assert.equal(JSON.stringify(view).includes(id), false);
   for (const key of ['applicationId', 'marketId', 'snapshot', 'email', 'contactId', 'opportunityId', 'token']) assert.equal(Object.hasOwn(view, key), false);

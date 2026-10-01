@@ -9,6 +9,8 @@ export interface VendorPaymentView {
   quoteTier: "standard" | "consecutive" | "full-season" | "nonprofit";
   paymentRequired: boolean;
   paymentDueAt: string | null;
+  /** False when the market does not release unpaid bookings on a timer: the pay-by date is then a request, not a cut-off. Absent means enforced. */
+  deadlineEnforced?: boolean;
   status: "pending" | "paid" | "confirmed" | "expired" | "unavailable";
   checkoutUrl: string | null;
   environment: "sandbox" | "production" | null;
@@ -43,6 +45,7 @@ export function parseVendorPaymentView(value: unknown): VendorPaymentView | null
     || !Number.isSafeInteger(row.totalCents) || row.totalCents < 0 || row.currency !== "USD"
     || !["standard", "consecutive", "full-season", "nonprofit"].includes(row.quoteTier)
     || typeof row.paymentRequired !== "boolean"
+    || !(row.deadlineEnforced === undefined || typeof row.deadlineEnforced === "boolean")
     || !["pending", "paid", "confirmed", "expired", "unavailable"].includes(row.status)
     || !["sandbox", "production", null].includes(row.environment)
     || !(row.paymentDueAt === null || (typeof row.paymentDueAt === "string" && Number.isFinite(Date.parse(row.paymentDueAt))))
@@ -57,6 +60,11 @@ export function parseVendorPaymentView(value: unknown): VendorPaymentView | null
 
 export function canOpenVendorCheckout(reservation: VendorPaymentView, now: number): boolean {
   return reservation.status === "pending" && reservation.paymentRequired && reservation.totalCents > 0
-    && reservation.paymentDueAt !== null && Date.parse(reservation.paymentDueAt) > now
+    && reservation.paymentDueAt !== null && !vendorPaymentWindowEnded(reservation, now)
     && trustedVendorCheckoutUrl(reservation.checkoutUrl, reservation.environment);
+}
+
+/** True only when the market enforces the pay-by date and it has passed. */
+export function vendorPaymentWindowEnded(reservation: VendorPaymentView, now: number): boolean {
+  return reservation.deadlineEnforced !== false && reservation.paymentDueAt !== null && Date.parse(reservation.paymentDueAt) <= now;
 }

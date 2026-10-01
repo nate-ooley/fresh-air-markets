@@ -293,3 +293,15 @@ test('malformed fragments make no request and an expired invitation is never aut
     assert.equal(panel.checkoutLinks().length, 0);
   });
 });
+
+test('with the pay-by date not enforced, a past-due reservation still shows the Square checkout link', async () => {
+  const reservation = { ...pendingReservation, paymentDueAt: new Date(NOW - 5 * 24 * 60 * 60 * 1000).toISOString(), deadlineEnforced: false };
+  await browserBoundary('', async ({ panel, respond }) => {
+    respond(() => json({ reservation }));
+    panel.flushEffects(); await flush(); panel.render();
+    assert.equal(panel.checkoutLinks().length, 1);
+    assert.doesNotMatch(panel.text(), /payment window has ended/);
+    assert.doesNotMatch(panel.text(), /Payment due/);
+    assert.match(panel.text(), /Please pay as soon as you can/);
+  });
+});
