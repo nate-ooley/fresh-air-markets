@@ -2,6 +2,7 @@ import { notFound, redirect } from "next/navigation";
 import ApplicationReviewPanel from "@/components/ApplicationReviewPanel";
 import { getSessionAccountId } from "@/lib/auth";
 import { validApplicationId } from "@/lib/application-review";
+import { paymentDeadlineEnforced } from "@/lib/square";
 
 export const dynamic = "force-dynamic";
 
@@ -14,5 +15,5 @@ export default async function ApplicationReviewPage({ params }: { params: Promis
   // so an unauthenticated visitor never receives the review interface.
   if (!await getSessionAccountId()) redirect("/login");
 
-  return <ApplicationReviewPanel applicationId={id} />;
+  return <ApplicationReviewPanel applicationId={id} deadlineEnforced={paymentDeadlineEnforced()} />;
 }

@@ -170,7 +170,7 @@ function submittedLabel(iso: string): string {
     : "";
 }
 
-export default function ApplicationReviewPanel({ applicationId }: { applicationId: string }) {
+export default function ApplicationReviewPanel({ applicationId, deadlineEnforced = true }: { applicationId: string; deadlineEnforced?: boolean }) {
   const router = useRouter();
   const attempts = useRef(new Map<string, string>());
   const [application, setApplication] = useState<ApplicationReviewDetail | null>(null);
@@ -623,6 +623,7 @@ export default function ApplicationReviewPanel({ applicationId }: { applicationI
                   applicationId={application.id}
                   sourceEventId={application.sourceEventId}
                   snapshot={application.identitySnapshot}
+                  deadlineEnforced={deadlineEnforced}
                 />
               )}
             </>

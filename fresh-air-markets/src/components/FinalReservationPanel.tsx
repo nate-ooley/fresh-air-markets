@@ -91,10 +91,12 @@ function reservationList(payload: Record<string, unknown> | null): FinalReservat
   return isFinalReservationView(payload.reservation) ? [payload.reservation] : null;
 }
 
-export default function FinalReservationPanel({ applicationId, sourceEventId, snapshot }: {
+export default function FinalReservationPanel({ applicationId, sourceEventId, snapshot, deadlineEnforced = true }: {
   applicationId: string;
   sourceEventId: string;
   snapshot: ReservationPlanningSnapshot;
+  /** False when unpaid bookings are not released on a timer; the wording then drops the 48-hour deadline. */
+  deadlineEnforced?: boolean;
 }) {
   const router = useRouter();
   const attempts = useRef(new Map<string, string>());
@@ -415,7 +417,9 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
       setBookingRequest(null);
       const delivery = data?.vendorNotification;
       setNotice(delivery === "sent"
-        ? "Confirmed. The dates are booked and the vendor was emailed their payment link (48 hours to pay)."
+        ? (deadlineEnforced
+          ? "Confirmed. The dates are booked and the vendor was emailed their payment link (48 hours to pay)."
+          : "Confirmed. The dates are booked and the vendor was emailed their payment link.")
         : delivery === "not_sent" && data?.paymentOrder === null
           ? "Confirmed. This nonprofit booking has nothing to pay."
           : "Confirmed and the payment request is ready, but the email could not be sent. Use Email payment link below.");
@@ -538,11 +542,13 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
                 {reservation.paymentRequired && ["held", "payment_pending"].includes(reservation.state) && (
                   <section className="mt-5 rounded-2xl border border-pine/15 bg-white/60 p-5">
                     <h4 className="font-semibold text-pine-deep">Payment request</h4>
-                    <p className="mt-2 text-sm leading-relaxed text-ink/65">The vendor has 48 hours from creation of the Square payment request. Repeating this action retrieves the same request and does not extend its deadline.</p>
+                    <p className="mt-2 text-sm leading-relaxed text-ink/65">{deadlineEnforced
+                      ? "The vendor has 48 hours from creation of the Square payment request. Repeating this action retrieves the same request and does not extend its deadline."
+                      : "The payment link stays open until the vendor pays or you withdraw this booking. Nothing is released automatically. Repeating this action retrieves the same request."}</p>
                     <button type="button" disabled={disabled} onClick={() => void checkout(reservation)} className={`${BUTTON} mt-4`}>{busy === "checkout" ? "Preparing payment request…" : paymentOrder || reservation.state === "payment_pending" ? "Retrieve payment request" : "Create payment request"}</button>
                     {paymentOrder && <div role="status" className="mt-4 rounded-xl bg-pine/10 p-4 text-sm text-pine">
                       <p>{paymentOrder.status === "checkout_created" ? "Payment request ready; payment has not been confirmed." : `Payment request status: ${paymentOrder.status.replaceAll("_", " ")}.`}</p>
-                      {paymentOrder.paymentDueAt && <p className="mt-1">Payment deadline: {deadlineLabel(paymentOrder.paymentDueAt)}</p>}
+                      {paymentOrder.paymentDueAt && <p className="mt-1">{deadlineEnforced ? "Payment deadline" : "Asked to pay by"}: {deadlineLabel(paymentOrder.paymentDueAt)}{deadlineEnforced ? "" : " (not a cut-off; the link still works after this)"}</p>}
                     </div>}
                   </section>
                 )}
@@ -550,7 +556,7 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
                 {canCreateAccess(reservation) && (
                   <section className="mt-5 rounded-2xl border border-pine/15 bg-white/60 p-5">
                     <h4 className="font-semibold text-pine-deep">Email the payment link</h4>
-                    <p className="mt-2 text-sm leading-relaxed text-ink/65">Emails the vendor their private reservation page with the total, their dates and the 48-hour deadline. The link is only for this vendor; anyone who has it can open this reservation. Sending again issues a fresh link and revokes the old one.</p>
+                    <p className="mt-2 text-sm leading-relaxed text-ink/65">Emails the vendor their private reservation page with the total and their dates{deadlineEnforced ? " and the 48-hour deadline" : ", and asks them to pay within 48 hours"}. The link is only for this vendor; anyone who has it can open this reservation. Sending again issues a fresh link and revokes the old one.</p>
                     <label className="mt-4 flex items-start gap-3 text-sm text-ink/75">
                       <input type="checkbox" checked={replaceLinkConfirmed === reservation.id} disabled={disabled} onChange={event => setReplaceLinkConfirmed(event.target.checked ? reservation.id : null)} className="mt-0.5" />
                       I understand that sending a link replaces any earlier link and signs the vendor out of existing sessions.
