@@ -4,8 +4,9 @@ import { applicantContact, emailConfigured, sendEmail, sendStaffEmail, type Send
 import { BOOKING_LINK_TTL_MS, EMAILED_UPLOAD_TTL_MS, createApplicationLinkToken, createApplicationUploadToken } from "./application-upload-token";
 import {
   applicationInvitationEmail, applicationApprovedEmail, applicationWithdrawnEmail, bookingRequestDeclinedEmail, bookingRequestReceivedEmail, bookingWithdrawnEmail, documentUploadLinkEmail, applicationChangesRequestedEmail, applicationDeclinedEmail, applicationReceivedEmail,
-  paymentReceivedEmail, staffBookingRequestEmail, paymentRequestEmail, passwordResetEmail, staffContactMessageEmail, staffInvitationEmail, staffNewApplicationEmail, staffPaymentReceivedEmail,
+  customPaymentReminderEmail, paymentReceivedEmail, staffBookingRequestEmail, paymentRequestEmail, passwordResetEmail, staffContactMessageEmail, staffInvitationEmail, staffNewApplicationEmail, staffPaymentReceivedEmail,
 } from "./email-templates";
+import { reminderDates, reminderMoney } from "./payment-reminder-template";
 
 /**
  * Event-to-email glue for the portal. Each function is best-effort: it looks
@@ -90,6 +91,8 @@ export async function notifyApplicationDecision(input: {
 
 export async function notifyPaymentRequest(input: {
   reservationId: string; marketId: string; invitationUrl: string; expiresAt: string; reminder?: boolean;
+  /** Staff-edited reminder wording from the roster page; placeholders are filled per vendor. */
+  custom?: { subject: string; message: string };
 }, sql?: Sql): Promise<NotificationOutcome> {
   if (!emailConfigured()) return "not_sent";
   try {
@@ -103,7 +106,10 @@ export async function notifyPaymentRequest(input: {
       SELECT market_date::text AS market_date, booth_quantity FROM fame_reservation_allocations
       WHERE reservation_id = ${input.reservationId} AND market_id = ${input.marketId} ORDER BY market_date`;
     const dueAt = reservation.payment_due_at ? new Date(reservation.payment_due_at).toISOString() : input.expiresAt;
-    const content = paymentRequestEmail({
+    const content = input.custom ? customPaymentReminderEmail(input.custom, {
+      name: contact.name, business: contact.businessName || contact.name, total: reminderMoney(Number(reservation.total_cents)),
+      dates: reminderDates(allocations.map(a => a.market_date)), link: input.invitationUrl,
+    }) : paymentRequestEmail({
       name: contact.name, totalCents: Number(reservation.total_cents), dueAt,
       dates: allocations.map(a => a.market_date), booths: allocations[0]?.booth_quantity ?? 1, link: input.invitationUrl,
       reminder: input.reminder, enforced: paymentDeadlineEnforced(),

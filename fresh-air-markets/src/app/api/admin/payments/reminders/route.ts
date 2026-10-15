@@ -3,6 +3,8 @@ import postgres from "postgres";
 import { getSessionAccountId } from "@/lib/auth";
 import { freshAirFinalReservationConfig, reopenExpiredReservation } from "@/lib/final-reservation-pg";
 import { notifyPaymentRequest } from "@/lib/notifications";
+import { cleanReminderTemplate } from "@/lib/payment-reminder-template";
+import { readObjectBody } from "@/lib/request-body";
 import { squarePaymentRuntimeConfig, squarePortalOrigin, verifySquareIdentity } from "@/lib/square";
 import { dispatchSquareCheckout } from "@/lib/square-payment";
 import { postgresSquarePaymentCheckoutStore } from "@/lib/square-payment-pg";
@@ -21,7 +23,7 @@ function db() {
   return client;
 }
 
-interface Unpaid { id: string; state: string; total_cents: string | number; business: string | null; email: string | null }
+interface Unpaid { id: string; state: string; total_cents: string | number; business: string | null; email: string | null; name: string | null }
 
 /** Every booking that still owes money: awaiting payment, held without a link, or lapsed. */
 async function unpaidBookings(marketId: string): Promise<Unpaid[]> {
@@ -30,13 +32,30 @@ async function unpaidBookings(marketId: string): Promise<Unpaid[]> {
       (SELECT e.snapshot->'snapshot'->>'businessName' FROM fame_application_events e
         WHERE e.application_id = r.application_id AND e.market_id = r.market_id ORDER BY e.created_at DESC, e.event_id DESC LIMIT 1) AS business,
       (SELECT lower(btrim(e.snapshot->'snapshot'->>'email')) FROM fame_application_events e
-        WHERE e.application_id = r.application_id AND e.market_id = r.market_id ORDER BY e.created_at DESC, e.event_id DESC LIMIT 1) AS email
+        WHERE e.application_id = r.application_id AND e.market_id = r.market_id ORDER BY e.created_at DESC, e.event_id DESC LIMIT 1) AS email,
+      (SELECT btrim(concat_ws(' ', e.snapshot->'snapshot'->>'firstName', e.snapshot->'snapshot'->>'lastName')) FROM fame_application_events e
+        WHERE e.application_id = r.application_id AND e.market_id = r.market_id ORDER BY e.created_at DESC, e.event_id DESC LIMIT 1) AS name
     FROM fame_reservations r
     JOIN fame_reservation_finalizations f ON f.reservation_id = r.id AND f.market_id = r.market_id
     JOIN fame_applications a ON a.id = r.application_id AND a.market_id = r.market_id
     WHERE r.market_id = ${marketId} AND r.payment_required AND r.state IN ('held', 'payment_pending', 'expired')
       AND a.review_state = 'approved'
     ORDER BY r.created_at`;
+}
+
+/** Reserved Saturdays and booth count per booking, for the preview. */
+async function bookingDates(marketId: string, ids: string[]): Promise<Map<string, { dates: string[]; booths: number }>> {
+  const result = new Map<string, { dates: string[]; booths: number }>();
+  if (!ids.length) return result;
+  const rows = await db()<{ reservation_id: string; market_date: string; booth_quantity: number }[]>`
+    SELECT reservation_id, market_date::text AS market_date, booth_quantity FROM fame_reservation_allocations
+    WHERE market_id = ${marketId} AND reservation_id = ANY(${ids}::text[]) ORDER BY market_date`;
+  for (const row of rows) {
+    const entry = result.get(row.reservation_id) ?? { dates: [], booths: Number(row.booth_quantity) || 1 };
+    entry.dates.push(row.market_date);
+    result.set(row.reservation_id, entry);
+  }
+  return result;
 }
 
 const testAddress = (email: string | null) => !email || /@(example\.(com|org|net)|[^@]*\.test)$/.test(email);
@@ -64,15 +83,20 @@ export async function GET(request: NextRequest) {
   const gated = await gate(request);
   if ("error" in gated) return gated.error;
   try {
-    const rows = await unpaidBookings(gated.marketId);
-    return NextResponse.json({ unpaid: rows.filter(row => !testAddress(row.email)).map(row => ({ reservationId: row.id, business: row.business ?? "", state: row.state, totalCents: Number(row.total_cents) })) }, { headers });
+    const rows = (await unpaidBookings(gated.marketId)).filter(row => !testAddress(row.email));
+    const dates = await bookingDates(gated.marketId, rows.map(row => row.id));
+    return NextResponse.json({ unpaid: rows.map(row => ({
+      reservationId: row.id, business: row.business ?? "", name: row.name || row.email || "", email: row.email ?? "",
+      state: row.state, totalCents: Number(row.total_cents), dates: dates.get(row.id)?.dates ?? [], booths: dates.get(row.id)?.booths ?? 1,
+    })) }, { headers });
   } catch {
     return NextResponse.json({ error: "Unpaid bookings could not be read." }, { status: 503, headers });
   }
 }
 
 /**
- * Staff: email a payment reminder to every vendor who still owes. A lapsed
+ * Staff: email a payment reminder to the vendors they ticked, with the subject
+ * and wording they edited (placeholders filled per vendor). A lapsed
  * hold is reopened (if its dates still have room) and a booking without a
  * live Square link gets one; every vendor receives a fresh private link and
  * earlier links for that booking stop working.
@@ -81,6 +105,14 @@ export async function POST(request: NextRequest) {
   const gated = await gate(request);
   if ("error" in gated) return gated.error;
   const marketId = gated.marketId;
+  const body = await readObjectBody(request);
+  const ids = body?.reservationIds;
+  if (!Array.isArray(ids) || !ids.length || ids.length > 200 || !ids.every(id => typeof id === "string" && id.length <= 64)) {
+    return NextResponse.json({ error: "Choose at least one vendor." }, { status: 400, headers });
+  }
+  const template = cleanReminderTemplate(body?.subject, body?.message);
+  if ("error" in template) return NextResponse.json({ error: template.error }, { status: 400, headers });
+  const chosen = new Set(ids as string[]);
   let config, square, access;
   try {
     config = freshAirFinalReservationConfig(process.env);
@@ -92,7 +124,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Square is not reachable right now. Nothing was sent; try again." }, { status: 503, headers });
   }
   let rows: Unpaid[];
-  try { rows = (await unpaidBookings(marketId)).filter(row => !testAddress(row.email)); }
+  try { rows = (await unpaidBookings(marketId)).filter(row => !testAddress(row.email) && chosen.has(row.id)); }
   catch { return NextResponse.json({ error: "Unpaid bookings could not be read." }, { status: 503, headers }); }
 
   const results: { reservationId: string; business: string; totalCents: number; outcome: "sent" | "skipped" | "failed"; detail: string }[] = [];
@@ -112,13 +144,17 @@ export async function POST(request: NextRequest) {
       }
       const link = await issueVendorPaymentInvitation({ config: access, reservationId: row.id, actorAccountId: marketId, store: postgresVendorPaymentAccessStore });
       if (link.kind !== "issued") { results.push({ ...base, outcome: "failed", detail: "The payment link could not be created" }); continue; }
-      const sent = await notifyPaymentRequest({ reservationId: row.id, marketId, invitationUrl: link.invitationUrl, expiresAt: link.expiresAt, reminder: true });
+      const sent = await notifyPaymentRequest({ reservationId: row.id, marketId, invitationUrl: link.invitationUrl, expiresAt: link.expiresAt, reminder: true, custom: template });
       results.push({ ...base, outcome: sent === "sent" ? "sent" : "failed", detail: sent === "sent" ? "Reminder emailed" : "The email could not be sent" });
     } catch {
       results.push({ ...base, outcome: "failed", detail: "Something went wrong for this booking" });
     }
     // Stay under the email provider's two-per-second limit.
     await new Promise(resolve => setTimeout(resolve, 600));
+  }
+  // A ticked booking that was paid or withdrawn since the page loaded.
+  for (const id of chosen) {
+    if (!rows.some(row => row.id === id)) results.push({ reservationId: id, business: "", totalCents: 0, outcome: "skipped", detail: "No longer waiting on payment" });
   }
   return NextResponse.json({ sent: results.filter(r => r.outcome === "sent").length, results }, { headers });
 }

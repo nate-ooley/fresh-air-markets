@@ -1,3 +1,5 @@
+import { renderPaymentReminder, type ReminderValues } from "./payment-reminder-template";
+
 /**
  * Plain-text-first email templates for the vendor pipeline. Every template
  * returns subject/text/html; wording is intentionally short and edit-friendly.
@@ -22,7 +24,7 @@ function escape(text: string): string {
 function wrap(paragraphs: string[]): { text: string; html: string } {
   const text = `${paragraphs.join("\n\n")}\n\n— ${ORG}\n${PHONE}`;
   const html = `<div style="font-family:system-ui,sans-serif;font-size:16px;line-height:1.5;color:#241f18;max-width:560px">
-${paragraphs.map(p => `<p>${escape(p).replace(/(https?:\/\/\S+)/g, '<a href="$1">$1</a>')}</p>`).join("\n")}
+${paragraphs.map(p => `<p>${escape(p).replace(/(https?:\/\/\S+)/g, '<a href="$1">$1</a>').replace(/\n/g, "<br>")}</p>`).join("\n")}
 <p style="color:#666">— ${ORG}<br>${PHONE}</p></div>`;
   return { text, html };
 }
@@ -94,6 +96,12 @@ export function paymentRequestEmail(input: { name: string; totalCents: number; d
       ? `This link is only for you and expires ${when(input.dueAt)} (Eastern). Unpaid reservations are released after that time. Booth fees are non-refundable.`
       : "This link is only for you. Please pay within the next 48 hours: if we have not received your payment by then, your spot may be released to another vendor. Booth fees are non-refundable.",
   ]) };
+}
+
+/** A payment reminder whose subject and wording staff edited on the roster page. */
+export function customPaymentReminderEmail(template: { subject: string; message: string }, values: ReminderValues): EmailContent {
+  const rendered = renderPaymentReminder(template, values);
+  return { subject: rendered.subject, ...wrap(rendered.paragraphs) };
 }
 
 function bookMoreLine(link: string | null | undefined): string[] {
