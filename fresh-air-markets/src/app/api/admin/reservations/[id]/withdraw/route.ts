@@ -50,6 +50,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
         ? "This booking needs a manager's look first (a payment may have arrived that could not be matched). Check it in Square, then reopen or refund it."
         : `This booking is already ${result.state.replace("_", " ")}.` }, { status: 409, headers });
   }
+  if (result.kind === "on_billing_plan") return NextResponse.json({ error: "This booking is being billed by a Square invoice. Cancel the invoice first, then withdraw it." }, { status: 409, headers });
   if (result.kind === "link_closing") return NextResponse.json({ error: "The payment window on this booking is closing right now. Try again in a few minutes. If this keeps happening, the payment request needs a manager's look in Square." }, { status: 409, headers });
   if (result.kind === "checkout_in_progress") return NextResponse.json({ error: "A payment request is being created for this booking right now. Try again in a minute." }, { status: 409, headers });
   if (result.kind === "cancellation_unproven") return NextResponse.json({ error: `Square could not confirm that this payment link was cancelled; the vendor may already have paid. Check order ${result.squareOrderId} in Square before trying again. Nothing was changed.` }, { status: 409, headers });

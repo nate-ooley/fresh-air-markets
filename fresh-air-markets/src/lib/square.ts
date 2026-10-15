@@ -1,8 +1,8 @@
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 
-const SQUARE_API_VERSION = "2026-08-19";
-const SQUARE_SANDBOX_API_BASE = "https://connect.squareupsandbox.com";
-const SQUARE_PRODUCTION_API_BASE = "https://connect.squareup.com";
+export const SQUARE_API_VERSION = "2026-08-19";
+export const SQUARE_SANDBOX_API_BASE = "https://connect.squareupsandbox.com";
+export const SQUARE_PRODUCTION_API_BASE = "https://connect.squareup.com";
 
 /** Server-side Square adapter. Call only after a durable reservation is approved.
  * Credentials are entered by the owner in the hosting environment, never a form.

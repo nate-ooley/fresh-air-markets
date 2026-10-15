@@ -4,6 +4,7 @@ import { type FormEvent, useCallback, useEffect, useRef, useState } from "react"
 import { useRouter } from "next/navigation";
 import { FRESH_AIR_SEASON_DATES } from "@/lib/fresh-air-season";
 import { FAME_VENDOR_CATEGORIES, checkVendorBooking } from "@/lib/vendor-booking-rules";
+import { MAX_INSTALLMENTS, MIN_INSTALLMENTS, planBilling, type Installment } from "@/lib/billing-plan";
 import {
   finalReservationRequest,
   isFinalReservationView,
@@ -94,6 +95,20 @@ async function attemptKey(material: string, attempts: Map<string, string>): Prom
   return key;
 }
 
+interface InvoiceInfo {
+  id: string; reservationId: string; plan: "full" | "monthly"; status: "creating" | "open" | "paid" | "cancelled" | "failed";
+  totalCents: number; paidCents: number; publicUrl: string | null; lastError: string | null; installments: Installment[]; installmentsPaid: number; adjustmentReason: string;
+}
+
+function invoiceList(value: unknown): InvoiceInfo[] {
+  const list = (value as { invoices?: unknown } | null)?.invoices;
+  return Array.isArray(list) ? list.filter((item): item is InvoiceInfo => Boolean(item) && typeof item.id === "string" && typeof item.reservationId === "string" && Array.isArray(item.installments)) : [];
+}
+
+const INVOICE_STATUS: Record<InvoiceInfo["status"], string> = {
+  creating: "Being sent", open: "Sent by Square, collecting", paid: "Paid in full", cancelled: "Cancelled", failed: "Not sent",
+};
+
 interface BookingRequestView { id: string; dates: string[]; booths: number; vendorNote: string; createdAt: string }
 
 function bookingRequestView(value: unknown): BookingRequestView | null {
@@ -135,7 +150,7 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
   const [paymentOrders, setPaymentOrders] = useState<Record<string, ReservationPaymentView>>({});
   const [invitations, setInvitations] = useState<Record<string, VendorInvitationView>>({});
   const [loading, setLoading] = useState(true);
-  const [busy, setBusy] = useState<"reserve" | "checkout" | "access" | "reopen" | "withdraw" | "change" | null>(null);
+  const [busy, setBusy] = useState<"reserve" | "checkout" | "access" | "reopen" | "withdraw" | "change" | "bill" | null>(null);
   const [loadError, setLoadError] = useState("");
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -149,6 +164,13 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
   const [changeDates, setChangeDates] = useState<string[]>([]);
   const [changeBooths, setChangeBooths] = useState("1");
   const [changeNote, setChangeNote] = useState("");
+  const [invoices, setInvoices] = useState<InvoiceInfo[]>([]);
+  const [billTarget, setBillTarget] = useState<string | null>(null);
+  const [billPlan, setBillPlan] = useState<"full" | "monthly">("full");
+  const [billCount, setBillCount] = useState("3");
+  const [billFirstDue, setBillFirstDue] = useState("");
+  const [billAmount, setBillAmount] = useState("");
+  const [billReason, setBillReason] = useState("");
   const [insuranceExpiresOn, setInsuranceExpiresOn] = useState<string | null>(null);
   const [bookingRequest, setBookingRequest] = useState<BookingRequestView | null>(null);
   const [declineNote, setDeclineNote] = useState("");
@@ -193,6 +215,11 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
           fullSeason: current.fullSeason && expiresOn >= LAST_MARKET_DATE,
         }));
       }
+      try {
+        const billed = await fetch(`/api/admin/applications/${encodeURIComponent(applicationId)}/invoices`, { headers: { Accept: "application/json" }, cache: "no-store", signal });
+        const body = await jsonBody(billed);
+        if (!signal?.aborted && revision === statusRead.current.revision) setInvoices(billed.ok ? invoiceList(body) : []);
+      } catch { /* billing is optional; the rest of the panel still works */ }
       try {
         const pending = await fetch(`/api/admin/applications/${encodeURIComponent(applicationId)}/booking-request`, { headers: { Accept: "application/json" }, cache: "no-store", signal });
         const body = reservationRecord(await jsonBody(pending));
@@ -456,6 +483,70 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
     }
   }
 
+  function startBilling(reservation: FinalReservationView) {
+    setBillTarget(reservation.id);
+    setBillPlan("full");
+    setBillCount("3");
+    setBillFirstDue(todayEastern());
+    setBillAmount((reservation.totalCents / 100).toFixed(2));
+    setBillReason("");
+    setChangeTarget(null); setWithdrawTarget(null); setError(""); setNotice("");
+  }
+
+  function billingRequest(reservation: FinalReservationView) {
+    const cents = Math.round(Number(billAmount) * 100);
+    return planBilling({
+      plan: billPlan, installments: Number(billCount), firstDueOn: billFirstDue,
+      totalCents: Number.isFinite(cents) ? cents : NaN, reason: billReason,
+      quotedCents: reservation.totalCents, today: todayEastern(),
+    });
+  }
+
+  async function sendInvoice(reservation: FinalReservationView) {
+    if (inFlight.current || statusRead.current.pending || loadError) return;
+    const planned = billingRequest(reservation);
+    if ("error" in planned) { setError(planned.error); return; }
+    const summary = planned.plan === "full"
+      ? `one payment of ${money(planned.totalCents)} due ${reservationDateLabel(planned.installments[0].dueOn)}`
+      : `${planned.installments.length} monthly payments totalling ${money(planned.totalCents)}, first due ${reservationDateLabel(planned.installments[0].dueOn)}`;
+    if (!window.confirm(`Square will email this vendor an invoice for ${summary}. Their current payment link stops working. Send it?`)) return;
+    inFlight.current = true;
+    setBusy("bill"); setError(""); setNotice("");
+    try {
+      const response = await fetch(`/api/admin/reservations/${encodeURIComponent(reservation.id)}/invoice`, {
+        method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json" },
+        body: JSON.stringify({ plan: planned.plan, installments: planned.installments.length, firstDueOn: planned.installments[0].dueOn, totalCents: planned.totalCents, reason: planned.reason }),
+      });
+      const payload = await jsonBody(response);
+      if (response.status === 401) { router.replace("/login"); return; }
+      inFlight.current = false;
+      if (!response.ok) { await load(); setError(reservationError(payload, "The invoice could not be sent.")); return; }
+      setBillTarget(null);
+      await load();
+      setNotice("Invoice sent. Square emailed the vendor and will send reminders; this page updates as payments arrive.");
+    } catch {
+      setError("The invoice could not be sent. Reload reservation status to see where it stands.");
+    } finally { inFlight.current = false; setBusy(null); }
+  }
+
+  async function cancelInvoice(invoice: InvoiceInfo) {
+    if (inFlight.current || statusRead.current.pending || loadError) return;
+    if (!window.confirm("Cancel this Square invoice? Square stops collecting and sending reminders. Payments already made stay recorded.")) return;
+    inFlight.current = true;
+    setBusy("bill"); setError(""); setNotice("");
+    try {
+      const response = await fetch(`/api/admin/invoices/${encodeURIComponent(invoice.id)}/cancel`, { method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json" }, body: "{}" });
+      const payload = await jsonBody(response);
+      if (response.status === 401) { router.replace("/login"); return; }
+      inFlight.current = false;
+      await load();
+      if (!response.ok) setError(reservationError(payload, "The invoice could not be cancelled."));
+      else setNotice("Invoice cancelled. You can send a new payment link or a new invoice from the booking card.");
+    } catch {
+      setError("The invoice could not be cancelled. Reload reservation status and try again.");
+    } finally { inFlight.current = false; setBusy(null); }
+  }
+
   async function confirmRequest(request: BookingRequestView) {
     if (inFlight.current || statusRead.current.pending || loadError) return;
     inFlight.current = true;
@@ -607,7 +698,7 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
                   </section>
                 )}
 
-                {reservation.paymentRequired && ["held", "payment_pending"].includes(reservation.state) && (
+                {reservation.paymentRequired && ["held", "payment_pending"].includes(reservation.state) && !invoices.some(item => item.reservationId === reservation.id && (item.status === "open" || item.status === "creating")) && (
                   <section className="mt-5 rounded-2xl border border-pine/15 bg-white/60 p-5">
                     <h4 className="font-semibold text-pine-deep">Payment request</h4>
                     <p className="mt-2 text-sm leading-relaxed text-ink/65">{deadlineEnforced
@@ -621,7 +712,7 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
                   </section>
                 )}
 
-                {canCreateAccess(reservation) && (
+                {canCreateAccess(reservation) && !invoices.some(item => item.reservationId === reservation.id && (item.status === "open" || item.status === "creating")) && (
                   <section className="mt-5 rounded-2xl border border-pine/15 bg-white/60 p-5">
                     <h4 className="font-semibold text-pine-deep">Email the payment link</h4>
                     <p className="mt-2 text-sm leading-relaxed text-ink/65">Emails the vendor their private reservation page with the total and their dates{deadlineEnforced ? " and the 48-hour deadline" : ", and asks them to pay within 48 hours"}. The link is only for this vendor; anyone who has it can open this reservation. Sending again issues a fresh link and revokes the old one.</p>
@@ -641,7 +732,75 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
                   </section>
                 )}
 
-                {CHANGEABLE_STATES.has(reservation.state) && reservation.paymentRequired && (() => {
+                {(() => {
+                  const invoice = invoices.find(item => item.reservationId === reservation.id) ?? null;
+                  const live = invoice && (invoice.status === "open" || invoice.status === "creating");
+                  const canBill = reservation.paymentRequired && (reservation.state === "held" || reservation.state === "payment_pending") && !live;
+                  if (!invoice && !canBill) return null;
+                  const billing = billTarget === reservation.id;
+                  const planned = billing ? billingRequest(reservation) : null;
+                  const amountCents = Math.round(Number(billAmount) * 100);
+                  return (
+                    <section className="mt-5 rounded-2xl border border-amber/40 bg-white/60 p-5">
+                      <h4 className="font-semibold text-pine-deep">Bill with a Square invoice</h4>
+                      {invoice && invoice.status !== "cancelled" && (
+                        <div className="mt-3 rounded-xl bg-parchment/70 p-4 text-sm">
+                          <p className="font-semibold text-pine-deep">{INVOICE_STATUS[invoice.status]} · {invoice.plan === "full" ? "one payment" : `${invoice.installments.length} monthly payments`}</p>
+                          <p className="mt-1 text-pine">Paid {money(invoice.paidCents)} of {money(invoice.totalCents)}{invoice.plan === "monthly" ? ` (${invoice.installmentsPaid} of ${invoice.installments.length} payments)` : ""}</p>
+                          {invoice.adjustmentReason && <p className="mt-1 text-xs text-ink/60">Amount changed from the booking price: {invoice.adjustmentReason}</p>}
+                          <ul className="mt-2 space-y-1 text-xs text-ink/70">
+                            {invoice.installments.map(item => <li key={item.seq}>{item.seq <= invoice.installmentsPaid ? "✓ " : ""}{money(item.amountCents)} due {reservationDateLabel(item.dueOn)}</li>)}
+                          </ul>
+                          {invoice.status === "failed" && invoice.lastError && <p className="mt-2 text-xs text-clay">{invoice.lastError}</p>}
+                          <div className="mt-3 flex flex-wrap gap-3">
+                            {invoice.publicUrl && <a href={invoice.publicUrl} target="_blank" rel="noreferrer" className="text-sm font-semibold text-pine underline underline-offset-4">Open the invoice in Square</a>}
+                            {live && <button type="button" disabled={disabled} onClick={() => void cancelInvoice(invoice)} className={QUIET_BUTTON}>Cancel invoice</button>}
+                          </div>
+                        </div>
+                      )}
+                      {canBill && !billing && <>
+                        <p className="mt-2 text-sm leading-relaxed text-ink/65">Have Square email the vendor an invoice instead of the payment link: one payment, or a monthly plan. Square sends reminders and this page shows each payment as it arrives.</p>
+                        <button type="button" disabled={disabled} onClick={() => startBilling(reservation)} className={`${QUIET_BUTTON} mt-4`}>Bill this vendor</button>
+                      </>}
+                      {canBill && billing && <div className="mt-4 space-y-3 text-sm">
+                        <div className="flex flex-wrap gap-4">
+                          <label className="flex items-center gap-2"><input type="radio" checked={billPlan === "full"} disabled={disabled} onChange={() => setBillPlan("full")} /> Pay in full</label>
+                          <label className="flex items-center gap-2"><input type="radio" checked={billPlan === "monthly"} disabled={disabled} onChange={() => setBillPlan("monthly")} /> Monthly plan</label>
+                        </div>
+                        <div className="flex flex-wrap gap-4">
+                          {billPlan === "monthly" && <label className="font-semibold text-pine-deep">Payments
+                            <select value={billCount} disabled={disabled} onChange={event => setBillCount(event.target.value)} className={`${FIELD} w-24`}>
+                              {Array.from({ length: MAX_INSTALLMENTS - MIN_INSTALLMENTS + 1 }, (_, i) => i + MIN_INSTALLMENTS).map(n => <option key={n} value={n}>{n}</option>)}
+                            </select>
+                          </label>}
+                          <label className="font-semibold text-pine-deep">{billPlan === "monthly" ? "First payment due" : "Due"}
+                            <input type="date" value={billFirstDue} min={todayEastern()} disabled={disabled} onChange={event => setBillFirstDue(event.target.value)} className={`${FIELD} w-44`} />
+                          </label>
+                          <label className="font-semibold text-pine-deep">Amount ($)
+                            <input type="number" min={1} step="0.01" value={billAmount} disabled={disabled} onChange={event => setBillAmount(event.target.value)} className={`${FIELD} w-32`} />
+                          </label>
+                        </div>
+                        {Number.isFinite(amountCents) && amountCents !== reservation.totalCents && (
+                          <label className="block font-semibold text-pine-deep">Why is the amount different from {money(reservation.totalCents)}? (kept on record, not shown to the vendor)
+                            <input type="text" value={billReason} maxLength={300} disabled={disabled} onChange={event => setBillReason(event.target.value)} placeholder="Example: 10% discount agreed with Thomas" className={FIELD} />
+                          </label>
+                        )}
+                        {planned && ("error" in planned
+                          ? <p className="text-xs text-clay">{planned.error}</p>
+                          : <div className="rounded-xl bg-parchment/70 p-3">
+                            <p className="font-semibold text-pine-deep">Square will send:</p>
+                            <ul className="mt-1 space-y-1 text-ink/75">{planned.installments.map(item => <li key={item.seq}>{money(item.amountCents)} due {reservationDateLabel(item.dueOn)}</li>)}</ul>
+                          </div>)}
+                        <div className="flex flex-wrap gap-3">
+                          <button type="button" disabled={disabled || !planned || "error" in planned} onClick={() => void sendInvoice(reservation)} className={BUTTON}>{busy === "bill" ? "Sending…" : "Send invoice"}</button>
+                          <button type="button" disabled={disabled} onClick={() => setBillTarget(null)} className={QUIET_BUTTON}>Cancel</button>
+                        </div>
+                      </div>}
+                    </section>
+                  );
+                })()}
+
+                {CHANGEABLE_STATES.has(reservation.state) && reservation.paymentRequired && !invoices.some(item => item.reservationId === reservation.id && (item.status === "open" || item.status === "creating")) && (() => {
                   const changing = changeTarget === reservation.id;
                   const otherHeld = new Set(liveReservations.filter(item => item.id !== reservation.id).flatMap(item => item.finalDates));
                   const today = todayEastern();
@@ -687,7 +846,7 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
                   );
                 })()}
 
-                {WITHDRAWABLE_STATES.has(reservation.state) && (
+                {WITHDRAWABLE_STATES.has(reservation.state) && !invoices.some(item => item.reservationId === reservation.id && (item.status === "open" || item.status === "creating")) && (
                   <section className="mt-5 rounded-2xl border border-pine/15 bg-white/60 p-5">
                     <h4 className="font-semibold text-pine-deep">Withdraw this booking</h4>
                     <p className="mt-2 text-sm leading-relaxed text-ink/65">Use this when the vendor no longer wants these dates or wants different ones. It cancels the payment link, releases the dates and emails the vendor. Their application, agreement and documents stay on file, so you can add new dates right after.</p>

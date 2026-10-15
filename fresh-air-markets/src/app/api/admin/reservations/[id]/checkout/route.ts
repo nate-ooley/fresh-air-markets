@@ -1,3 +1,4 @@
+import { hasOpenInvoice } from "@/lib/vendor-invoice-pg";
 import { NextRequest, NextResponse } from "next/server";
 import { getSessionAccountId } from "@/lib/auth";
 import { squarePaymentRuntimeConfig, squarePortalOrigin, verifySquareIdentity } from "@/lib/square";
@@ -84,6 +85,10 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
 
   if (setup.environment === "production" && process.env.FAME_MARKET_ACCOUNT_ID?.trim() !== marketId) {
     return NextResponse.json({ error: "Payment checkout is not configured for this market." }, { status: 403 });
+  }
+
+  if (await hasOpenInvoice(marketId, reservationId)) {
+    return NextResponse.json({ error: "This booking is being billed by a Square invoice. Cancel the invoice first to send a payment link instead." }, { status: 409 });
   }
 
   let identity;

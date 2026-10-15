@@ -5,6 +5,7 @@ import { freshAirFinalReservationConfig, reopenExpiredReservation } from "@/lib/
 import { notifyPaymentRequest } from "@/lib/notifications";
 import { cleanReminderTemplate } from "@/lib/payment-reminder-template";
 import { readObjectBody } from "@/lib/request-body";
+import { reservationsOnInvoice } from "@/lib/vendor-invoice-pg";
 import { squarePaymentRuntimeConfig, squarePortalOrigin, verifySquareIdentity } from "@/lib/square";
 import { dispatchSquareCheckout } from "@/lib/square-payment";
 import { postgresSquarePaymentCheckoutStore } from "@/lib/square-payment-pg";
@@ -27,7 +28,9 @@ interface Unpaid { id: string; state: string; total_cents: string | number; busi
 
 /** Every booking that still owes money: awaiting payment, held without a link, or lapsed. */
 async function unpaidBookings(marketId: string): Promise<Unpaid[]> {
-  return db()<Unpaid[]>`
+  // Square sends its own reminders for bookings billed by invoice.
+  const invoiced = await reservationsOnInvoice(marketId, db());
+  const rows = await db()<Unpaid[]>`
     SELECT r.id, r.state, r.total_cents,
       (SELECT e.snapshot->'snapshot'->>'businessName' FROM fame_application_events e
         WHERE e.application_id = r.application_id AND e.market_id = r.market_id ORDER BY e.created_at DESC, e.event_id DESC LIMIT 1) AS business,
@@ -41,6 +44,7 @@ async function unpaidBookings(marketId: string): Promise<Unpaid[]> {
     WHERE r.market_id = ${marketId} AND r.payment_required AND r.state IN ('held', 'payment_pending', 'expired')
       AND a.review_state = 'approved'
     ORDER BY r.created_at`;
+  return rows.filter(row => !invoiced.has(row.id));
 }
 
 /** Reserved Saturdays and booth count per booking, for the preview. */

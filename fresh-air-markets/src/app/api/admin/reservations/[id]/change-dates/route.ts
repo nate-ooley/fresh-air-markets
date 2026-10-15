@@ -76,6 +76,8 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   if (plan.kind === "not_changeable") {
     return NextResponse.json({ error: plan.state === "paid" || plan.state === "confirmed"
       ? "This booking is paid, so its dates can't be changed here yet. Refund it in Square first, or add a new booking for extra dates."
+      : plan.state === "on_billing_plan"
+        ? "This booking is being billed by a Square invoice. Cancel the invoice first, then change the dates."
       : plan.state === "manual_review"
         ? "This booking needs a manager's look in Square first (a payment may have arrived that could not be matched)."
         : `This booking is already ${plan.state.replace("_", " ")}.` }, { status: 409, headers });

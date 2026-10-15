@@ -1,4 +1,5 @@
 import postgres from "postgres";
+import { applyInvoicePayment } from "./vendor-invoice-pg";
 import { paymentDeadlineEnforced, type SquareEnvironment } from "./square";
 import {
   getSquarePaymentOrderForWebhook,
@@ -317,6 +318,17 @@ export async function persistSquarePaymentWebhook(
       orderId: event.payment.orderId,
     }, tx);
     if (!target) {
+      // Not a hosted checkout: it may be a payment on a staff-sent Square invoice.
+      const invoice = await applyInvoicePayment(tx, {
+        environment: config.environment, orderId: event.payment.orderId, paymentId: event.payment.id,
+        status: event.payment.status, amountCents: event.payment.amountCents, currency: event.payment.currency,
+      }, now);
+      if (invoice) {
+        await writeReceiptOutcome(tx, event, config.environment, {
+          paymentOrderId: null, disposition: invoice.disposition, reason: invoice.reason, now,
+        });
+        return { kind: invoice.disposition === "manual_review" ? "manual_review" : "ignored" };
+      }
       await writeReceiptOutcome(tx, event, config.environment, {
         paymentOrderId: null, disposition: "manual_review", reason: "payment_order_identity_mismatch", now,
       });

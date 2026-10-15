@@ -29,7 +29,16 @@ export type WithdrawReservationResult =
   | { kind: "link_closing" }
   | { kind: "checkout_in_progress" }
   | { kind: "cancellation_unproven"; squareOrderId: string }
-  | { kind: "square_unavailable" };
+  | { kind: "square_unavailable" }
+  | { kind: "on_billing_plan" };
+
+/** True while a Square invoice (one payment or a monthly plan) is being created or is open for this booking. */
+export async function hasLiveInvoice(tx: QuerySql, marketId: string, reservationId: string): Promise<boolean> {
+  const [row] = await tx<{ live: boolean }[]>`
+    SELECT EXISTS (SELECT 1 FROM fame_invoices WHERE market_id = ${marketId} AND reservation_id = ${reservationId}
+      AND status IN ('creating', 'open')) AS live`;
+  return Boolean(row?.live);
+}
 
 export interface WithdrawReservationInput {
   marketId: string;
@@ -96,6 +105,8 @@ export async function withdrawReservation(
     if (!(WITHDRAWABLE_STATES as readonly string[]).includes(reservation.state)) {
       return { kind: "not_withdrawable", state: reservation.state } as const;
     }
+    // Square is collecting on an invoice; cancel the plan first so no payment lands on released dates.
+    if (await hasLiveInvoice(tx, input.marketId, reservation.id)) return { kind: "on_billing_plan" } as const;
     const orders = await liveOrders(tx, input.marketId, reservation.id);
     // The expiry worker is deleting this link right now; let it finish.
     if (orders.some(order => order.status === "expiry_pending")) return { kind: "link_closing" } as const;
@@ -219,5 +230,73 @@ export async function withdrawApplication(
          ${randomUUID()}, ${createHash("sha256").update(JSON.stringify([application.id, "withdraw", note])).digest("hex")},
          ${application.review_state}, 'withdrawn', ${note}, NULL, ${now})`;
     return { kind: "withdrawn", applicationId: application.id, fromState: application.review_state } as const;
+  });
+}
+
+export type RetireCheckoutResult =
+  | { kind: "retired"; linksCancelled: number }
+  | { kind: "not_found" }
+  | { kind: "not_billable"; state: string }
+  | { kind: "link_closing" }
+  | { kind: "checkout_in_progress" }
+  | { kind: "cancellation_unproven"; squareOrderId: string }
+  | { kind: "square_unavailable" };
+
+/** Bookings that can be moved onto a Square invoice: still owe and nothing has been paid. */
+export const BILLABLE_STATES = ["held", "payment_pending"] as const;
+
+/**
+ * Before a booking is billed by invoice, its hosted payment link and the
+ * vendor's private page links are retired so the vendor cannot pay twice.
+ * Same two-pass shape as a withdrawal (Square proof first, then writes), but
+ * the booking keeps its dates and waits on the invoice.
+ */
+export async function retireCheckoutLinks(input: {
+  marketId: string; reservationId: string; now?: Date;
+  cancelLink?: WithdrawReservationInput["cancelLink"];
+}, sql: Sql = configuredClient()): Promise<RetireCheckoutResult> {
+  const now = input.now ?? new Date();
+  const plan = await sql.begin(async tx => {
+    const reservation = await lockReservation(tx, input.marketId, input.reservationId);
+    if (!reservation) return { kind: "not_found" } as const;
+    if (!(BILLABLE_STATES as readonly string[]).includes(reservation.state)) return { kind: "not_billable", state: reservation.state } as const;
+    const orders = await liveOrders(tx, input.marketId, reservation.id);
+    if (orders.some(order => order.status === "expiry_pending")) return { kind: "link_closing" } as const;
+    if (orders.some(order => order.status === "processing_checkout")) return { kind: "checkout_in_progress" } as const;
+    return { kind: "plan", orders } as const;
+  });
+  if (plan.kind !== "plan") return plan;
+  const links = plan.orders.filter(order => order.square_payment_link_id && order.square_order_id);
+  if (links.length && !input.cancelLink) return { kind: "square_unavailable" };
+  for (const order of links) {
+    let proof: "cancelled" | "unproven";
+    try { proof = await input.cancelLink!({ paymentLinkId: order.square_payment_link_id!, squareOrderId: order.square_order_id! }); }
+    catch { return { kind: "square_unavailable" }; }
+    if (proof !== "cancelled") return { kind: "cancellation_unproven", squareOrderId: order.square_order_id! };
+  }
+  return sql.begin(async tx => {
+    const reservation = await lockReservation(tx, input.marketId, input.reservationId);
+    if (!reservation) return { kind: "not_found" } as const;
+    if (!(BILLABLE_STATES as readonly string[]).includes(reservation.state)) return { kind: "not_billable", state: reservation.state } as const;
+    const cancelled = await tx<{ id: string }[]>`
+      UPDATE fame_payment_orders
+      SET status = 'cancelled', locked_until = NULL, lease_token = NULL,
+          last_error_code = 'superseded_by_invoice', updated_at = ${now}
+      WHERE reservation_id = ${reservation.id} AND market_id = ${input.marketId}
+        AND status IN ${tx([...LIVE_ORDER_STATES])}
+      RETURNING id`;
+    await tx`
+      UPDATE fame_reservations SET state = 'payment_pending', payment_due_at = NULL, updated_at = ${now}
+      WHERE id = ${reservation.id} AND market_id = ${input.marketId}`;
+    await tx`UPDATE fame_vendor_payment_sessions SET revoked_at = ${now}
+      WHERE market_id = ${input.marketId} AND reservation_id = ${reservation.id} AND revoked_at IS NULL`;
+    await tx`UPDATE fame_vendor_payment_invitations SET revoked_at = ${now}
+      WHERE market_id = ${input.marketId} AND reservation_id = ${reservation.id} AND revoked_at IS NULL`;
+    await tx`UPDATE fame_payment_email_outbox
+      SET state = 'cancelled', invitation_ciphertext = NULL, safe_error = 'payment_email_reservation_withdrawn',
+          lease_id = NULL, lease_expires_at = NULL, updated_at = ${now}
+      WHERE market_id = ${input.marketId} AND reservation_id = ${reservation.id}
+        AND state IN ('pending', 'preparing')`;
+    return { kind: "retired", linksCancelled: cancelled.length } as const;
   });
 }

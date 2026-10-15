@@ -6,7 +6,9 @@ const { randomUUID } = require('node:crypto');
 const postgres = require('postgres');
 const { reserveFinalApplication, getFinalApplicationReservation, reopenExpiredReservation, planDateChange } = require('../../.test-build/final-reservation-pg.js');
 const { claimSquarePaymentCheckout } = require('../../.test-build/square-payment-pg.js');
-const { withdrawReservation, withdrawApplication, applicationBookingSummary } = require('../../.test-build/reservation-withdraw-pg.js');
+const { withdrawReservation, withdrawApplication, applicationBookingSummary, retireCheckoutLinks } = require('../../.test-build/reservation-withdraw-pg.js');
+const invoices = require('../../.test-build/vendor-invoice-pg.js');
+const { persistSquarePaymentWebhook } = require('../../.test-build/square-webhook-pg.js');
 
 // This suite creates and drops only a private schema inside the disposable CI DB.
 const url = new URL(process.env.DATABASE_TEST_URL || 'postgres://invalid/');
@@ -72,6 +74,8 @@ before(async () => {
       '028-payment-order-reissue-after-failure.sql',
       '029-vendor-bookings.sql',
       '030-vendor-booking-requests.sql',
+      '031-open-payment-links.sql',
+      '032-vendor-invoices.sql',
     ]) await migration.unsafe(fs.readFileSync(path.join(__dirname, '../../docs/migrations', file), 'utf8'));
   } finally {
     await migration.end();
@@ -552,4 +556,92 @@ test('changing dates refuses a Saturday held in the vendor\'s other booking, and
   const other = await withdrawReservation({ marketId, reservationId: fall.reservation.id, note: 'Vendor cancelled.' }, first);
   assert.equal(other.kind, 'withdrawn');
   assert.deepEqual(await plan(fall.reservation.id, ['2026-10-03'], 1, 2), { kind: 'not_changeable', state: 'cancelled' });
+});
+
+async function bookingWithLiveLink(dates = ['2026-10-03']) {
+  const { applicationId } = await seedEligibleApplication();
+  const made = await reserve(applicationId, selection({ selectedDates: dates }), first, 2);
+  const id = made.reservation.id;
+  const claim = await claimSquarePaymentCheckout({ marketId, reservationId: id, square: { environment: 'sandbox', merchantId: 'qa-merchant', locationId: 'qa-location' }, now, leaseSeconds: 60 }, first);
+  await first`UPDATE fame_payment_orders SET status = 'checkout_created', square_payment_link_id = ${'PL-' + id.slice(0, 8)}, square_order_id = ${'ORD-' + id.slice(0, 8)},
+    checkout_url = 'https://sandbox.square.link/u/qa', lease_token = NULL, locked_until = NULL, payment_due_at = ${now} WHERE id = ${claim.order.id}`;
+  await first`UPDATE fame_reservations SET state = 'payment_pending', payment_due_at = ${now} WHERE id = ${id}`;
+  return { applicationId, id, totalCents: made.reservation.totalCents };
+}
+const monthlyRequest = total => ({ plan: 'monthly', totalCents: total, reason: '', installments: [
+  { seq: 1, dueOn: '2026-11-01', amountCents: Math.floor(total / 3) }, { seq: 2, dueOn: '2026-12-01', amountCents: Math.floor(total / 3) },
+  { seq: 3, dueOn: '2027-01-01', amountCents: total - 2 * Math.floor(total / 3) }] });
+const payment = (orderId, paymentId, amountCents, status = 'COMPLETED') => ({
+  eventId: `evt-${paymentId}`, eventType: 'payment.updated', merchantId: 'qa-merchant', occurredAt: now.toISOString(), rawBodySha256: 'f'.repeat(64),
+  payment: { id: paymentId, status, locationId: 'qa-location', orderId, amountCents, currency: 'USD', createdAt: now.toISOString(), updatedAt: now.toISOString() },
+});
+
+test('billing by invoice: one live invoice per booking, old link retired with proof, installments recorded once, paid in full turns the booking paid', async () => {
+  const { applicationId, id, totalCents } = await bookingWithLiveLink();
+  const request = monthlyRequest(totalCents);
+  const started = await invoices.beginInvoice({ marketId, reservationId: id, request, environment: 'sandbox', actorAccountId: marketId, now }, first);
+  assert.equal(started.kind, 'started');
+  assert.deepEqual(started.invoice.installments.map(i => i.amountCents).reduce((a, b) => a + b, 0), totalCents);
+  // A second click while it is being created gets the same invoice back to finish.
+  const again = await invoices.beginInvoice({ marketId, reservationId: id, request, environment: 'sandbox', actorAccountId: marketId, now }, first);
+  assert.deepEqual([again.kind, again.invoice.id], ['resume', started.invoice.id]);
+  // While Square is collecting, the booking can't be withdrawn or have its dates changed.
+  assert.deepEqual(await withdrawReservation({ marketId, reservationId: id, note: 'x', now, cancelLink: async () => 'cancelled' }, first), { kind: 'on_billing_plan' });
+  assert.deepEqual(await planDateChange({ marketId, reservationId: id, dates: ['2026-10-10'], booths: 1, today: '2026-10-01', config: config(2) }, first), { kind: 'not_changeable', state: 'on_billing_plan' });
+  assert.equal(await invoices.hasOpenInvoice(marketId, id, first), true);
+  // Unproven Square cancel: nothing changes.
+  assert.deepEqual(await retireCheckoutLinks({ marketId, reservationId: id, now, cancelLink: async () => 'unproven' }, first), { kind: 'cancellation_unproven', squareOrderId: `ORD-${id.slice(0, 8)}` });
+  assert.equal((await first`SELECT status FROM fame_payment_orders WHERE reservation_id = ${id}`)[0].status, 'checkout_created');
+  // Proven: the hosted link is retired; the booking keeps its dates and waits on the invoice.
+  assert.deepEqual(await retireCheckoutLinks({ marketId, reservationId: id, now, cancelLink: async () => 'cancelled' }, first), { kind: 'retired', linksCancelled: 1 });
+  assert.deepEqual(rows(await first`SELECT status, last_error_code FROM fame_payment_orders WHERE reservation_id = ${id}`), [{ status: 'cancelled', last_error_code: 'superseded_by_invoice' }]);
+  assert.deepEqual(rows(await first`SELECT state, payment_due_at FROM fame_reservations WHERE id = ${id}`), [{ state: 'payment_pending', payment_due_at: null }]);
+  await invoices.recordInvoiceDraft({ invoiceId: started.invoice.id, customerId: 'CUST', orderId: 'INV-ORD-1', squareInvoiceId: 'INV-1', version: 0, now }, first);
+  await invoices.markInvoiceOpen({ invoiceId: started.invoice.id, version: 1, publicUrl: 'https://squareup.com/pay-invoice/1', now }, first);
+  assert.equal((await invoices.beginInvoice({ marketId, reservationId: id, request, environment: 'sandbox', actorAccountId: marketId, now }, first)).kind, 'already_open');
+
+  // Square reports the first installment through the normal payment webhook.
+  const [first1, first2, last] = request.installments;
+  assert.deepEqual(await persistSquarePaymentWebhook(payment('INV-ORD-1', 'PAY-1', first1.amountCents), { environment: 'sandbox', now }, first), { kind: 'ignored' });
+  assert.deepEqual(rows(await first`SELECT disposition, manual_review_reason FROM fame_square_webhook_events WHERE payment_id = 'PAY-1'`), [{ disposition: 'paid', manual_review_reason: 'invoice_installment_paid' }]);
+  let listed = await invoices.listInvoicesForApplication(marketId, applicationId, first);
+  assert.deepEqual([listed[0].status, listed[0].paidCents, listed[0].installmentsPaid], ['open', first1.amountCents, 1]);
+  assert.equal(listed[0].squareOrderId, undefined, 'Square ids stay server-side');
+  // The same payment reported again (new event) is recorded once.
+  await first.begin(async tx => {
+    assert.deepEqual(await invoices.applyInvoicePayment(tx, { environment: 'sandbox', orderId: 'INV-ORD-1', paymentId: 'PAY-1', status: 'COMPLETED', amountCents: first1.amountCents, currency: 'USD' }, now),
+      { disposition: 'ignored', reason: 'invoice_payment_already_recorded', invoicePaid: false });
+    assert.deepEqual(await invoices.applyInvoicePayment(tx, { environment: 'sandbox', orderId: 'INV-ORD-1', paymentId: 'PAY-X', status: 'APPROVED', amountCents: 1, currency: 'USD' }, now),
+      { disposition: 'ignored', reason: 'invoice_payment_not_completed', invoicePaid: false });
+    assert.equal(await invoices.applyInvoicePayment(tx, { environment: 'sandbox', orderId: 'SOMEONE-ELSE', paymentId: 'PAY-Y', status: 'COMPLETED', amountCents: 1, currency: 'USD' }, now), null);
+  });
+  await persistSquarePaymentWebhook(payment('INV-ORD-1', 'PAY-2', first2.amountCents), { environment: 'sandbox', now }, first);
+  assert.equal((await first`SELECT state FROM fame_reservations WHERE id = ${id}`)[0].state, 'payment_pending');
+  await persistSquarePaymentWebhook(payment('INV-ORD-1', 'PAY-3', last.amountCents), { environment: 'sandbox', now }, first);
+  listed = await invoices.listInvoicesForApplication(marketId, applicationId, first);
+  assert.deepEqual([listed[0].status, listed[0].paidCents, listed[0].installmentsPaid], ['paid', totalCents, 3]);
+  assert.equal((await first`SELECT state FROM fame_reservations WHERE id = ${id}`)[0].state, 'paid');
+  assert.equal(await invoices.hasOpenInvoice(marketId, id, first), false);
+});
+
+test('only unpaid bookings can be billed; a cancelled or failed invoice frees the booking for a new one', async () => {
+  const { id, totalCents } = await bookingWithLiveLink();
+  const request = { plan: 'full', totalCents: totalCents - 500, reason: 'Discount', installments: [{ seq: 1, dueOn: '2026-11-01', amountCents: totalCents - 500 }] };
+  const started = await invoices.beginInvoice({ marketId, reservationId: id, request, environment: 'sandbox', actorAccountId: marketId, now }, first);
+  assert.equal(started.invoice.adjustmentReason, 'Discount');
+  assert.equal(started.invoice.quotedCents, totalCents);
+  await invoices.markInvoiceFailed({ invoiceId: started.invoice.id, error: 'Square said no' }, first);
+  const second = await invoices.beginInvoice({ marketId, reservationId: id, request, environment: 'sandbox', actorAccountId: marketId, now }, first);
+  assert.equal(second.kind, 'started');
+  assert.equal(await invoices.markInvoiceCancelled({ marketId, invoiceId: second.invoice.id }, first), true);
+  assert.equal(await invoices.markInvoiceCancelled({ marketId, invoiceId: second.invoice.id }, first), false);
+  // A paid or lapsed booking can't be billed.
+  await first`UPDATE fame_reservations SET state = 'paid' WHERE id = ${id}`;
+  assert.deepEqual(await invoices.beginInvoice({ marketId, reservationId: id, request, environment: 'sandbox', actorAccountId: marketId, now }, first), { kind: 'not_billable', state: 'paid' });
+  await first`UPDATE fame_reservations SET state = 'expired' WHERE id = ${id}`;
+  assert.deepEqual(await invoices.beginInvoice({ marketId, reservationId: id, request, environment: 'sandbox', actorAccountId: marketId, now }, first), { kind: 'not_billable', state: 'expired' });
+  assert.deepEqual(await invoices.beginInvoice({ marketId, reservationId: randomUUID(), request, environment: 'sandbox', actorAccountId: marketId, now }, first), { kind: 'not_found' });
+  // The database itself refuses a changed amount without a reason.
+  await assert.rejects(first`INSERT INTO fame_invoices (id, market_id, reservation_id, square_environment, plan, total_cents, quoted_cents, status, created_by_account_id)
+    VALUES (${randomUUID()}, ${marketId}, ${id}, 'sandbox', 'full', 1000, 4000, 'failed', ${marketId})`);
 });

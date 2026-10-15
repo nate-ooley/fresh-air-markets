@@ -99,7 +99,12 @@ function renderPanel(options = {}) {
   const states = [
     { ...form, ...options.form }, options.reservation ? [options.reservation] : [],
     options.order && options.reservation ? { [options.reservation.id]: options.order } : {}, {},
-    false, null, '', '', '', [], options.replaceConfirmed ? (options.reservation?.id ?? null) : null, '', false, '', null, null, null, '', false,
+    false, null, '', '', '', [], options.replaceConfirmed ? (options.reservation?.id ?? null) : null, '', false, '', null,
+    // change dates: target, dates, booths, note
+    null, [], '1', '',
+    // billing: invoices, target, plan, count, first due, amount, reason
+    options.invoices ?? [], null, 'full', '3', '', '', '',
+    null, null, '', false,
   ];
   let index = 0;
   const updates = [];
