@@ -414,7 +414,9 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
 
   function startChange(reservation: FinalReservationView) {
     setChangeTarget(reservation.id);
-    setChangeDates([...reservation.finalDates].sort());
+    // Saturdays that already happened can't be rebooked; start from the ones still ahead.
+    const today = todayEastern();
+    setChangeDates(reservation.finalDates.filter(date => date >= today).sort());
     setChangeBooths(String(reservation.finalBoothQuantity));
     setChangeNote("");
     setWithdrawTarget(null);
@@ -651,6 +653,7 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
                       {!changing && <button type="button" disabled={disabled} onClick={() => startChange(reservation)} className={`${QUIET_BUTTON} mt-4`}>Change dates</button>}
                       {changing && <div className="mt-4">
                         <p className="text-sm font-semibold text-pine-deep">New Saturdays ({changeDates.length} picked)</p>
+                        {reservation.finalDates.some(date => date < today) && <p className="mt-1 text-xs text-clay">{reservation.finalDates.filter(date => date < today).map(reservationDateLabel).join(", ")} already happened and won't be on the new booking or its bill.</p>}
                         <div className="mt-2 grid max-h-64 grid-cols-2 gap-x-4 gap-y-1 overflow-y-auto rounded-xl border border-pine/15 bg-white p-3 text-sm sm:grid-cols-3">
                           {FRESH_AIR_SEASON_DATES.map(date => {
                             const past = date < today;
@@ -659,7 +662,7 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
                             const blocked = past || taken || noInsurance;
                             return (
                               <label key={date} className={`flex items-center gap-2 py-1 ${blocked ? "text-ink/35" : "text-ink/80"}`}>
-                                <input type="checkbox" disabled={disabled || blocked} checked={changeDates.includes(date)}
+                                <input type="checkbox" disabled={disabled || blocked} checked={!blocked && changeDates.includes(date)}
                                   onChange={event => setChangeDates(current => event.target.checked ? [...current, date].sort() : current.filter(d => d !== date))} />
                                 {reservationDateLabel(date)}{past ? " (past)" : taken ? " (other booking)" : noInsurance ? " (after insurance)" : ""}
                               </label>
