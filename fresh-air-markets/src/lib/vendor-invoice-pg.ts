@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import postgres from "postgres";
 import type { BillingRequest, Installment } from "./billing-plan";
+import { invoicesReady } from "./invoice-table";
 import { BILLABLE_STATES } from "./reservation-withdraw-pg";
 
 type Sql = ReturnType<typeof postgres>;
@@ -104,8 +105,9 @@ export async function getInvoice(marketId: string, invoiceId: string, sql: Query
   return toRecord(row, (await readInstallments(sql, [row.id])).get(row.id) ?? []);
 }
 
-/** Every invoice for every booking of one application, newest first. */
-export async function listInvoicesForApplication(marketId: string, applicationId: string, sql: QuerySql = configuredClient()): Promise<InvoiceView[]> {
+/** Every invoice for every booking of one application, newest first; null until billing's database update is applied. */
+export async function listInvoicesForApplication(marketId: string, applicationId: string, sql: QuerySql = configuredClient()): Promise<InvoiceView[] | null> {
+  if (!await invoicesReady(sql)) return null;
   const rows = await sql.unsafe<InvoiceRow[]>(`
     SELECT ${SELECT_INVOICE.split(",").map(c => `i.${c.trim()}`).join(", ")} FROM fame_invoices i
     JOIN fame_reservations r ON r.id = i.reservation_id AND r.market_id = i.market_id
@@ -117,6 +119,7 @@ export async function listInvoicesForApplication(marketId: string, applicationId
 
 /** Bookings with a live invoice, so payment reminders can leave them to Square. */
 export async function reservationsOnInvoice(marketId: string, sql: QuerySql = configuredClient()): Promise<Set<string>> {
+  if (!await invoicesReady(sql)) return new Set();
   const rows = await sql<{ reservation_id: string }[]>`
     SELECT reservation_id FROM fame_invoices WHERE market_id = ${marketId} AND status IN ('creating', 'open')`;
   return new Set(rows.map(row => row.reservation_id));
@@ -132,7 +135,8 @@ export type BeginInvoiceResult =
   | { kind: "resume"; invoice: InvoiceRecord; target: BillingTarget }
   | { kind: "not_found" }
   | { kind: "not_billable"; state: string }
-  | { kind: "already_open"; invoice: InvoiceRecord };
+  | { kind: "already_open"; invoice: InvoiceRecord }
+  | { kind: "unavailable" };
 
 /**
  * Claims the booking for an invoice. A second click while one is being
@@ -142,6 +146,7 @@ export async function beginInvoice(input: {
   marketId: string; reservationId: string; request: BillingRequest; environment: "sandbox" | "production"; actorAccountId: string; now?: Date;
 }, sql: Sql = configuredClient()): Promise<BeginInvoiceResult> {
   const now = input.now ?? new Date();
+  if (!await invoicesReady(sql)) return { kind: "unavailable" };
   return sql.begin(async tx => {
     const [reservation] = await tx<{ id: string; application_id: string | null; state: string; payment_required: boolean; total_cents: string | number; final_dates: unknown; final_booth_quantity: number; checkout_description: string }[]>`
       SELECT id, application_id, state, payment_required, total_cents, final_dates, final_booth_quantity, checkout_description
@@ -214,6 +219,7 @@ export interface InvoicePaymentEvent {
 export async function applyInvoicePayment(tx: QuerySql, event: InvoicePaymentEvent, now: Date): Promise<
   null | { disposition: "paid" | "ignored" | "manual_review"; reason: string; invoicePaid: boolean }
 > {
+  if (!await invoicesReady(tx)) return null;
   const [invoice] = await tx<{ id: string; market_id: string; reservation_id: string; status: string; total_cents: string | number }[]>`
     SELECT id, market_id, reservation_id, status, total_cents FROM fame_invoices
     WHERE square_environment = ${event.environment} AND square_order_id = ${event.orderId} FOR UPDATE`;

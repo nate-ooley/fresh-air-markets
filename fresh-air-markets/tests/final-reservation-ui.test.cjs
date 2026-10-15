@@ -103,7 +103,7 @@ function renderPanel(options = {}) {
     // change dates: target, dates, booths, note
     null, [], '1', '',
     // billing: invoices, target, plan, count, first due, amount, reason
-    options.invoices ?? [], null, 'full', '3', '', '', '',
+    options.invoices ?? [], false, null, 'full', '3', '', '', '',
     null, null, '', false,
   ];
   let index = 0;

@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import postgres from "postgres";
+import { invoicesReady } from "./invoice-table";
 
 type Sql = ReturnType<typeof postgres>;
 type QuerySql = Sql | postgres.TransactionSql;
@@ -34,6 +35,7 @@ export type WithdrawReservationResult =
 
 /** True while a Square invoice (one payment or a monthly plan) is being created or is open for this booking. */
 export async function hasLiveInvoice(tx: QuerySql, marketId: string, reservationId: string): Promise<boolean> {
+  if (!await invoicesReady(tx)) return false;
   const [row] = await tx<{ live: boolean }[]>`
     SELECT EXISTS (SELECT 1 FROM fame_invoices WHERE market_id = ${marketId} AND reservation_id = ${reservationId}
       AND status IN ('creating', 'open')) AS live`;

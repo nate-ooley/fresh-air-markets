@@ -62,6 +62,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   let begun;
   try { begun = await beginInvoice({ marketId, reservationId: id, request: request_, environment: square.environment, actorAccountId: marketId }); }
   catch { return NextResponse.json({ error: "Billing is unavailable right now. Nothing was sent; try again." }, { status: 503, headers }); }
+  if (begun.kind === "unavailable") return NextResponse.json({ error: "Billing by invoice isn't switched on yet (its database update hasn't been applied). Nothing was sent." }, { status: 503, headers });
   if (begun.kind === "not_found") return NextResponse.json({ error: "Reservation not found." }, { status: 404, headers });
   if (begun.kind === "already_open") return NextResponse.json({ error: "This booking already has an open Square invoice. Cancel it first to bill differently.", invoice: invoiceView(begun.invoice) }, { status: 409, headers });
   if (begun.kind === "not_billable") {

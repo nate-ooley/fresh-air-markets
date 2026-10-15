@@ -13,6 +13,9 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
   if ("error" in gated) return gated.error;
   const { id } = await params;
   if (!validFinalReservationApplicationId(id)) return NextResponse.json({ error: "Invalid application ID." }, { status: 400, headers });
-  try { return NextResponse.json({ invoices: await listInvoicesForApplication(gated.marketId, id) }, { headers }); }
+  try {
+    const invoices = await listInvoicesForApplication(gated.marketId, id);
+    return NextResponse.json({ invoices: invoices ?? [], available: invoices !== null }, { headers });
+  }
   catch { return NextResponse.json({ error: "Billing is unavailable right now." }, { status: 503, headers }); }
 }

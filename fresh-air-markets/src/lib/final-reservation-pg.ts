@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import postgres from "postgres";
+import { invoicesReady } from "./invoice-table";
 import { FRESH_AIR_SEASON_DATES } from "./fresh-air-season";
 import { DEMO_MARKET_ID } from "./seed";
 import { checkVendorBooking } from "./vendor-booking-rules";
@@ -649,7 +650,7 @@ export async function planDateChange(input: {
   // An earlier "Change dates" withdrew this booking and then stopped; let the retry finish it.
   const resuming = row.state === "cancelled" && Boolean(row.withdrawal_note?.startsWith(DATE_CHANGE_NOTE_PREFIX));
   if (!resuming && !(DATE_CHANGEABLE_STATES as readonly string[]).includes(row.state)) return { kind: "not_changeable", state: row.state };
-  const [invoice] = await sql<{ live: boolean }[]>`SELECT EXISTS (SELECT 1 FROM fame_invoices WHERE market_id = ${input.marketId}
+  const [invoice] = !await invoicesReady(sql) ? [] : await sql<{ live: boolean }[]>`SELECT EXISTS (SELECT 1 FROM fame_invoices WHERE market_id = ${input.marketId}
     AND reservation_id = ${input.reservationId} AND status IN ('creating', 'open')) AS live`;
   if (invoice?.live) return { kind: "not_changeable", state: "on_billing_plan" };
   const currentDates = asFinalDates(row.final_dates);

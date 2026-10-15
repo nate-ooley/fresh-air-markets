@@ -165,6 +165,7 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
   const [changeBooths, setChangeBooths] = useState("1");
   const [changeNote, setChangeNote] = useState("");
   const [invoices, setInvoices] = useState<InvoiceInfo[]>([]);
+  const [billingAvailable, setBillingAvailable] = useState(false);
   const [billTarget, setBillTarget] = useState<string | null>(null);
   const [billPlan, setBillPlan] = useState<"full" | "monthly">("full");
   const [billCount, setBillCount] = useState("3");
@@ -218,7 +219,10 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
       try {
         const billed = await fetch(`/api/admin/applications/${encodeURIComponent(applicationId)}/invoices`, { headers: { Accept: "application/json" }, cache: "no-store", signal });
         const body = await jsonBody(billed);
-        if (!signal?.aborted && revision === statusRead.current.revision) setInvoices(billed.ok ? invoiceList(body) : []);
+        if (!signal?.aborted && revision === statusRead.current.revision) {
+          setInvoices(billed.ok ? invoiceList(body) : []);
+          setBillingAvailable(billed.ok && (body as { available?: unknown } | null)?.available === true);
+        }
       } catch { /* billing is optional; the rest of the panel still works */ }
       try {
         const pending = await fetch(`/api/admin/applications/${encodeURIComponent(applicationId)}/booking-request`, { headers: { Accept: "application/json" }, cache: "no-store", signal });
@@ -735,7 +739,7 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
                 {(() => {
                   const invoice = invoices.find(item => item.reservationId === reservation.id) ?? null;
                   const live = invoice && (invoice.status === "open" || invoice.status === "creating");
-                  const canBill = reservation.paymentRequired && (reservation.state === "held" || reservation.state === "payment_pending") && !live;
+                  const canBill = billingAvailable && reservation.paymentRequired && (reservation.state === "held" || reservation.state === "payment_pending") && !live;
                   if (!invoice && !canBill) return null;
                   const billing = billTarget === reservation.id;
                   const planned = billing ? billingRequest(reservation) : null;
