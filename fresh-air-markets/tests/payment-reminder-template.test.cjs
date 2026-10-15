@@ -35,3 +35,12 @@ test('the sent email escapes staff text and links the payment link', () => {
   assert.match(email.html, /<a href="https:\/\/freshairmarketsandevents\.com\/vendor\/payment#token=abc">/);
   assert.match(email.text, /— Fresh Air Markets & Events/);
 });
+
+test('the dates-changed email lists old and new dates, total and the link once', () => {
+  const email = templates.bookingDatesChangedEmail({ name: 'Cristy', oldDates: ['2026-11-07'], newDates: ['2026-10-24', '2026-10-31'], booths: 1, totalCents: 8000, link: 'https://freshairmarketsandevents.com/vendor/payment#token=abc', note: 'As we discussed.' });
+  assert.match(email.subject, /dates have changed.*\$80\.00/);
+  assert.match(email.text, /new dates are Saturday, October 24, 2026, Saturday, October 31, 2026 \(1 booth\)\. Total due: \$80\.00/);
+  assert.match(email.text, /previous dates \(Saturday, November 7, 2026\) are released/);
+  assert.match(email.text, /As we discussed\./);
+  assert.equal(email.text.split('token=abc').length, 2);
+});

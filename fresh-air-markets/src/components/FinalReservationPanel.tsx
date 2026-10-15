@@ -3,7 +3,7 @@
 import { type FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { FRESH_AIR_SEASON_DATES } from "@/lib/fresh-air-season";
-import { FAME_VENDOR_CATEGORIES } from "@/lib/vendor-booking-rules";
+import { FAME_VENDOR_CATEGORIES, checkVendorBooking } from "@/lib/vendor-booking-rules";
 import {
   finalReservationRequest,
   isFinalReservationView,
@@ -40,6 +40,26 @@ const LAST_MARKET_DATE = FRESH_AIR_SEASON_DATES[FRESH_AIR_SEASON_DATES.length - 
 const LIVE_STATES = new Set<FinalReservationView["state"]>(["held", "payment_pending", "paid", "confirmed", "manual_review"]);
 /** Bookings a manager may withdraw (nothing paid yet). */
 const WITHDRAWABLE_STATES = new Set<FinalReservationView["state"]>(["held", "payment_pending", "expired", "manual_review"]);
+/** Bookings whose Saturdays a manager may change in one step (nothing paid yet). */
+const CHANGEABLE_STATES = new Set<FinalReservationView["state"]>(["held", "payment_pending", "expired"]);
+
+/** Price for a set of Saturdays, using the same rule the server charges ($40, $35 for 4+ in a row, $30 full season). */
+function previewTotal(dates: string[], booths: number): number | null {
+  if (!dates.length || !Number.isSafeInteger(booths) || booths < 1) return null;
+  const fullSeason = FRESH_AIR_SEASON_DATES.every(date => dates.includes(date));
+  try {
+    const quote = checkVendorBooking(
+      { dates: [...FRESH_AIR_SEASON_DATES], boothCapacity: 1000 },
+      { applicantType: "Vendor", vendorCategory: FAME_VENDOR_CATEGORIES[0], selectedDates: fullSeason ? [] : [...dates].sort(), fullSeason, boothsPerMarket: booths },
+      FRESH_AIR_SEASON_DATES.map(date => ({ date, booths: 0, foodTrucks: 0, nonprofits: 0 })),
+    );
+    return quote.totalCents;
+  } catch { return null; }
+}
+
+function todayEastern(): string {
+  return new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" });
+}
 
 async function jsonBody(response: Response): Promise<unknown> {
   try { return await response.json(); } catch { return null; }
@@ -115,7 +135,7 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
   const [paymentOrders, setPaymentOrders] = useState<Record<string, ReservationPaymentView>>({});
   const [invitations, setInvitations] = useState<Record<string, VendorInvitationView>>({});
   const [loading, setLoading] = useState(true);
-  const [busy, setBusy] = useState<"reserve" | "checkout" | "access" | "reopen" | "withdraw" | null>(null);
+  const [busy, setBusy] = useState<"reserve" | "checkout" | "access" | "reopen" | "withdraw" | "change" | null>(null);
   const [loadError, setLoadError] = useState("");
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -125,6 +145,10 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
   const [addingDates, setAddingDates] = useState(false);
   const [withdrawNote, setWithdrawNote] = useState("");
   const [withdrawTarget, setWithdrawTarget] = useState<string | null>(null);
+  const [changeTarget, setChangeTarget] = useState<string | null>(null);
+  const [changeDates, setChangeDates] = useState<string[]>([]);
+  const [changeBooths, setChangeBooths] = useState("1");
+  const [changeNote, setChangeNote] = useState("");
   const [insuranceExpiresOn, setInsuranceExpiresOn] = useState<string | null>(null);
   const [bookingRequest, setBookingRequest] = useState<BookingRequestView | null>(null);
   const [declineNote, setDeclineNote] = useState("");
@@ -388,6 +412,48 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
     }
   }
 
+  function startChange(reservation: FinalReservationView) {
+    setChangeTarget(reservation.id);
+    setChangeDates([...reservation.finalDates].sort());
+    setChangeBooths(String(reservation.finalBoothQuantity));
+    setChangeNote("");
+    setWithdrawTarget(null);
+    setError(""); setNotice("");
+  }
+
+  async function changeBookingDates(reservation: FinalReservationView) {
+    const booths = Number(changeBooths);
+    if (inFlight.current || statusRead.current.pending || loadError || !CHANGEABLE_STATES.has(reservation.state) || !changeDates.length) return;
+    if (!Number.isSafeInteger(booths) || booths < 1 || booths > 10) { setError("Booths per Saturday must be between 1 and 10."); return; }
+    inFlight.current = true;
+    setBusy("change");
+    setError("");
+    setNotice("");
+    try {
+      const response = await fetch(`/api/admin/reservations/${encodeURIComponent(reservation.id)}/change-dates`, {
+        method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json" },
+        body: JSON.stringify({ dates: [...changeDates].sort(), booths, note: changeNote.trim() }),
+      });
+      const payload = await jsonBody(response);
+      if (response.status === 401) { router.replace("/login"); return; }
+      if (!response.ok && response.status !== 503) { setError(reservationError(payload, "The dates could not be changed.")); return; }
+      setChangeTarget(null);
+      const delivery = (payload as { vendorNotification?: unknown } | null)?.vendorNotification;
+      // Reload shows the withdrawn booking and the new one; it refuses to run while a write is in flight.
+      inFlight.current = false;
+      await load();
+      if (!response.ok) setError(reservationError(payload, "The new dates are booked, but the payment link could not be sent. Use the buttons on the new booking."));
+      else setNotice(delivery === "sent"
+        ? "Dates changed. The old payment link was cancelled and the vendor was emailed their new dates and payment link."
+        : "Dates changed and the old payment link was cancelled, but the email could not be sent. Use \"Email the payment link\" on the new booking.");
+    } catch {
+      setError("The dates could not be changed. Reload reservation status to see where it stands.");
+    } finally {
+      inFlight.current = false;
+      setBusy(null);
+    }
+  }
+
   async function confirmRequest(request: BookingRequestView) {
     if (inFlight.current || statusRead.current.pending || loadError) return;
     inFlight.current = true;
@@ -572,6 +638,51 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
                     </div>}
                   </section>
                 )}
+
+                {CHANGEABLE_STATES.has(reservation.state) && reservation.paymentRequired && (() => {
+                  const changing = changeTarget === reservation.id;
+                  const otherHeld = new Set(liveReservations.filter(item => item.id !== reservation.id).flatMap(item => item.finalDates));
+                  const today = todayEastern();
+                  const total = changing ? previewTotal(changeDates, Number(changeBooths)) : null;
+                  return (
+                    <section className="mt-5 rounded-2xl border border-pine/15 bg-white/60 p-5">
+                      <h4 className="font-semibold text-pine-deep">Change dates</h4>
+                      <p className="mt-2 text-sm leading-relaxed text-ink/65">Move this unpaid booking to other Saturdays in one step. The old payment link is cancelled and the vendor gets one email with their new dates, new total and a new payment link.</p>
+                      {!changing && <button type="button" disabled={disabled} onClick={() => startChange(reservation)} className={`${QUIET_BUTTON} mt-4`}>Change dates</button>}
+                      {changing && <div className="mt-4">
+                        <p className="text-sm font-semibold text-pine-deep">New Saturdays ({changeDates.length} picked)</p>
+                        <div className="mt-2 grid max-h-64 grid-cols-2 gap-x-4 gap-y-1 overflow-y-auto rounded-xl border border-pine/15 bg-white p-3 text-sm sm:grid-cols-3">
+                          {FRESH_AIR_SEASON_DATES.map(date => {
+                            const past = date < today;
+                            const taken = otherHeld.has(date);
+                            const noInsurance = uninsured(date);
+                            const blocked = past || taken || noInsurance;
+                            return (
+                              <label key={date} className={`flex items-center gap-2 py-1 ${blocked ? "text-ink/35" : "text-ink/80"}`}>
+                                <input type="checkbox" disabled={disabled || blocked} checked={changeDates.includes(date)}
+                                  onChange={event => setChangeDates(current => event.target.checked ? [...current, date].sort() : current.filter(d => d !== date))} />
+                                {reservationDateLabel(date)}{past ? " (past)" : taken ? " (other booking)" : noInsurance ? " (after insurance)" : ""}
+                              </label>
+                            );
+                          })}
+                        </div>
+                        <div className="mt-3 flex flex-wrap items-end gap-4">
+                          <label className="text-sm font-semibold text-pine-deep">Booths per Saturday
+                            <input type="number" min={1} max={10} value={changeBooths} disabled={disabled} onChange={event => setChangeBooths(event.target.value)} className={`${FIELD} w-24`} />
+                          </label>
+                          <p className="pb-3 text-sm text-pine-deep">New total: <strong>{total === null ? "—" : money(total)}</strong> <span className="text-ink/55">(was {money(reservation.totalCents)})</span></p>
+                        </div>
+                        <label className="mt-3 block text-sm font-semibold text-pine-deep">Note to the vendor (optional)
+                          <textarea value={changeNote} disabled={disabled} maxLength={500} rows={2} onChange={event => setChangeNote(event.target.value)} placeholder="Example: As we discussed on the phone, here are your October dates." className={FIELD} />
+                        </label>
+                        <div className="mt-3 flex flex-wrap gap-3">
+                          <button type="button" disabled={disabled || !changeDates.length} onClick={() => void changeBookingDates(reservation)} className={BUTTON}>{busy === "change" ? "Changing…" : "Change dates and email the vendor"}</button>
+                          <button type="button" disabled={disabled} onClick={() => setChangeTarget(null)} className={QUIET_BUTTON}>Cancel</button>
+                        </div>
+                      </div>}
+                    </section>
+                  );
+                })()}
 
                 {WITHDRAWABLE_STATES.has(reservation.state) && (
                   <section className="mt-5 rounded-2xl border border-pine/15 bg-white/60 p-5">

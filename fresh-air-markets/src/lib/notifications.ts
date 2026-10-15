@@ -4,7 +4,7 @@ import { applicantContact, emailConfigured, sendEmail, sendStaffEmail, type Send
 import { BOOKING_LINK_TTL_MS, EMAILED_UPLOAD_TTL_MS, createApplicationLinkToken, createApplicationUploadToken } from "./application-upload-token";
 import {
   applicationInvitationEmail, applicationApprovedEmail, applicationWithdrawnEmail, bookingRequestDeclinedEmail, bookingRequestReceivedEmail, bookingWithdrawnEmail, documentUploadLinkEmail, applicationChangesRequestedEmail, applicationDeclinedEmail, applicationReceivedEmail,
-  customPaymentReminderEmail, paymentReceivedEmail, staffBookingRequestEmail, paymentRequestEmail, passwordResetEmail, staffContactMessageEmail, staffInvitationEmail, staffNewApplicationEmail, staffPaymentReceivedEmail,
+  bookingDatesChangedEmail, customPaymentReminderEmail, paymentReceivedEmail, staffBookingRequestEmail, paymentRequestEmail, passwordResetEmail, staffContactMessageEmail, staffInvitationEmail, staffNewApplicationEmail, staffPaymentReceivedEmail,
 } from "./email-templates";
 import { reminderDates, reminderMoney } from "./payment-reminder-template";
 
@@ -203,6 +203,31 @@ export async function notifyBookingWithdrawn(input: { reservationId: string; mar
     const dates = Array.isArray(reservation.final_dates) ? reservation.final_dates.filter((d): d is string => typeof d === "string").sort() : [];
     const content = bookingWithdrawnEmail({ name: contact.name, dates, note: input.note, bookMoreLink: bookMoreDatesLink(reservation.application_id, input.marketId) });
     return outcome(await sendEmail({ kind: "booking_withdrawn", to: contact.email, marketId: input.marketId, referenceId: input.reservationId, ...content }, { sql: db }));
+  } catch { return "failed"; }
+}
+
+/** Staff moved a booking to new Saturdays: one email with old and new dates and the new payment link. */
+export async function notifyBookingDatesChanged(input: {
+  oldReservationId: string; newReservationId: string; marketId: string; invitationUrl: string; note?: string;
+}, sql?: Sql): Promise<NotificationOutcome> {
+  if (!emailConfigured()) return "not_sent";
+  try {
+    const db = sql ?? configuredClient();
+    const rows = await db<{ id: string; application_id: string | null; final_dates: unknown; final_booth_quantity: number; total_cents: string | number }[]>`
+      SELECT id, application_id, final_dates, final_booth_quantity, total_cents FROM fame_reservations
+      WHERE market_id = ${input.marketId} AND id IN (${input.oldReservationId}, ${input.newReservationId})`;
+    const before = rows.find(row => row.id === input.oldReservationId);
+    const after = rows.find(row => row.id === input.newReservationId);
+    if (!after?.application_id || !before) return "not_sent";
+    const contact = await applicantContact(after.application_id, input.marketId, db);
+    if (!contact) return "not_sent";
+    const dates = (value: unknown) => Array.isArray(value) ? value.filter((d): d is string => typeof d === "string").sort() : [];
+    const content = bookingDatesChangedEmail({
+      name: contact.name, oldDates: dates(before.final_dates), newDates: dates(after.final_dates),
+      booths: Number(after.final_booth_quantity), totalCents: Number(after.total_cents), link: input.invitationUrl,
+      note: input.note, enforced: paymentDeadlineEnforced(),
+    });
+    return outcome(await sendEmail({ kind: "booking_dates_changed", to: contact.email, marketId: input.marketId, referenceId: input.newReservationId, ...content }, { sql: db }));
   } catch { return "failed"; }
 }
 

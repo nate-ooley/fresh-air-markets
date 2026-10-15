@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { randomUUID } = require('node:crypto');
 const postgres = require('postgres');
-const { reserveFinalApplication, getFinalApplicationReservation, reopenExpiredReservation } = require('../../.test-build/final-reservation-pg.js');
+const { reserveFinalApplication, getFinalApplicationReservation, reopenExpiredReservation, planDateChange } = require('../../.test-build/final-reservation-pg.js');
 const { claimSquarePaymentCheckout } = require('../../.test-build/square-payment-pg.js');
 const { withdrawReservation, withdrawApplication, applicationBookingSummary } = require('../../.test-build/reservation-withdraw-pg.js');
 
@@ -496,4 +496,60 @@ test('a booking refuses Saturdays after the insurance certificate expires and re
   assert.deepEqual(blocked, { kind: 'insurance_expires', expiresOn: '2026-10-05', dates: ['2026-10-10'] });
   assert.equal(rows(await first`SELECT 1 FROM fame_reservations WHERE application_id = ${applicationId}`).length, 0);
   assert.equal((await reserve(applicationId, selection({ selectedDates: ['2026-10-03'] }))).kind, 'created');
+});
+
+const plan = (reservationId, dates, booths = 1, boothCapacity = 1, today = '2026-10-01') =>
+  planDateChange({ marketId, reservationId, dates, booths, today, config: config(boothCapacity) }, first);
+
+test('changing dates counts the booking\'s own Saturdays as free and refuses full, past, same, held and uninsured dates without writing', async () => {
+  const a = await seedEligibleApplication();
+  const b = await seedEligibleApplication();
+  const other = await reserve(b.applicationId, selection({ selectedDates: ['2026-10-03'] }), first, 1);
+  assert.equal(other.kind, 'created');
+  const mine = await reserve(a.applicationId, selection({ selectedDates: ['2026-10-10'] }), first, 1, later(1));
+  assert.equal(mine.kind, 'created');
+  const before = rows(await first`SELECT id, state FROM fame_reservations ORDER BY id`);
+
+  // Room is full on Oct 3 (one booth, taken by the other vendor).
+  assert.deepEqual(await plan(mine.reservation.id, ['2026-10-03']), { kind: 'unavailable', dates: ['2026-10-03'] });
+  // Its own Saturday is free to keep with a different booth count, but not when nothing changes.
+  assert.deepEqual(await plan(mine.reservation.id, ['2026-10-10']), { kind: 'same_dates' });
+  const capTwo = await plan(mine.reservation.id, ['2026-10-10'], 2, 2);
+  assert.equal(capTwo.kind, 'ok');
+  assert.equal(capTwo.quote.totalCents, 8000);
+  assert.deepEqual(capTwo.current, { dates: ['2026-10-10'], booths: 1, fullSeason: false });
+  // A Saturday that already happened.
+  assert.deepEqual(await plan(mine.reservation.id, ['2026-10-03'], 1, 2, '2026-10-05'), { kind: 'past_dates', dates: ['2026-10-03'] });
+  // Bad input.
+  assert.equal((await plan(mine.reservation.id, ['2026-12-25'])).kind, 'invalid_selection');
+  assert.equal((await plan(mine.reservation.id, ['2026-10-10', '2026-10-10'])).kind, 'invalid_selection');
+  // Insurance that ends before the new date.
+  await first`UPDATE fame_application_documents SET expires_on = '2026-10-05' WHERE application_id = ${a.applicationId} AND kind = 'insurance'`;
+  assert.deepEqual(await plan(mine.reservation.id, ['2026-10-03', '2026-10-10'], 1, 2), { kind: 'insurance_expires', expiresOn: '2026-10-05', dates: ['2026-10-10'] });
+  await first`UPDATE fame_application_documents SET expires_on = NULL WHERE application_id = ${a.applicationId}`;
+  // A paid booking can't be changed here.
+  await first`UPDATE fame_reservations SET state = 'paid' WHERE id = ${other.reservation.id}`;
+  assert.deepEqual(await plan(other.reservation.id, ['2026-10-10'], 1, 2), { kind: 'not_changeable', state: 'paid' });
+  await first`UPDATE fame_reservations SET state = 'held' WHERE id = ${other.reservation.id}`;
+  // Unknown booking.
+  assert.deepEqual(await plan(randomUUID(), ['2026-10-10']), { kind: 'not_found' });
+  // Nothing above wrote anything.
+  assert.deepEqual(rows(await first`SELECT id, state FROM fame_reservations ORDER BY id`), before);
+});
+
+test('changing dates refuses a Saturday held in the vendor\'s other booking, and a retry after a half-finished change can resume', async () => {
+  const { applicationId } = await seedEligibleApplication();
+  const fall = await reserve(applicationId, selection({ selectedDates: ['2026-10-03'] }), first, 2);
+  const spring = await reserve(applicationId, selection({ selectedDates: ['2026-10-10'] }), first, 2, later(1));
+  assert.deepEqual(await plan(fall.reservation.id, ['2026-10-10'], 1, 2), { kind: 'overlap', dates: ['2026-10-10'] });
+  // A change withdrew the spring booking and stopped before rebooking: the retry may finish.
+  const withdrawn = await withdrawReservation({ marketId, reservationId: spring.reservation.id, note: 'Dates changed to Oct 10.' }, first);
+  assert.equal(withdrawn.kind, 'withdrawn');
+  const resumed = await plan(spring.reservation.id, ['2026-10-10'], 1, 2);
+  assert.equal(resumed.kind, 'ok');
+  assert.equal(resumed.resuming, true);
+  // A booking withdrawn for any other reason is not resumable.
+  const other = await withdrawReservation({ marketId, reservationId: fall.reservation.id, note: 'Vendor cancelled.' }, first);
+  assert.equal(other.kind, 'withdrawn');
+  assert.deepEqual(await plan(fall.reservation.id, ['2026-10-03'], 1, 2), { kind: 'not_changeable', state: 'cancelled' });
 });

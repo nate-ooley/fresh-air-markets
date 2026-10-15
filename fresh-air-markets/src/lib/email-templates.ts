@@ -108,6 +108,21 @@ function bookMoreLine(link: string | null | undefined): string[] {
   return link ? [`Want more Saturdays this season? Pick them here and we'll send a payment link; your insurance and agreement stay on file: ${link}`] : [];
 }
 
+/** Staff moved an unpaid booking to other Saturdays; one email with the new dates and payment link. */
+export function bookingDatesChangedEmail(input: { name: string; oldDates: string[]; newDates: string[]; booths: number; totalCents: number; link: string; note?: string; enforced?: boolean }): EmailContent {
+  const list = (dates: string[]) => dates.length ? dates.map(day).join(", ") : "your reserved market dates";
+  return { subject: `Your market dates have changed: ${MARKET} (${money(input.totalCents)})`, ...wrap([
+    `Hi ${input.name},`,
+    `We've changed your booking. Your new dates are ${list(input.newDates)} (${input.booths} booth${input.booths === 1 ? "" : "s"}). Total due: ${money(input.totalCents)}.`,
+    ...(input.note ? [input.note] : []),
+    `Your previous dates (${list(input.oldDates)}) are released, and any earlier payment link for them no longer works.`,
+    `Pay securely through Square using your private link: ${input.link}`,
+    input.enforced
+      ? "This link is only for you. Unpaid reservations are released after the payment deadline shown on the page. Booth fees are non-refundable."
+      : "This link is only for you. Please pay within the next 48 hours: if we have not received your payment by then, your spot may be released to another vendor. Booth fees are non-refundable.",
+  ]) };
+}
+
 export function bookingWithdrawnEmail(input: { name: string; dates: string[]; note?: string; bookMoreLink?: string | null }): EmailContent {
   const list = input.dates.length ? input.dates.map(day).join(", ") : "your reserved market dates";
   return { subject: `Booking withdrawn: ${MARKET}`, ...wrap([

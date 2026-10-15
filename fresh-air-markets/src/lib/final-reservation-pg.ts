@@ -8,6 +8,7 @@ import {
   finalReservationCheckoutDescription,
   finalReservationEligibilityReason,
   finalReservationSelectionFingerprint,
+  parseFinalReservationSelection,
   preflightFinalReservation,
   validFinalReservationApplicationId,
   validFinalReservationIdempotencyKey,
@@ -597,4 +598,96 @@ export async function reopenExpiredReservation(
     if (!updated) return { kind: "not_expired", state: row.state } as ReopenReservationResult;
     return { kind: "reopened", reservation: { id: updated.id, state: "held", finalDates: dates, finalBoothQuantity: booths, totalCents: Number(row.total_cents) } } as ReopenReservationResult;
   }) as Promise<ReopenReservationResult>;
+}
+
+/** Bookings whose Saturdays staff can change in one step: nothing has been paid on them. */
+export const DATE_CHANGEABLE_STATES = ["held", "payment_pending", "expired"] as const;
+/** Withdrawal note prefix that marks a booking replaced by "Change dates", so a retry can finish the swap. */
+export const DATE_CHANGE_NOTE_PREFIX = "Dates changed";
+
+export type DateChangePlan =
+  | {
+    kind: "ok";
+    applicationId: string;
+    /** The booking as it stands, so a failed swap can be put back exactly. */
+    current: { dates: string[]; booths: number; fullSeason: boolean };
+    profile: { applicantType: ParsedFinalReservationSelection["applicantType"]; vendorCategory: string; foodLicenseRequired: boolean };
+    quote: { dates: string[]; booths: number; totalCents: number; rateCents: number; fullSeason: boolean };
+  }
+  | { kind: "not_found" }
+  | { kind: "not_changeable"; state: string }
+  | { kind: "invalid_selection" }
+  | { kind: "same_dates" }
+  | { kind: "past_dates"; dates: string[] }
+  | { kind: "overlap"; dates: string[] }
+  | { kind: "insurance_expires"; expiresOn: string; dates: string[] }
+  | { kind: "unavailable"; dates: string[] };
+
+interface DateChangeRow {
+  state: string; application_id: string; final_dates: unknown; final_booth_quantity: number;
+  applicant_type: string; vendor_category: string; full_season: boolean; food_license_required: boolean;
+  withdrawal_note: string | null;
+}
+
+/**
+ * Read-only check that an unpaid booking can move to new Saturdays, counting
+ * the booking's own current dates as free. Nothing is written; the change
+ * itself is a withdraw followed by a normal reservation, which re-checks
+ * everything under its own locks.
+ */
+export async function planDateChange(input: {
+  marketId: string; reservationId: string; dates: string[]; booths: number; today: string;
+  config: FreshAirFinalReservationConfig;
+}, sql: Sql = configuredClient()): Promise<DateChangePlan & { resuming?: boolean }> {
+  const [row] = await sql<DateChangeRow[]>`
+    SELECT r.state, r.application_id, r.final_dates, r.final_booth_quantity, r.withdrawal_note,
+      f.applicant_type, f.vendor_category, f.full_season, f.food_license_required
+    FROM fame_reservations r
+    JOIN fame_reservation_finalizations f ON f.reservation_id = r.id AND f.market_id = r.market_id
+    WHERE r.id = ${input.reservationId} AND r.market_id = ${input.marketId}`;
+  if (!row) return { kind: "not_found" };
+  // An earlier "Change dates" withdrew this booking and then stopped; let the retry finish it.
+  const resuming = row.state === "cancelled" && Boolean(row.withdrawal_note?.startsWith(DATE_CHANGE_NOTE_PREFIX));
+  if (!resuming && !(DATE_CHANGEABLE_STATES as readonly string[]).includes(row.state)) return { kind: "not_changeable", state: row.state };
+  const currentDates = asFinalDates(row.final_dates);
+  if (!currentDates) throw new Error("Stored final reservation is invalid.");
+  const profile = {
+    applicantType: row.applicant_type as ParsedFinalReservationSelection["applicantType"],
+    vendorCategory: row.vendor_category,
+    foodLicenseRequired: row.food_license_required,
+  };
+  const calendar = { dates: [...input.config.calendarDates], boothCapacity: input.config.boothCapacity };
+  const wanted = [...new Set(input.dates)].sort();
+  const fullSeason = calendar.dates.every(date => wanted.includes(date));
+  const selection = parseFinalReservationSelection({
+    ...profile, selectedDates: fullSeason ? [] : wanted, fullSeason, boothsPerMarket: input.booths,
+  }, "00000000-0000-4000-8000-000000000000");
+  if (!selection || wanted.length !== input.dates.length) return { kind: "invalid_selection" };
+  let preflight;
+  try { preflight = preflightFinalReservation(calendar, selection); } catch { return { kind: "invalid_selection" }; }
+  const past = preflight.dates.filter(date => date < input.today);
+  if (past.length) return { kind: "past_dates", dates: past };
+  if (!resuming && preflight.dates.join() === [...currentDates].sort().join() && input.booths === Number(row.final_booth_quantity)) return { kind: "same_dates" };
+
+  // Other live bookings of the same vendor still count; this one does not.
+  const others = await sql<{ final_dates: unknown }[]>`
+    SELECT r.final_dates FROM fame_reservations r
+    WHERE r.market_id = ${input.marketId} AND r.application_id = ${row.application_id} AND r.id <> ${input.reservationId}
+      AND r.state IN ${sql([...LIVE_RESERVATION_STATES])}`;
+  const held = new Set(others.flatMap(other => asFinalDates(other.final_dates) ?? []));
+  const overlap = preflight.dates.filter(date => held.has(date));
+  if (overlap.length) return { kind: "overlap", dates: overlap };
+  const expiresOn = await currentInsuranceExpiry(sql, input.marketId, row.application_id);
+  const uncovered = datesAfterInsuranceExpiry(preflight.dates, expiresOn);
+  if (uncovered.length) return { kind: "insurance_expires", expiresOn: expiresOn as string, dates: uncovered };
+
+  const occupancy = await Promise.all(calendar.dates.map(date => occupancyForDate(sql, input.marketId, date, input.reservationId)));
+  let quote;
+  try { quote = quoteFinalReservation(calendar, selection, occupancy); } catch { return { kind: "invalid_selection" }; }
+  if (!quote.allDatesAvailable) return { kind: "unavailable", dates: quote.availability.filter(a => !a.available).map(a => a.date) };
+  return {
+    kind: "ok", applicationId: row.application_id, profile, ...(resuming ? { resuming } : {}),
+    current: { dates: [...currentDates].sort(), booths: Number(row.final_booth_quantity), fullSeason: row.full_season },
+    quote: { dates: [...quote.dates], booths: quote.boothsPerMarket, totalCents: quote.totalCents, rateCents: quote.rateCents, fullSeason },
+  };
 }
