@@ -90,7 +90,10 @@ test('Square permission problems are explained in plain words and recorded', () 
   const log = [];
   const response = await call(load({ log, customerError: new sqInvoice.SquareInvoiceError('customer search', 403, ['INSUFFICIENT_SCOPES']) }), monthly);
   assert.equal(response.status, 503);
-  assert.match((await response.json()).error, /isn't allowed to create invoices/);
+  assert.match((await response.json()).error, /isn't allowed to create invoices.*customer search, 403 INSUFFICIENT_SCOPES/);
+  // A 403 on an installment plan is the account's Square plan, not the connection.
+  const plan = await call(load({ customerError: new sqInvoice.SquareInvoiceError('invoice create', 403, ['FORBIDDEN']) }), monthly);
+  assert.match((await plan.json()).error, /Invoices Plus.*"Pay in full" still works.*invoice create, 403 FORBIDDEN/);
   assert.ok(log.some(entry => entry[0] === 'failed'));
   assert.equal(log.some(entry => entry[0] === 'retire'), false);
 }));

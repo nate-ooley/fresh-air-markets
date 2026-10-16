@@ -22,8 +22,10 @@ const day = (iso: string) => new Date(`${iso}T12:00:00Z`).toLocaleDateString("en
 function squareProblem(error: unknown): string {
   if (!(error instanceof SquareInvoiceError)) return "Square could not create the invoice. Nothing was sent to the vendor; try again.";
   const codes = error.codes;
-  if (codes.includes("INSUFFICIENT_SCOPES") || error.status === 401 || error.status === 403) return "The site's Square connection isn't allowed to create invoices. The Square access settings need updating before billing will work. Nothing was sent to the vendor.";
-  if (codes.some(code => /SUBSCRIPTION|NOT_ENABLED|UNSUPPORTED|FEATURE/.test(code))) return `Square says this account can't send that kind of invoice (${codes.join(", ")}). A monthly plan may need a Square Invoices upgrade; "Pay in full" should still work. Nothing was sent to the vendor.`;
+  const detail = ` (Square: ${error.step}, ${error.status}${codes.length ? ` ${codes.join(", ")}` : ""})`;
+  if (codes.includes("INSUFFICIENT_SCOPES") || error.status === 401) return `The site's Square connection isn't allowed to create invoices. The Square access settings need updating before billing will work. Nothing was sent to the vendor.${detail}`;
+  // Pay-in-full invoices work on every Square plan; installments are a paid Square Invoices feature.
+  if (error.status === 403 || codes.some(code => /SUBSCRIPTION|NOT_ENABLED|UNSUPPORTED|FEATURE|FORBIDDEN/.test(code))) return `Square says this account can't send that kind of invoice. Monthly plans may need Square's Invoices Plus upgrade; "Pay in full" still works. Nothing was sent to the vendor.${detail}`;
   if (codes.includes("INVALID_EMAIL_ADDRESS")) return "Square rejected the vendor's email address. Fix it on their application, then try again.";
   if (error.status === 0) return "Square didn't answer. Nothing was sent to the vendor; try again in a minute.";
   return `Square refused the invoice (${error.step}${codes.length ? `: ${codes.join(", ")}` : `, ${error.status}`}). Nothing was sent to the vendor.`;
