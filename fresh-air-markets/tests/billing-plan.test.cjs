@@ -32,3 +32,11 @@ test('a different amount needs a reason; silly amounts, past or invalid dates an
     assert.ok('error' in plan.planBilling({ ...base, ...patch }), JSON.stringify(patch));
   }
 });
+
+test('later invoices are emailed 3 days before they are due; anything due within 3 days goes right away', () => {
+  assert.equal(plan.invoiceSendDate('2026-11-16', '2026-10-16'), '2026-11-13');
+  assert.equal(plan.invoiceSendDate('2026-10-19', '2026-10-16'), null);
+  assert.equal(plan.invoiceSendDate('2026-10-20', '2026-10-16'), '2026-10-17');
+  assert.equal(plan.invoiceSendDate('2026-12-02', '2026-10-16'), '2026-11-29');
+  assert.equal(plan.invoiceSendDate('2027-03-02', '2026-10-16'), '2027-02-27');
+});

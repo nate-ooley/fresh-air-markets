@@ -27,32 +27,27 @@ test('an existing Square customer is reused by email; otherwise one is created o
   assert.equal(create.calls[1].body.company_name, 'Ann Co');
 });
 
-test('a monthly plan becomes an order plus a DRAFT invoice with one installment request per month', async () => {
+test('each payment is its own order and DRAFT pay-in-full invoice; later ones are scheduled; retries reuse the same keys', async () => {
   const t = transport([{ body: { order: { id: 'ORD1' } } }, { body: { invoice: { id: 'INV1', version: 0 } } }]);
   const draft = await sq.createDraftSquareInvoice(config, {
-    invoiceRowId: 'row-1', customerId: 'CUST1', title: 'Booth', description: '1 booth on Sat, Oct 24.',
-    installments: [{ seq: 1, dueOn: '2026-11-01', amountCents: 50000 }, { seq: 2, dueOn: '2026-12-01', amountCents: 55000 }],
+    invoiceRowId: 'row-1', seq: 2, customerId: 'CUST1', title: 'Booth: payment 2 of 3', description: 'Payment 2 of 3.',
+    amountCents: 35000, dueOn: '2026-12-01', scheduledAt: '2026-11-28T13:00:00Z',
   }, t);
   assert.deepEqual(draft, { orderId: 'ORD1', invoiceId: 'INV1', version: 0 });
-  assert.equal(t.calls[0].body.order.line_items[0].base_price_money.amount, 105000);
+  assert.equal(t.calls[0].body.order.line_items[0].base_price_money.amount, 35000);
+  assert.equal(t.calls[0].body.order.reference_id, 'row-1-2');
   const invoice = t.calls[1].body.invoice;
-  assert.equal(invoice.order_id, 'ORD1');
-  assert.equal(invoice.delivery_method, 'EMAIL');
-  assert.deepEqual(invoice.payment_requests.map(r => [r.request_type, r.due_date, r.fixed_amount_requested_money.amount]), [['INSTALLMENT', '2026-11-01', 50000], ['INSTALLMENT', '2026-12-01', 55000]]);
-  assert.equal(t.calls.some(call => /publish/.test(call.url)), false);
-  // Same row → same idempotency keys, so a retry can't create a second invoice.
+  assert.equal(invoice.scheduled_at, '2026-11-28T13:00:00Z');
+  assert.deepEqual(invoice.payment_requests.map(r => [r.request_type, r.due_date]), [['BALANCE', '2026-12-01']]);
+  assert.equal(invoice.payment_requests[0].fixed_amount_requested_money, undefined);
+  assert.equal(JSON.stringify(invoice).includes('INSTALLMENT'), false, 'no Invoices Plus features');
   const again = transport([{ body: { order: { id: 'ORD1' } } }, { body: { invoice: { id: 'INV1', version: 0 } } }]);
-  await sq.createDraftSquareInvoice(config, { invoiceRowId: 'row-1', customerId: 'CUST1', title: 'Booth', description: 'd', installments: [{ seq: 1, dueOn: '2026-11-01', amountCents: 50000 }, { seq: 2, dueOn: '2026-12-01', amountCents: 55000 }] }, again);
+  await sq.createDraftSquareInvoice(config, { invoiceRowId: 'row-1', seq: 2, customerId: 'CUST1', title: 'T', description: 'd', amountCents: 35000, dueOn: '2026-12-01', scheduledAt: null }, again);
   assert.equal(again.calls[1].body.idempotency_key, t.calls[1].body.idempotency_key);
-});
-
-test('pay in full is a single BALANCE request; publish returns the Square invoice page', async () => {
-  const t = transport([{ body: { order: { id: 'ORD2' } } }, { body: { invoice: { id: 'INV2', version: 0 } } }, { body: { invoice: { version: 1, status: 'UNPAID', public_url: 'https://squareup.com/pay-invoice/inv2' } } }]);
-  const draft = await sq.createDraftSquareInvoice(config, { invoiceRowId: 'row-2', customerId: 'C', title: 'T', description: 'd', installments: [{ seq: 1, dueOn: '2026-11-01', amountCents: 14000 }] }, t);
-  assert.equal(t.calls[1].body.invoice.payment_requests[0].request_type, 'BALANCE');
-  assert.equal(t.calls[1].body.invoice.payment_requests[0].fixed_amount_requested_money, undefined);
-  const published = await sq.publishSquareInvoice(config, draft.invoiceId, draft.version, t);
-  assert.deepEqual(published, { version: 1, publicUrl: 'https://squareup.com/pay-invoice/inv2', status: 'UNPAID' });
+  assert.equal(again.calls[1].body.invoice.scheduled_at, undefined);
+  const other = transport([{ body: { order: { id: 'ORD3' } } }, { body: { invoice: { id: 'INV3', version: 0 } } }]);
+  await sq.createDraftSquareInvoice(config, { invoiceRowId: 'row-1', seq: 3, customerId: 'CUST1', title: 'T', description: 'd', amountCents: 35000, dueOn: '2027-01-01', scheduledAt: null }, other);
+  assert.notEqual(other.calls[1].body.idempotency_key, t.calls[1].body.idempotency_key);
 });
 
 test('Square refusals keep only the documented error codes; drafts are deleted, published invoices cancelled', async () => {

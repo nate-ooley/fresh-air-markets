@@ -73,3 +73,16 @@ export function planBilling(input: {
   if (Math.floor(total / count) < 100) return { error: "Each monthly payment must be at least $1.00." };
   return { plan: "monthly", totalCents: total, reason, installments: monthlySchedule(total, count, input.firstDueOn) };
 }
+
+/** How many days before a later payment is due Square emails its invoice. */
+export const SEND_DAYS_BEFORE_DUE = 3;
+
+/**
+ * The day Square should email a payment's invoice: a few days before it is
+ * due, or null (send right away) when that day is today or already past.
+ */
+export function invoiceSendDate(dueOn: string, today: string): string | null {
+  const [year, month, day] = dueOn.split("-").map(Number);
+  const send = new Date(Date.UTC(year, month - 1, day - SEND_DAYS_BEFORE_DUE, 12)).toISOString().slice(0, 10);
+  return send > today ? send : null;
+}

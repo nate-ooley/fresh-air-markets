@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { adminGate } from "@/lib/admin-gate";
-import { planBilling } from "@/lib/billing-plan";
+import { invoiceSendDate, planBilling } from "@/lib/billing-plan";
 import { applicantContact } from "@/lib/email";
 import { readInquiryBody } from "@/lib/inquiry-body";
 import { retireCheckoutLinks } from "@/lib/reservation-withdraw-pg";
@@ -9,7 +9,7 @@ import { SquareInvoiceError, cancelSquareInvoice, createDraftSquareInvoice, ensu
 import { squareLinkCanceller } from "@/lib/square-link-cancel";
 import { validSquareReservationId } from "@/lib/square-payment";
 import { marketToday } from "@/lib/vendor-booking-pg";
-import { beginInvoice, invoiceView, markInvoiceFailed, markInvoiceOpen, readBillingQuote, recordInvoiceDraft } from "@/lib/vendor-invoice-pg";
+import { beginInvoice, invoiceView, markInstallmentPublished, markInvoiceFailed, markInvoiceOpen, readBillingQuote, recordInstallmentDraft } from "@/lib/vendor-invoice-pg";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -80,22 +80,34 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     return NextResponse.json({ error: message }, { status, headers });
   };
 
-  // 1. Square customer and a DRAFT invoice (nothing is emailed yet).
-  let draft = invoice.squareInvoiceId && invoice.squareInvoiceVersion !== null && invoice.squareOrderId
-    ? { orderId: invoice.squareOrderId, invoiceId: invoice.squareInvoiceId, version: invoice.squareInvoiceVersion } : null;
-  if (!draft) {
+  // 1. A Square customer and one DRAFT pay-in-full invoice per payment (nothing is emailed yet).
+  const today = marketToday();
+  const payments = invoice.squareInstallments;
+  const count = payments.length;
+  const needsDraft = payments.filter(item => !item.squareInvoiceId);
+  if (needsDraft.length) {
     const contact = await applicantContact(target.applicationId, marketId).catch(() => null);
     if (!contact) return fail("This vendor has no usable email address on file, so Square can't send them an invoice.", 409);
     try {
-      const customerId = await ensureSquareCustomer(square, { email: contact.email, name: contact.name, businessName: contact.businessName, reference: target.applicationId });
-      draft = await createDraftSquareInvoice(square, {
-        invoiceRowId: invoice.id, customerId,
-        title: "North Port Farmer's Market booth reservation",
-        description: `${target.booths} booth${target.booths === 1 ? "" : "s"} on ${target.dates.map(day).join(", ")}.`,
-        installments: invoice.installments,
-      });
-      await recordInvoiceDraft({ invoiceId: invoice.id, customerId, orderId: draft.orderId, squareInvoiceId: draft.invoiceId, version: draft.version });
-    } catch (error) { return fail(squareProblem(error)); }
+      const customerId = invoice.squareCustomerId ?? await ensureSquareCustomer(square, { email: contact.email, name: contact.name, businessName: contact.businessName, reference: target.applicationId });
+      for (const item of needsDraft) {
+        const sendOn = invoiceSendDate(item.dueOn, today);
+        const draft = await createDraftSquareInvoice(square, {
+          invoiceRowId: invoice.id, seq: item.seq, customerId,
+          title: count === 1 ? "North Port Farmer's Market booth reservation" : `North Port Farmer's Market booth reservation: payment ${item.seq} of ${count}`,
+          description: `${count === 1 ? "" : `Payment ${item.seq} of ${count}. `}${target.booths} booth${target.booths === 1 ? "" : "s"} on ${target.dates.map(day).join(", ")}.`,
+          amountCents: item.amountCents, dueOn: item.dueOn,
+          // Later payments go out a few days before they are due, about 9am Eastern.
+          scheduledAt: sendOn ? `${sendOn}T13:00:00Z` : null,
+        });
+        await recordInstallmentDraft({ invoiceId: invoice.id, seq: item.seq, customerId, orderId: draft.orderId, squareInvoiceId: draft.invoiceId, version: draft.version });
+        Object.assign(item, { squareOrderId: draft.orderId, squareInvoiceId: draft.invoiceId, squareInvoiceVersion: draft.version });
+      }
+    } catch (error) {
+      // Drafts are never seen by the vendor; remove the ones made so far.
+      for (const item of payments) if (item.squareInvoiceId && !item.published && item.squareInvoiceVersion !== null) await cancelSquareInvoice(square, item.squareInvoiceId, item.squareInvoiceVersion, false).catch(() => null);
+      return fail(squareProblem(error));
+    }
   }
 
   // 2. Retire the old payment link so the vendor can't pay twice.
@@ -103,7 +115,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   try { retired = await retireCheckoutLinks({ marketId, reservationId: id, cancelLink: squareLinkCanceller(process.env) }); }
   catch { retired = { kind: "square_unavailable" as const }; }
   if (retired.kind !== "retired") {
-    await cancelSquareInvoice(square, draft.invoiceId, draft.version, false).catch(() => null);
+    for (const item of payments) if (item.squareInvoiceId && !item.published && item.squareInvoiceVersion !== null) await cancelSquareInvoice(square, item.squareInvoiceId, item.squareInvoiceVersion, false).catch(() => null);
     const message = retired.kind === "cancellation_unproven"
       ? `Square could not confirm the old payment link was cancelled; the vendor may already have paid. Check order ${retired.squareOrderId} in Square. No invoice was sent.`
       : retired.kind === "link_closing" || retired.kind === "checkout_in_progress"
@@ -113,14 +125,20 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     return fail(message, retired.kind === "square_unavailable" ? 503 : 409);
   }
 
-  // 3. Publish: Square emails the vendor.
-  try {
-    const published = await publishSquareInvoice(square, draft.invoiceId, draft.version);
-    await markInvoiceOpen({ invoiceId: invoice.id, version: published.version, publicUrl: published.publicUrl });
-    return NextResponse.json({ invoice: { ...invoiceView(invoice), status: "open", publicUrl: published.publicUrl } }, { status: 201, headers });
-  } catch (error) {
-    // The draft stays; a retry publishes it. The old link is already retired.
-    const message = squareProblem(error);
-    return NextResponse.json({ error: `${message} The old payment link was already cancelled; click "Send invoice" again to retry.` }, { status: 503, headers });
+  // 3. Publish each payment: Square emails the first now and schedules the rest.
+  let firstUrl: string | null = null;
+  for (const item of payments) {
+    if (item.published) continue;
+    try {
+      const published = await publishSquareInvoice(square, item.squareInvoiceId!, item.squareInvoiceVersion!);
+      await markInstallmentPublished({ invoiceId: invoice.id, seq: item.seq, version: published.version, publicUrl: published.publicUrl });
+      if (item.seq === 1) firstUrl = published.publicUrl;
+    } catch (error) {
+      // Drafts stay; a retry publishes the rest. The old link is already retired.
+      const sent = payments.filter(other => other.published || other.seq < item.seq).length;
+      return NextResponse.json({ error: `${squareProblem(error)} ${sent ? `${sent} of ${count} payments were already sent or scheduled. ` : ""}The old payment link was already cancelled; click "Send invoice" again to finish.` }, { status: 503, headers });
+    }
   }
+  await markInvoiceOpen({ invoiceId: invoice.id, publicUrl: firstUrl });
+  return NextResponse.json({ invoice: { ...invoiceView(invoice), status: "open", publicUrl: firstUrl } }, { status: 201, headers });
 }

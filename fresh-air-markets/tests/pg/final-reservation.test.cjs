@@ -76,6 +76,7 @@ before(async () => {
       '030-vendor-booking-requests.sql',
       '031-open-payment-links.sql',
       '032-vendor-invoices.sql',
+      '033-invoice-per-installment.sql',
     ]) await migration.unsafe(fs.readFileSync(path.join(__dirname, '../../docs/migrations', file), 'utf8'));
   } finally {
     await migration.end();
@@ -596,16 +597,25 @@ test('billing by invoice: one live invoice per booking, old link retired with pr
   assert.deepEqual(await retireCheckoutLinks({ marketId, reservationId: id, now, cancelLink: async () => 'cancelled' }, first), { kind: 'retired', linksCancelled: 1 });
   assert.deepEqual(rows(await first`SELECT status, last_error_code FROM fame_payment_orders WHERE reservation_id = ${id}`), [{ status: 'cancelled', last_error_code: 'superseded_by_invoice' }]);
   assert.deepEqual(rows(await first`SELECT state, payment_due_at FROM fame_reservations WHERE id = ${id}`), [{ state: 'payment_pending', payment_due_at: null }]);
-  await invoices.recordInvoiceDraft({ invoiceId: started.invoice.id, customerId: 'CUST', orderId: 'INV-ORD-1', squareInvoiceId: 'INV-1', version: 0, now }, first);
-  await invoices.markInvoiceOpen({ invoiceId: started.invoice.id, version: 1, publicUrl: 'https://squareup.com/pay-invoice/1', now }, first);
+  // One Square order + invoice per payment.
+  for (const seq of [1, 2, 3]) {
+    await invoices.recordInstallmentDraft({ invoiceId: started.invoice.id, seq, customerId: 'CUST', orderId: `INV-ORD-${seq}`, squareInvoiceId: `INV-${seq}`, version: 0, now }, first);
+    await invoices.markInstallmentPublished({ invoiceId: started.invoice.id, seq, version: 1, publicUrl: `https://squareup.com/pay-invoice/${seq}` }, first);
+  }
+  await invoices.markInvoiceOpen({ invoiceId: started.invoice.id, publicUrl: 'https://squareup.com/pay-invoice/1', now }, first);
+  const record = await invoices.getInvoice(marketId, started.invoice.id, first);
+  assert.deepEqual(record.squareInstallments.map(item => [item.seq, item.squareInvoiceId, item.published]), [[1, 'INV-1', true], [2, 'INV-2', true], [3, 'INV-3', true]]);
   assert.equal((await invoices.beginInvoice({ marketId, reservationId: id, request, environment: 'sandbox', actorAccountId: marketId, now }, first)).kind, 'already_open');
 
-  // Square reports the first installment through the normal payment webhook.
+  // Square reports the first payment (on its own order) through the normal payment webhook.
   const [first1, first2, last] = request.installments;
   assert.deepEqual(await persistSquarePaymentWebhook(payment('INV-ORD-1', 'PAY-1', first1.amountCents), { environment: 'sandbox', now }, first), { kind: 'ignored' });
   assert.deepEqual(rows(await first`SELECT disposition, manual_review_reason FROM fame_square_webhook_events WHERE payment_id = 'PAY-1'`), [{ disposition: 'paid', manual_review_reason: 'invoice_installment_paid' }]);
+  assert.deepEqual(rows(await first`SELECT installment_seq FROM fame_invoice_payments WHERE payment_id = 'PAY-1'`), [{ installment_seq: 1 }]);
   let listed = await invoices.listInvoicesForApplication(marketId, applicationId, first);
   assert.deepEqual([listed[0].status, listed[0].paidCents, listed[0].installmentsPaid], ['open', first1.amountCents, 1]);
+  assert.deepEqual(listed[0].installments.map(item => item.paidCents), [first1.amountCents, 0, 0]);
+  assert.equal(listed[0].squareInstallments, undefined, 'Square ids stay server-side');
   assert.equal(listed[0].squareOrderId, undefined, 'Square ids stay server-side');
   // The same payment reported again (new event) is recorded once.
   await first.begin(async tx => {
@@ -615,9 +625,12 @@ test('billing by invoice: one live invoice per booking, old link retired with pr
       { disposition: 'ignored', reason: 'invoice_payment_not_completed', invoicePaid: false });
     assert.equal(await invoices.applyInvoicePayment(tx, { environment: 'sandbox', orderId: 'SOMEONE-ELSE', paymentId: 'PAY-Y', status: 'COMPLETED', amountCents: 1, currency: 'USD' }, now), null);
   });
-  await persistSquarePaymentWebhook(payment('INV-ORD-1', 'PAY-2', first2.amountCents), { environment: 'sandbox', now }, first);
+  // Payment 3 arrives before payment 2: each is credited to its own payment.
+  await persistSquarePaymentWebhook(payment('INV-ORD-3', 'PAY-3', last.amountCents), { environment: 'sandbox', now }, first);
+  listed = await invoices.listInvoicesForApplication(marketId, applicationId, first);
+  assert.deepEqual([listed[0].installmentsPaid, listed[0].installments.map(item => item.paidCents > 0)], [2, [true, false, true]]);
   assert.equal((await first`SELECT state FROM fame_reservations WHERE id = ${id}`)[0].state, 'payment_pending');
-  await persistSquarePaymentWebhook(payment('INV-ORD-1', 'PAY-3', last.amountCents), { environment: 'sandbox', now }, first);
+  await persistSquarePaymentWebhook(payment('INV-ORD-2', 'PAY-2', first2.amountCents), { environment: 'sandbox', now }, first);
   listed = await invoices.listInvoicesForApplication(marketId, applicationId, first);
   assert.deepEqual([listed[0].status, listed[0].paidCents, listed[0].installmentsPaid], ['paid', totalCents, 3]);
   assert.equal((await first`SELECT state FROM fame_reservations WHERE id = ${id}`)[0].state, 'paid');

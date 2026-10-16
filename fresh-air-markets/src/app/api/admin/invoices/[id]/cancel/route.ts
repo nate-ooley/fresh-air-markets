@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { adminGate } from "@/lib/admin-gate";
 import { squarePaymentRuntimeConfig } from "@/lib/square";
 import { cancelSquareInvoice } from "@/lib/square-invoice";
-import { getInvoice, invoiceView, markInvoiceCancelled } from "@/lib/vendor-invoice-pg";
+import { getInvoice, invoiceView, markInstallmentCancelled, markInvoiceCancelled } from "@/lib/vendor-invoice-pg";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -20,13 +20,22 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   catch { return NextResponse.json({ error: "Billing is unavailable right now." }, { status: 503, headers }); }
   if (!invoice) return NextResponse.json({ error: "Invoice not found." }, { status: 404, headers });
   if (invoice.status !== "open" && invoice.status !== "creating") return NextResponse.json({ error: `This invoice is already ${invoice.status}.` }, { status: 409, headers });
-  if (invoice.squareInvoiceId && invoice.squareInvoiceVersion !== null) {
-    try {
-      const setup = squarePaymentRuntimeConfig(process.env);
-      await cancelSquareInvoice({ environment: setup.environment, accessToken: setup.accessToken, locationId: setup.locationId }, invoice.squareInvoiceId, invoice.squareInvoiceVersion, invoice.status === "open");
-    } catch {
-      return NextResponse.json({ error: "Square did not confirm the invoice was cancelled, so it may still be collecting. Try again, or cancel it in the Square app." }, { status: 503, headers });
+  let setup;
+  try { setup = squarePaymentRuntimeConfig(process.env); }
+  catch { return NextResponse.json({ error: "Square is not configured." }, { status: 503, headers }); }
+  const square = { environment: setup.environment, accessToken: setup.accessToken, locationId: setup.locationId };
+  // Stop every payment Square hasn't been paid for yet; paid ones stay as they are.
+  const targets = invoice.squareInstallments.length && invoice.squareInstallments.some(item => item.squareInvoiceId)
+    ? invoice.squareInstallments.filter(item => item.squareInvoiceId && item.squareInvoiceVersion !== null && !item.cancelled && item.paidCents < item.amountCents)
+      .map(item => ({ seq: item.seq as number | null, id: item.squareInvoiceId!, version: item.squareInvoiceVersion!, published: item.published }))
+    : invoice.squareInvoiceId && invoice.squareInvoiceVersion !== null
+      ? [{ seq: null, id: invoice.squareInvoiceId, version: invoice.squareInvoiceVersion, published: invoice.status === "open" }] : [];
+  for (const target of targets) {
+    try { await cancelSquareInvoice(square, target.id, target.version, target.published); }
+    catch {
+      return NextResponse.json({ error: "Square did not confirm every payment was cancelled, so some may still be collecting. Try again, or cancel them in the Square app." }, { status: 503, headers });
     }
+    if (target.seq !== null) await markInstallmentCancelled({ invoiceId: invoice.id, seq: target.seq });
   }
   await markInvoiceCancelled({ marketId: gated.marketId, invoiceId: id });
   return NextResponse.json({ invoice: { ...invoiceView(invoice), status: "cancelled" } }, { headers });

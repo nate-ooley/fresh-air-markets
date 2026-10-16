@@ -1,6 +1,5 @@
 import { createHash } from "node:crypto";
 import { SQUARE_API_VERSION, SQUARE_PRODUCTION_API_BASE, SQUARE_SANDBOX_API_BASE, type SquareEnvironment } from "./square";
-import type { Installment } from "./billing-plan";
 
 /**
  * Square Invoices for staff-initiated billing: one payment or a monthly plan.
@@ -69,28 +68,30 @@ export async function ensureSquareCustomer(config: SquareInvoiceConfig, contact:
 export interface DraftInvoice { orderId: string; invoiceId: string; version: number }
 
 /**
- * Creates the order and a DRAFT invoice. Nothing is sent to the vendor until
+ * Creates the order and a DRAFT pay-in-full invoice for one payment. A plan
+ * is several of these, one per month: Square only allows installment
+ * invoices on its paid Invoices Plus plan. `scheduledAt` makes Square email
+ * it on that day instead of at publish. Nothing reaches the vendor until
  * publish, so the caller can retire the old payment link in between.
  */
 export async function createDraftSquareInvoice(config: SquareInvoiceConfig, input: {
-  invoiceRowId: string; customerId: string; description: string; title: string; installments: Installment[];
+  invoiceRowId: string; seq: number; customerId: string; description: string; title: string;
+  amountCents: number; dueOn: string; scheduledAt: string | null;
 }, transport: typeof fetch = fetch): Promise<DraftInvoice> {
-  const total = input.installments.reduce((sum, item) => sum + item.amountCents, 0);
+  const reference = `${input.invoiceRowId.slice(0, 36)}-${input.seq}`;
   const order = await call(config, "order create", "/v2/orders", {
-    idempotency_key: key("order", config.environment, input.invoiceRowId),
+    idempotency_key: key("order", config.environment, input.invoiceRowId, input.seq),
     order: {
       location_id: config.locationId,
       customer_id: input.customerId,
-      reference_id: input.invoiceRowId.slice(0, 40),
-      line_items: [{ name: input.description.slice(0, 500), quantity: "1", base_price_money: { amount: total, currency: "USD" } }],
+      reference_id: reference.slice(0, 40),
+      line_items: [{ name: input.description.slice(0, 500), quantity: "1", base_price_money: { amount: input.amountCents, currency: "USD" } }],
     },
   }, transport);
   const orderId = (order.order as { id?: unknown } | undefined)?.id;
   if (typeof orderId !== "string" || !SQUARE_ID.test(orderId)) throw new SquareInvoiceError("order create", 200, ["MALFORMED_RESPONSE"]);
-  const single = input.installments.length === 1;
-  const reminders = [{ relative_scheduled_days: 1, message: "Your booth payment for the North Port Farmer's Market is now due." }];
   const invoice = await call(config, "invoice create", "/v2/invoices", {
-    idempotency_key: key("invoice", config.environment, input.invoiceRowId),
+    idempotency_key: key("invoice", config.environment, input.invoiceRowId, input.seq),
     invoice: {
       location_id: config.locationId,
       order_id: orderId,
@@ -100,12 +101,11 @@ export async function createDraftSquareInvoice(config: SquareInvoiceConfig, inpu
       description: input.description.slice(0, 65536),
       accepted_payment_methods: { card: true, square_gift_card: false, bank_account: false, buy_now_pay_later: false, cash_app_pay: false },
       store_payment_method_enabled: true,
-      payment_requests: single
-        ? [{ request_type: "BALANCE", due_date: input.installments[0].dueOn, tipping_enabled: false, reminders }]
-        : input.installments.map(item => ({
-          request_type: "INSTALLMENT", due_date: item.dueOn, tipping_enabled: false,
-          fixed_amount_requested_money: { amount: item.amountCents, currency: "USD" }, reminders,
-        })),
+      ...(input.scheduledAt ? { scheduled_at: input.scheduledAt } : {}),
+      payment_requests: [{
+        request_type: "BALANCE", due_date: input.dueOn, tipping_enabled: false,
+        reminders: [{ relative_scheduled_days: 1, message: "Your booth payment for the North Port Farmer's Market is now due." }],
+      }],
     },
   }, transport);
   const created = invoice.invoice as { id?: unknown; version?: unknown } | undefined;

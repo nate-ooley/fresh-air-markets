@@ -32,7 +32,7 @@ before(async () => {
   await first`INSERT INTO accounts (id) VALUES (${market})`;
   const migration = postgres(url.toString(), { max: 1, prepare: false, connection: { search_path: schema } });
   try {
-    for (const file of ['001-application-handoff.sql', '006-application-document-ledger.sql', '011-square-payment-checkout-ledger.sql', '012-square-webhook-events.sql', '032-vendor-invoices.sql']) {
+    for (const file of ['001-application-handoff.sql', '006-application-document-ledger.sql', '011-square-payment-checkout-ledger.sql', '012-square-webhook-events.sql', '032-vendor-invoices.sql', '033-invoice-per-installment.sql']) {
       await migration.unsafe(fs.readFileSync(path.join(__dirname, '../../docs/migrations', file), 'utf8'));
     }
   } finally {

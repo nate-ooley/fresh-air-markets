@@ -14,7 +14,9 @@ const sqInvoice = require('../.test-build/square-invoice.js');
 function invoice(patch = {}) {
   return { id: 'inv-row', reservationId: RES, plan: 'monthly', status: 'creating', totalCents: 105000, quotedCents: 105000, paidCents: 0, adjustmentReason: '', publicUrl: null, lastError: null, createdAt: '2026-10-15T00:00:00.000Z',
     installments: [{ seq: 1, dueOn: '2026-11-01', amountCents: 35000 }, { seq: 2, dueOn: '2026-12-01', amountCents: 35000 }, { seq: 3, dueOn: '2027-01-01', amountCents: 35000 }], installmentsPaid: 0,
-    environment: 'production', squareCustomerId: null, squareOrderId: null, squareInvoiceId: null, squareInvoiceVersion: null, ...patch };
+    environment: 'production', squareCustomerId: null, squareOrderId: null, squareInvoiceId: null, squareInvoiceVersion: null,
+    squareInstallments: [1, 2, 3].map(seq => ({ seq, dueOn: ['2026-10-16', '2026-11-16', '2026-12-16'][seq - 1], amountCents: 35000, squareOrderId: null, squareInvoiceId: null, squareInvoiceVersion: null, published: false, cancelled: false, paidCents: 0 })),
+    ...patch };
 }
 const target = { reservationId: RES, applicationId: 'app-1', state: 'payment_pending', quotedCents: 105000, dates: ['2026-10-24'], booths: 1, description: '1 market date, 1 booth' };
 
@@ -31,8 +33,8 @@ function load({ session = 'fame-market', log = [], begun = { kind: 'started', in
     if (id === '@/lib/square-invoice') return {
       SquareInvoiceError: sqInvoice.SquareInvoiceError,
       ensureSquareCustomer: async input => { log.push(['customer', input.email]); if (customerError) throw customerError; return 'CUST1'; },
-      createDraftSquareInvoice: async (_c, input) => { log.push(['draft', input.installments.length]); return { orderId: 'ORD1', invoiceId: 'INV1', version: 0 }; },
-      publishSquareInvoice: async (_c, invoiceId, version) => { log.push(['publish', invoiceId, version]); if (publishError) throw publishError; return { version: 1, publicUrl: 'https://squareup.com/pay-invoice/x', status: 'UNPAID' }; },
+      createDraftSquareInvoice: async (_c, input) => { log.push(['draft', input.seq, input.amountCents, input.dueOn, input.scheduledAt]); return { orderId: `ORD${input.seq}`, invoiceId: `INV${input.seq}`, version: 0 }; },
+      publishSquareInvoice: async (_c, invoiceId, version) => { log.push(['publish', invoiceId, version]); if (publishError && invoiceId === publishError.on) throw publishError.error; return { version: 1, publicUrl: `https://squareup.com/pay-invoice/${invoiceId}`, status: 'UNPAID' }; },
       cancelSquareInvoice: async (_c, invoiceId, _v, published) => { log.push(['delete-draft', invoiceId, published]); },
     };
     if (id === '@/lib/square-link-cancel') return { squareLinkCanceller: () => async () => 'cancelled' };
@@ -40,8 +42,9 @@ function load({ session = 'fame-market', log = [], begun = { kind: 'started', in
     if (id === '@/lib/vendor-invoice-pg') return {
       readBillingQuote: async () => 105000,
       beginInvoice: async input => { log.push(['begin', input.request.plan, input.request.installments.length, input.request.totalCents]); return begun; },
-      recordInvoiceDraft: async input => { log.push(['record', input.squareInvoiceId]); },
-      markInvoiceOpen: async input => { log.push(['open', input.invoiceId]); },
+      recordInstallmentDraft: async input => { log.push(['record', input.seq, input.squareInvoiceId]); },
+      markInstallmentPublished: async input => { log.push(['published', input.seq]); },
+      markInvoiceOpen: async input => { log.push(['open', input.invoiceId, input.publicUrl]); },
       markInvoiceFailed: async input => { log.push(['failed', input.error]); },
       invoiceView: record => ({ id: record.id, status: record.status, installments: record.installments }),
     };
@@ -59,31 +62,38 @@ function withEnv(patch, run) {
 const call = (route, body, id = RES) => route.POST(new NextRequest(`${origin}/api/admin/reservations/${id}/invoice`, { method: 'POST', headers: { origin, 'content-type': 'application/json' }, body: JSON.stringify(body) }), { params: Promise.resolve({ id }) });
 const monthly = { plan: 'monthly', installments: 3, firstDueOn: '2026-11-01', totalCents: 105000 };
 
-test('billing drafts the Square invoice, retires the old link, THEN publishes', () => withEnv(env, async () => {
+test('a plan drafts one invoice per payment (later ones scheduled 3 days before due), retires the old link, THEN sends them', () => withEnv(env, async () => {
   const log = [];
   const response = await call(load({ log }), monthly);
   assert.equal(response.status, 201);
-  assert.equal((await response.json()).invoice.status, 'open');
-  assert.deepEqual(log.map(entry => entry[0]), ['begin', 'customer', 'draft', 'record', 'retire', 'publish', 'open']);
-  assert.deepEqual(log[0], ['begin', 'monthly', 3, 105000]);
+  assert.equal((await response.json()).invoice.publicUrl, 'https://squareup.com/pay-invoice/INV1');
+  assert.deepEqual(log.map(entry => entry[0]), ['begin', 'customer', 'draft', 'record', 'draft', 'record', 'draft', 'record', 'retire', 'publish', 'published', 'publish', 'published', 'publish', 'published', 'open']);
+  assert.deepEqual(log.filter(entry => entry[0] === 'draft').map(entry => entry.slice(1)), [
+    [1, 35000, '2026-10-16', null],
+    [2, 35000, '2026-11-16', '2026-11-13T13:00:00Z'],
+    [3, 35000, '2026-12-16', '2026-12-13T13:00:00Z'],
+  ]);
 }));
 
-test('if Square cannot prove the old link is dead, the draft is deleted and nothing is sent', () => withEnv(env, async () => {
+test('if Square cannot prove the old link is dead, every draft is deleted and nothing is sent', () => withEnv(env, async () => {
   const log = [];
   const response = await call(load({ log, retired: { kind: 'cancellation_unproven', squareOrderId: 'SQ-9' } }), monthly);
   assert.equal(response.status, 409);
   assert.match((await response.json()).error, /SQ-9.*No invoice was sent/);
   assert.equal(log.some(entry => entry[0] === 'publish'), false);
-  assert.deepEqual(log.find(entry => entry[0] === 'delete-draft'), ['delete-draft', 'INV1', false]);
+  assert.deepEqual(log.filter(entry => entry[0] === 'delete-draft').map(entry => entry[1]), ['INV1', 'INV2', 'INV3']);
   assert.ok(log.some(entry => entry[0] === 'failed'));
 }));
 
-test('a retry of a half-made invoice reuses the Square draft instead of creating another', () => withEnv(env, async () => {
+test('a retry after a half-sent plan skips what Square already has and sends only the rest', () => withEnv(env, async () => {
   const log = [];
-  const begun = { kind: 'resume', invoice: invoice({ squareInvoiceId: 'INV1', squareOrderId: 'ORD1', squareInvoiceVersion: 0, squareCustomerId: 'CUST1' }), target };
-  const response = await call(load({ log, begun }), monthly);
+  const base = invoice();
+  base.squareCustomerId = 'CUST1';
+  base.squareInstallments = base.squareInstallments.map(item => ({ ...item, squareOrderId: `ORD${item.seq}`, squareInvoiceId: `INV${item.seq}`, squareInvoiceVersion: 0, published: item.seq === 1 }));
+  const response = await call(load({ log, begun: { kind: 'resume', invoice: base, target } }), monthly);
   assert.equal(response.status, 201);
-  assert.deepEqual(log.map(entry => entry[0]), ['begin', 'retire', 'publish', 'open']);
+  assert.deepEqual(log.map(entry => entry[0]), ['begin', 'retire', 'publish', 'published', 'publish', 'published', 'open']);
+  assert.deepEqual(log.filter(entry => entry[0] === 'publish').map(entry => entry[1]), ['INV2', 'INV3']);
 }));
 
 test('Square permission problems are explained in plain words and recorded', () => withEnv(env, async () => {
@@ -98,12 +108,12 @@ test('Square permission problems are explained in plain words and recorded', () 
   assert.equal(log.some(entry => entry[0] === 'retire'), false);
 }));
 
-test('a publish failure after the link was retired says to click again (the draft is kept)', () => withEnv(env, async () => {
+test('a send failure part-way says how many went out and to click again (drafts are kept)', () => withEnv(env, async () => {
   const log = [];
-  const response = await call(load({ log, publishError: new sqInvoice.SquareInvoiceError('invoice publish', 500, []) }), monthly);
+  const response = await call(load({ log, publishError: { on: 'INV2', error: new sqInvoice.SquareInvoiceError('invoice publish', 500, []) } }), monthly);
   assert.equal(response.status, 503);
-  assert.match((await response.json()).error, /click "Send invoice" again/);
-  assert.equal(log.some(entry => entry[0] === 'failed' || entry[0] === 'delete-draft'), false);
+  assert.match((await response.json()).error, /1 of 3 payments were already sent or scheduled.*click "Send invoice" again/);
+  assert.equal(log.some(entry => entry[0] === 'failed' || entry[0] === 'delete-draft' || entry[0] === 'open'), false);
 }));
 
 test('open invoices, paid, nonprofit and lapsed bookings, missing email and bad input are refused before Square', () => withEnv(env, async () => {

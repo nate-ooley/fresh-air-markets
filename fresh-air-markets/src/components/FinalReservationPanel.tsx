@@ -4,7 +4,7 @@ import { type FormEvent, useCallback, useEffect, useRef, useState } from "react"
 import { useRouter } from "next/navigation";
 import { FRESH_AIR_SEASON_DATES } from "@/lib/fresh-air-season";
 import { FAME_VENDOR_CATEGORIES, checkVendorBooking } from "@/lib/vendor-booking-rules";
-import { MAX_INSTALLMENTS, MIN_INSTALLMENTS, planBilling, type Installment } from "@/lib/billing-plan";
+import { MAX_INSTALLMENTS, MIN_INSTALLMENTS, invoiceSendDate, planBilling, type Installment } from "@/lib/billing-plan";
 import {
   finalReservationRequest,
   isFinalReservationView,
@@ -97,7 +97,7 @@ async function attemptKey(material: string, attempts: Map<string, string>): Prom
 
 interface InvoiceInfo {
   id: string; reservationId: string; plan: "full" | "monthly"; status: "creating" | "open" | "paid" | "cancelled" | "failed";
-  totalCents: number; paidCents: number; publicUrl: string | null; lastError: string | null; installments: Installment[]; installmentsPaid: number; adjustmentReason: string;
+  totalCents: number; paidCents: number; publicUrl: string | null; lastError: string | null; installments: (Installment & { paidCents?: number })[]; installmentsPaid: number; adjustmentReason: string;
 }
 
 function invoiceList(value: unknown): InvoiceInfo[] {
@@ -753,7 +753,7 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
                           <p className="mt-1 text-pine">Paid {money(invoice.paidCents)} of {money(invoice.totalCents)}{invoice.plan === "monthly" ? ` (${invoice.installmentsPaid} of ${invoice.installments.length} payments)` : ""}</p>
                           {invoice.adjustmentReason && <p className="mt-1 text-xs text-ink/60">Amount changed from the booking price: {invoice.adjustmentReason}</p>}
                           <ul className="mt-2 space-y-1 text-xs text-ink/70">
-                            {invoice.installments.map(item => <li key={item.seq}>{item.seq <= invoice.installmentsPaid ? "✓ " : ""}{money(item.amountCents)} due {reservationDateLabel(item.dueOn)}</li>)}
+                            {invoice.installments.map(item => <li key={item.seq}>{(item.paidCents ?? 0) >= item.amountCents || (item.paidCents === undefined && item.seq <= invoice.installmentsPaid) ? "✓ Paid: " : ""}{money(item.amountCents)} due {reservationDateLabel(item.dueOn)}</li>)}
                           </ul>
                           {invoice.status === "failed" && invoice.lastError && <p className="mt-2 text-xs text-clay">{invoice.lastError}</p>}
                           <div className="mt-3 flex flex-wrap gap-3">
@@ -792,8 +792,11 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
                         {planned && ("error" in planned
                           ? <p className="text-xs text-clay">{planned.error}</p>
                           : <div className="rounded-xl bg-parchment/70 p-3">
-                            <p className="font-semibold text-pine-deep">Square will send:</p>
-                            <ul className="mt-1 space-y-1 text-ink/75">{planned.installments.map(item => <li key={item.seq}>{money(item.amountCents)} due {reservationDateLabel(item.dueOn)}</li>)}</ul>
+                            <p className="font-semibold text-pine-deep">Square will send {planned.installments.length === 1 ? "one invoice" : `${planned.installments.length} separate invoices`}:</p>
+                            <ul className="mt-1 space-y-1 text-ink/75">{planned.installments.map(item => {
+                              const sendOn = invoiceSendDate(item.dueOn, todayEastern());
+                              return <li key={item.seq}>{money(item.amountCents)} due {reservationDateLabel(item.dueOn)} · emailed {sendOn ? reservationDateLabel(sendOn) : "right away"}</li>;
+                            })}</ul>
                           </div>)}
                         <div className="flex flex-wrap gap-3">
                           <button type="button" disabled={disabled || !planned || "error" in planned} onClick={() => void sendInvoice(reservation)} className={BUTTON}>{busy === "bill" ? "Sending…" : "Send invoice"}</button>

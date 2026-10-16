@@ -33,9 +33,15 @@ export interface InvoiceView {
   publicUrl: string | null;
   lastError: string | null;
   createdAt: string;
-  installments: Installment[];
+  installments: (Installment & { paidCents: number })[];
   /** How many scheduled payments the money received so far covers. */
   installmentsPaid: number;
+}
+
+/** Server-side Square ids for one scheduled payment; never sent to the browser. */
+export interface InstallmentSquare {
+  seq: number; amountCents: number; dueOn: string; squareOrderId: string | null; squareInvoiceId: string | null;
+  squareInvoiceVersion: number | null; published: boolean; cancelled: boolean; paidCents: number;
 }
 
 interface InvoiceRow {
@@ -48,13 +54,16 @@ interface InvoiceRow {
 
 export interface InvoiceRecord extends InvoiceView {
   environment: "sandbox" | "production";
+  squareInstallments: InstallmentSquare[];
   squareCustomerId: string | null;
   squareOrderId: string | null;
   squareInvoiceId: string | null;
   squareInvoiceVersion: number | null;
 }
 
-function installmentsPaid(installments: Installment[], paidCents: number): number {
+function installmentsPaid(installments: InstallmentSquare[], paidCents: number): number {
+  // Each payment has its own Square invoice: count the ones covered.
+  if (installments.some(item => item.squareOrderId)) return installments.filter(item => item.paidCents >= item.amountCents).length;
   let running = 0;
   let count = 0;
   for (const item of [...installments].sort((a, b) => a.seq - b.seq)) {
@@ -64,35 +73,42 @@ function installmentsPaid(installments: Installment[], paidCents: number): numbe
   return count;
 }
 
-async function readInstallments(sql: QuerySql, invoiceIds: string[]): Promise<Map<string, Installment[]>> {
-  const map = new Map<string, Installment[]>();
+async function readInstallments(sql: QuerySql, invoiceIds: string[]): Promise<Map<string, InstallmentSquare[]>> {
+  const map = new Map<string, InstallmentSquare[]>();
   if (!invoiceIds.length) return map;
-  const rows = await sql<{ invoice_id: string; seq: number; due_on: string; amount_cents: string | number }[]>`
-    SELECT invoice_id, seq, due_on::text AS due_on, amount_cents FROM fame_invoice_installments
-    WHERE invoice_id = ANY(${invoiceIds}::text[]) ORDER BY invoice_id, seq`;
+  const rows = await sql<{ invoice_id: string; seq: number; due_on: string; amount_cents: string | number; square_order_id: string | null;
+    square_invoice_id: string | null; square_invoice_version: number | null; published: boolean; cancelled: boolean; paid_cents: string | number }[]>`
+    SELECT invoice_id, seq, due_on::text AS due_on, amount_cents, square_order_id, square_invoice_id, square_invoice_version,
+      published, cancelled, paid_cents
+    FROM fame_invoice_installments WHERE invoice_id = ANY(${invoiceIds}::text[]) ORDER BY invoice_id, seq`;
   for (const row of rows) {
     const list = map.get(row.invoice_id) ?? [];
-    list.push({ seq: Number(row.seq), dueOn: row.due_on, amountCents: Number(row.amount_cents) });
+    list.push({
+      seq: Number(row.seq), dueOn: row.due_on, amountCents: Number(row.amount_cents), squareOrderId: row.square_order_id,
+      squareInvoiceId: row.square_invoice_id, squareInvoiceVersion: row.square_invoice_version === null ? null : Number(row.square_invoice_version),
+      published: row.published, cancelled: row.cancelled, paidCents: Number(row.paid_cents),
+    });
     map.set(row.invoice_id, list);
   }
   return map;
 }
 
-function toRecord(row: InvoiceRow, installments: Installment[]): InvoiceRecord {
+function toRecord(row: InvoiceRow, squareInstallments: InstallmentSquare[]): InvoiceRecord {
   const paidCents = Number(row.paid_cents);
+  const installments = squareInstallments.map(item => ({ seq: item.seq, dueOn: item.dueOn, amountCents: item.amountCents, paidCents: item.paidCents }));
   return {
     id: row.id, reservationId: row.reservation_id, plan: row.plan, status: row.status,
     totalCents: Number(row.total_cents), quotedCents: Number(row.quoted_cents), paidCents,
     adjustmentReason: row.adjustment_reason, publicUrl: row.public_url, lastError: row.last_error,
-    createdAt: new Date(row.created_at).toISOString(), installments, installmentsPaid: installmentsPaid(installments, paidCents),
-    environment: row.square_environment, squareCustomerId: row.square_customer_id, squareOrderId: row.square_order_id,
+    createdAt: new Date(row.created_at).toISOString(), installments, installmentsPaid: installmentsPaid(squareInstallments, paidCents),
+    environment: row.square_environment, squareInstallments, squareCustomerId: row.square_customer_id, squareOrderId: row.square_order_id,
     squareInvoiceId: row.square_invoice_id, squareInvoiceVersion: row.square_invoice_version,
   };
 }
 
 /** Browser-safe projection: no Square ids. */
 export function invoiceView(record: InvoiceRecord): InvoiceView {
-  const { environment: _e, squareCustomerId: _c, squareOrderId: _o, squareInvoiceId: _i, squareInvoiceVersion: _v, ...view } = record;
+  const { environment: _e, squareCustomerId: _c, squareOrderId: _o, squareInvoiceId: _i, squareInvoiceVersion: _v, squareInstallments: _s, ...view } = record;
   return view;
 }
 
@@ -178,19 +194,34 @@ export async function beginInvoice(input: {
       await tx`INSERT INTO fame_invoice_installments (invoice_id, seq, due_on, amount_cents) VALUES (${id}, ${item.seq}, ${item.dueOn}::date, ${item.amountCents})`;
     }
     const [row] = await tx.unsafe<InvoiceRow[]>(`SELECT ${SELECT_INVOICE} FROM fame_invoices WHERE id = $1`, [id]);
-    return { kind: "started", invoice: toRecord(row, input.request.installments), target } as const;
+    return { kind: "started", invoice: toRecord(row, (await readInstallments(tx, [id])).get(id) ?? []), target } as const;
   });
 }
 
-/** The Square draft exists; remembered so a retry publishes it instead of creating another. */
-export async function recordInvoiceDraft(input: { invoiceId: string; customerId: string; orderId: string; squareInvoiceId: string; version: number; now?: Date }, sql: Sql = configuredClient()): Promise<void> {
-  await sql`UPDATE fame_invoices SET square_customer_id = ${input.customerId}, square_order_id = ${input.orderId},
-    square_invoice_id = ${input.squareInvoiceId}, square_invoice_version = ${input.version}, updated_at = ${input.now ?? new Date()}
-    WHERE id = ${input.invoiceId} AND status = 'creating'`;
+/** One payment's Square draft exists; remembered so a retry publishes it instead of creating another. */
+export async function recordInstallmentDraft(input: { invoiceId: string; seq: number; customerId: string; orderId: string; squareInvoiceId: string; version: number; now?: Date }, sql: Sql = configuredClient()): Promise<void> {
+  const now = input.now ?? new Date();
+  await sql.begin(async tx => {
+    await tx`UPDATE fame_invoices SET square_customer_id = ${input.customerId}, updated_at = ${now} WHERE id = ${input.invoiceId}`;
+    await tx`UPDATE fame_invoice_installments SET square_order_id = ${input.orderId}, square_invoice_id = ${input.squareInvoiceId},
+      square_invoice_version = ${input.version} WHERE invoice_id = ${input.invoiceId} AND seq = ${input.seq}`;
+  });
 }
 
-export async function markInvoiceOpen(input: { invoiceId: string; version: number; publicUrl: string | null; now?: Date }, sql: Sql = configuredClient()): Promise<void> {
-  await sql`UPDATE fame_invoices SET status = 'open', square_invoice_version = ${input.version}, public_url = ${input.publicUrl},
+/** Square accepted the payment's invoice (sent now, or scheduled for its send date). */
+export async function markInstallmentPublished(input: { invoiceId: string; seq: number; version: number; publicUrl: string | null }, sql: Sql = configuredClient()): Promise<void> {
+  await sql`UPDATE fame_invoice_installments SET published = TRUE, square_invoice_version = ${input.version}, public_url = ${input.publicUrl}
+    WHERE invoice_id = ${input.invoiceId} AND seq = ${input.seq}`;
+}
+
+/** Square stopped (or deleted) this payment's invoice. */
+export async function markInstallmentCancelled(input: { invoiceId: string; seq: number }, sql: Sql = configuredClient()): Promise<void> {
+  await sql`UPDATE fame_invoice_installments SET cancelled = TRUE WHERE invoice_id = ${input.invoiceId} AND seq = ${input.seq}`;
+}
+
+/** Every payment is with Square: the plan is open. The first payment's page is the one staff can open. */
+export async function markInvoiceOpen(input: { invoiceId: string; publicUrl: string | null; now?: Date }, sql: Sql = configuredClient()): Promise<void> {
+  await sql`UPDATE fame_invoices SET status = 'open', public_url = ${input.publicUrl},
     last_error = NULL, updated_at = ${input.now ?? new Date()} WHERE id = ${input.invoiceId} AND status = 'creating'`;
 }
 
@@ -220,16 +251,27 @@ export async function applyInvoicePayment(tx: QuerySql, event: InvoicePaymentEve
   null | { disposition: "paid" | "ignored" | "manual_review"; reason: string; invoicePaid: boolean }
 > {
   if (!await invoicesReady(tx)) return null;
-  const [invoice] = await tx<{ id: string; market_id: string; reservation_id: string; status: string; total_cents: string | number }[]>`
-    SELECT id, market_id, reservation_id, status, total_cents FROM fame_invoices
-    WHERE square_environment = ${event.environment} AND square_order_id = ${event.orderId} FOR UPDATE`;
+  // Each payment of a plan has its own Square order; older plans used one order for the whole invoice.
+  const [installment] = await tx<{ invoice_id: string; seq: number }[]>`
+    SELECT n.invoice_id, n.seq FROM fame_invoice_installments n JOIN fame_invoices i ON i.id = n.invoice_id
+    WHERE n.square_order_id = ${event.orderId} AND i.square_environment = ${event.environment}`;
+  const [invoice] = installment
+    ? await tx<{ id: string; market_id: string; reservation_id: string; status: string; total_cents: string | number }[]>`
+      SELECT id, market_id, reservation_id, status, total_cents FROM fame_invoices WHERE id = ${installment.invoice_id} FOR UPDATE`
+    : await tx<{ id: string; market_id: string; reservation_id: string; status: string; total_cents: string | number }[]>`
+      SELECT id, market_id, reservation_id, status, total_cents FROM fame_invoices
+      WHERE square_environment = ${event.environment} AND square_order_id = ${event.orderId} FOR UPDATE`;
   if (!invoice) return null;
   if (event.status !== "COMPLETED") return { disposition: "ignored", reason: "invoice_payment_not_completed", invoicePaid: false };
   if (event.currency !== "USD") return { disposition: "manual_review", reason: "invoice_payment_currency_mismatch", invoicePaid: false };
-  const inserted = await tx`INSERT INTO fame_invoice_payments (square_environment, payment_id, invoice_id, amount_cents, received_at)
-    VALUES (${event.environment}, ${event.paymentId}, ${invoice.id}, ${event.amountCents}, ${now})
+  const inserted = await tx`INSERT INTO fame_invoice_payments (square_environment, payment_id, invoice_id, amount_cents, received_at, installment_seq)
+    VALUES (${event.environment}, ${event.paymentId}, ${invoice.id}, ${event.amountCents}, ${now}, ${installment ? installment.seq : null})
     ON CONFLICT (square_environment, payment_id) DO NOTHING RETURNING payment_id`;
   if (!inserted.length) return { disposition: "ignored", reason: "invoice_payment_already_recorded", invoicePaid: false };
+  if (installment) {
+    await tx`UPDATE fame_invoice_installments SET paid_cents = (SELECT COALESCE(SUM(amount_cents), 0) FROM fame_invoice_payments
+      WHERE invoice_id = ${invoice.id} AND installment_seq = ${installment.seq}) WHERE invoice_id = ${invoice.id} AND seq = ${installment.seq}`;
+  }
   const [sum] = await tx<{ paid: string | number }[]>`SELECT COALESCE(SUM(amount_cents), 0) AS paid FROM fame_invoice_payments WHERE invoice_id = ${invoice.id}`;
   const paid = Number(sum?.paid ?? 0);
   const covered = paid >= Number(invoice.total_cents);
