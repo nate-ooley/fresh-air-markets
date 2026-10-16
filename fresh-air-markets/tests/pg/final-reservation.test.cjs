@@ -79,6 +79,7 @@ before(async () => {
       '032-vendor-invoices.sql',
       '033-invoice-per-installment.sql',
       '034-vendor-adjustments.sql',
+      '035-manual-payments.sql',
     ]) await migration.unsafe(fs.readFileSync(path.join(__dirname, '../../docs/migrations', file), 'utf8'));
   } finally {
     await migration.end();
@@ -730,4 +731,34 @@ test('changing dates keeps Saturdays that already happened on the booking (still
   const kept = await planDateChange({ marketId, reservationId: made.reservation.id, dates: ['2026-10-03', '2026-10-10'], booths: 1, today: '2026-10-05', config: config(2) }, first);
   assert.equal(kept.kind, 'ok');
   assert.deepEqual(kept.quote.dates, ['2026-10-03', '2026-10-10']);
+});
+
+test('a payment taken in Square is recorded on the booking and balance; paying in full marks the booking paid; undo reopens it', async () => {
+  const { applicationId, id } = await bookingWithLiveLink(['2026-10-03', '2026-10-10']);
+  const pay = patch => ledger.recordManualPayment({ marketId, reservationId: id, amountCents: 3000, paidOn: '2026-10-15', note: 'Square invoice #12', today: '2026-10-16', actorAccountId: marketId, now: later(1), ...patch }, first);
+  // Bad input is refused and nothing is written.
+  for (const patch of [{ amountCents: 0 }, { amountCents: 8001 }, { paidOn: '2026-10-17' }, { paidOn: 'yesterday' }, { paidOn: '2025-12-31' }, { note: 'x'.repeat(301) }]) {
+    assert.equal((await pay(patch)).kind, 'invalid', JSON.stringify(patch));
+  }
+  assert.equal(await ledger.hasPriceAdjustment(marketId, id, first), false);
+  // Part payment: balance drops, booking still awaiting payment, full-price link now off-limits.
+  const part = await pay({});
+  assert.deepEqual([part.kind, part.bookingPaid], ['saved', false]);
+  let balance = await ledger.vendorBalance(marketId, applicationId, first);
+  assert.deepEqual([balance.totals.paidCents, balance.totals.owedCents, balance.bookings[0].state], [3000, 5000, 'payment_pending']);
+  const line = balance.lines.find(item => item.manualPaymentId);
+  assert.match(line.label, /taken in Square.*Square invoice #12/);
+  assert.equal(line.voidable, true);
+  assert.equal(await ledger.hasPriceAdjustment(marketId, id, first), true);
+  // The rest: booking becomes paid; nothing more can be recorded.
+  const rest = await pay({ amountCents: 5000, note: '' });
+  assert.deepEqual([rest.kind, rest.bookingPaid], ['saved', true]);
+  balance = await ledger.vendorBalance(marketId, applicationId, first);
+  assert.deepEqual([balance.totals.owedCents, balance.bookings[0].state], [0, 'paid']);
+  assert.equal((await pay({ amountCents: 100 })).kind, 'not_allowed');
+  // Undo the payment that settled it: the booking goes back to awaiting payment.
+  assert.deepEqual(await ledger.voidManualPayment({ marketId, paymentId: rest.paymentId }, first), { kind: 'voided', bookingReopened: true });
+  balance = await ledger.vendorBalance(marketId, applicationId, first);
+  assert.deepEqual([balance.totals.owedCents, balance.bookings[0].state], [5000, 'payment_pending']);
+  assert.deepEqual(await ledger.voidManualPayment({ marketId, paymentId: rest.paymentId }, first), { kind: 'not_found' });
 });

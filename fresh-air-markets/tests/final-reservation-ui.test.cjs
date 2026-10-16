@@ -112,6 +112,8 @@ function renderPanel(options = {}) {
     options.balance ?? null, null, 'amount', '', '', false, '', '', false, null,
     // review steps: add confirming (tests submit straight through), change confirming
     options.confirmed ?? true, false,
+    // record a Square payment: target, amount, date, note, confirming
+    null, '', '', '', false,
   ];
   let index = 0;
   const updates = [];

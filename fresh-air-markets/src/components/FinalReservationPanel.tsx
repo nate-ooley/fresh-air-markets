@@ -111,7 +111,7 @@ const INVOICE_STATUS: Record<InvoiceInfo["status"], string> = {
 };
 
 interface BalanceBooking { reservationId: string; chargeCents: number; discountCents: number; creditAppliedCents: number; paidCents: number; balanceCents: number }
-interface BalanceLine { at: string; kind: string; label: string; amountCents: number; runningCents: number; adjustmentId?: string; voidable?: boolean }
+interface BalanceLine { at: string; kind: string; label: string; amountCents: number; runningCents: number; adjustmentId?: string; manualPaymentId?: string; voidable?: boolean }
 interface BalanceView {
   bookings: BalanceBooking[]; lines: BalanceLine[]; creditAvailableCents: number;
   totals: { chargedCents: number; discountCents: number; creditCents: number; paidCents: number; owedCents: number };
@@ -203,6 +203,12 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
   // Review-then-confirm steps for saving dates.
   const [addConfirming, setAddConfirming] = useState(false);
   const [changeConfirming, setChangeConfirming] = useState(false);
+  // Recording a payment taken directly in Square (phone or computer).
+  const [payTarget, setPayTarget] = useState<string | null>(null);
+  const [payAmount, setPayAmount] = useState("");
+  const [payDate, setPayDate] = useState("");
+  const [payNote, setPayNote] = useState("");
+  const [payConfirming, setPayConfirming] = useState(false);
 
   const endpoint = `/api/admin/applications/${encodeURIComponent(applicationId)}/reserve`;
   const load = useCallback(async (signal?: AbortSignal) => {
@@ -643,8 +649,29 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
   }
 
   async function undoAdjustment(line: BalanceLine) {
-    if (!line.adjustmentId || !window.confirm(`Undo "${line.label}"? It stays on record as undone.`)) return;
-    await postAdjustment(`/api/admin/adjustments/${encodeURIComponent(line.adjustmentId)}/void`, {}, "Undone.");
+    if (!(line.adjustmentId || line.manualPaymentId) || !window.confirm(`Undo "${line.label}"? It stays on record as undone.`)) return;
+    await postAdjustment(line.manualPaymentId
+      ? `/api/admin/manual-payments/${encodeURIComponent(line.manualPaymentId)}/void`
+      : `/api/admin/adjustments/${encodeURIComponent(line.adjustmentId!)}/void`, {}, "Undone.");
+  }
+
+  function startPayment(reservation: FinalReservationView) {
+    setPayTarget(reservation.id);
+    setPayAmount((owedOn(reservation) / 100).toFixed(2));
+    setPayDate(todayEastern());
+    setPayNote("");
+    setPayConfirming(false);
+    setError(""); setNotice("");
+  }
+
+  async function savePayment(reservation: FinalReservationView) {
+    const cents = Math.round(Number(payAmount) * 100);
+    if (!Number.isFinite(cents) || cents < 1) { setError("Enter the amount the vendor paid."); setPayConfirming(false); return; }
+    const covered = cents >= owedOn(reservation);
+    if (await postAdjustment(`/api/admin/reservations/${encodeURIComponent(reservation.id)}/manual-payment`, { amountCents: cents, paidOn: payDate, note: payNote },
+      covered ? "Payment recorded. The booking is now paid and its online payment link was turned off." : "Payment recorded. The rest is still owed on this booking.")) {
+      setPayTarget(null); setPayConfirming(false);
+    } else setPayConfirming(false);
   }
 
   async function confirmRequest(request: BookingRequestView) {
@@ -791,7 +818,7 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
                       <td className="py-2 pr-3 text-ink/80">{line.label}</td>
                       <td className="py-2 pr-3 text-right whitespace-nowrap">{line.amountCents === 0 ? "—" : line.amountCents > 0 ? money(line.amountCents) : `−${money(-line.amountCents)}`}</td>
                       <td className="py-2 pr-3 text-right whitespace-nowrap font-semibold text-pine-deep">{money(line.runningCents)}</td>
-                      <td className="py-2 text-right">{line.adjustmentId && line.voidable && <button type="button" disabled={disabled} onClick={() => void undoAdjustment(line)} className="text-xs font-semibold text-clay underline underline-offset-4">Undo</button>}</td>
+                      <td className="py-2 text-right">{(line.adjustmentId || line.manualPaymentId) && line.voidable && <button type="button" disabled={disabled} onClick={() => void undoAdjustment(line)} className="text-xs font-semibold text-clay underline underline-offset-4">Undo</button>}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -847,10 +874,10 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
                   </section>
                 )}
 
-                {reservation.paymentRequired && ["held", "payment_pending"].includes(reservation.state) && (balance?.bookings?.find(item => item.reservationId === reservation.id)?.discountCents || balance?.bookings?.find(item => item.reservationId === reservation.id)?.creditAppliedCents) && !invoices.some(item => item.reservationId === reservation.id && (item.status === "open" || item.status === "creating")) ? (
-                  <p className="mt-5 rounded-2xl bg-amber/15 p-4 text-sm text-clay">This booking's price was changed, so the full-price payment link is turned off. Use "Bill this vendor" to send the new amount.</p>
+                {reservation.paymentRequired && ["held", "payment_pending"].includes(reservation.state) && (balance?.bookings?.find(item => item.reservationId === reservation.id)?.discountCents || balance?.bookings?.find(item => item.reservationId === reservation.id)?.creditAppliedCents || balance?.bookings?.find(item => item.reservationId === reservation.id)?.paidCents) && !invoices.some(item => item.reservationId === reservation.id && (item.status === "open" || item.status === "creating")) ? (
+                  <p className="mt-5 rounded-2xl bg-amber/15 p-4 text-sm text-clay">This booking's price was changed or part of it was paid in Square, so the full-price payment link is turned off. Bill the rest in Square and record it here.</p>
                 ) : null}
-                {reservation.paymentRequired && ["held", "payment_pending"].includes(reservation.state) && !invoices.some(item => item.reservationId === reservation.id && (item.status === "open" || item.status === "creating")) && !(balance?.bookings?.find(item => item.reservationId === reservation.id)?.discountCents || balance?.bookings?.find(item => item.reservationId === reservation.id)?.creditAppliedCents) && (
+                {reservation.paymentRequired && ["held", "payment_pending"].includes(reservation.state) && !invoices.some(item => item.reservationId === reservation.id && (item.status === "open" || item.status === "creating")) && !(balance?.bookings?.find(item => item.reservationId === reservation.id)?.discountCents || balance?.bookings?.find(item => item.reservationId === reservation.id)?.creditAppliedCents || balance?.bookings?.find(item => item.reservationId === reservation.id)?.paidCents) && (
                   <section className="mt-5 rounded-2xl border border-pine/15 bg-white/60 p-5">
                     <h4 className="font-semibold text-pine-deep">Payment request</h4>
                     <p className="mt-2 text-sm leading-relaxed text-ink/65">{deadlineEnforced
@@ -864,7 +891,7 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
                   </section>
                 )}
 
-                {canCreateAccess(reservation) && !invoices.some(item => item.reservationId === reservation.id && (item.status === "open" || item.status === "creating")) && !(balance?.bookings?.find(item => item.reservationId === reservation.id)?.discountCents || balance?.bookings?.find(item => item.reservationId === reservation.id)?.creditAppliedCents) && (
+                {canCreateAccess(reservation) && !invoices.some(item => item.reservationId === reservation.id && (item.status === "open" || item.status === "creating")) && !(balance?.bookings?.find(item => item.reservationId === reservation.id)?.discountCents || balance?.bookings?.find(item => item.reservationId === reservation.id)?.creditAppliedCents || balance?.bookings?.find(item => item.reservationId === reservation.id)?.paidCents) && (
                   <section className="mt-5 rounded-2xl border border-pine/15 bg-white/60 p-5">
                     <h4 className="font-semibold text-pine-deep">Email the payment link</h4>
                     <p className="mt-2 text-sm leading-relaxed text-ink/65">Emails the vendor their private reservation page with the total and their dates{deadlineEnforced ? " and the 48-hour deadline" : ", and asks them to pay within 48 hours"}. The link is only for this vendor; anyone who has it can open this reservation. Sending again issues a fresh link and revokes the old one.</p>
@@ -883,6 +910,52 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
                     </div>}
                   </section>
                 )}
+
+                {reservation.paymentRequired && (reservation.state === "held" || reservation.state === "payment_pending") && !invoices.some(item => item.reservationId === reservation.id && (item.status === "open" || item.status === "creating")) && (() => {
+                  const owed = owedOn(reservation);
+                  const cents = Math.round(Number(payAmount) * 100);
+                  return (
+                    <section className="mt-5 rounded-2xl border border-pine/30 bg-white/60 p-5">
+                      <h4 className="font-semibold text-pine-deep">Record a payment taken in Square</h4>
+                      {payTarget !== reservation.id && <>
+                        <p className="mt-2 text-sm leading-relaxed text-ink/65">Billed this vendor yourself in Square (phone app or computer)? Record the payment here once they've paid so this booking, their balance and reminders are up to date.</p>
+                        <button type="button" disabled={disabled} onClick={() => startPayment(reservation)} className={`${QUIET_BUTTON} mt-4`}>Record a payment</button>
+                      </>}
+                      {payTarget === reservation.id && <div className="mt-3 space-y-3 text-sm">
+                        <div className="flex flex-wrap items-end gap-3">
+                          <label className="font-semibold text-pine-deep">Amount paid ($)
+                            <input type="number" min={0.01} step="0.01" value={payAmount} disabled={disabled || payConfirming} onChange={event => setPayAmount(event.target.value)} className={`${FIELD} w-32`} />
+                          </label>
+                          <label className="font-semibold text-pine-deep">Date paid
+                            <input type="date" value={payDate} max={todayEastern()} disabled={disabled || payConfirming} onChange={event => setPayDate(event.target.value)} className={`${FIELD} w-44`} />
+                          </label>
+                          <p className="pb-3 text-ink/65">Owed on this booking: <strong>{money(owed)}</strong></p>
+                        </div>
+                        <label className="block font-semibold text-pine-deep">Note (optional)
+                          <input type="text" maxLength={300} value={payNote} disabled={disabled || payConfirming} onChange={event => setPayNote(event.target.value)} placeholder="Example: Square invoice #1042, paid by card" className={FIELD} />
+                        </label>
+                        {!payConfirming && <div className="flex flex-wrap gap-3">
+                          <button type="button" disabled={disabled} onClick={() => {
+                            if (!Number.isFinite(cents) || cents < 1) { setError("Enter the amount the vendor paid."); return; }
+                            if (cents > owed) { setError(`That's more than the ${money(owed)} still owed on this booking.`); return; }
+                            if (!payDate || payDate > todayEastern()) { setError("Enter the date the vendor paid (today or earlier)."); return; }
+                            setError(""); setPayConfirming(true);
+                          }} className={BUTTON}>Review payment</button>
+                          <button type="button" disabled={disabled} onClick={() => setPayTarget(null)} className={QUIET_BUTTON}>Cancel</button>
+                        </div>}
+                        {payConfirming && <div role="region" aria-label="Confirm payment" className="rounded-2xl border-2 border-pine bg-parchment/70 p-4">
+                          <h5 className="font-semibold text-pine-deep">Confirm this payment</h5>
+                          <p className="mt-2 text-pine-deep">{money(cents)} paid {reservationDateLabel(payDate)}{payNote.trim() ? ` · ${payNote.trim()}` : ""}</p>
+                          <p className="mt-1 text-pine-deep">{cents >= owed ? "This pays the booking in full. It will show as Paid and its online payment link will be turned off." : `${money(owed - cents)} will still be owed on this booking.`}</p>
+                          <div className="mt-3 flex flex-wrap gap-3">
+                            <button type="button" disabled={disabled} onClick={() => void savePayment(reservation)} className={BUTTON}>{busy === "bill" ? "Saving…" : "Confirm and save"}</button>
+                            <button type="button" disabled={disabled} onClick={() => setPayConfirming(false)} className={QUIET_BUTTON}>Go back</button>
+                          </div>
+                        </div>}
+                      </div>}
+                    </section>
+                  );
+                })()}
 
                 {(() => {
                   const invoice = invoices.find(item => item.reservationId === reservation.id) ?? null;
@@ -989,7 +1062,7 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
                   </section>
                 )}
 
-                {CHANGEABLE_STATES.has(reservation.state) && reservation.paymentRequired && !invoices.some(item => item.reservationId === reservation.id && (item.status === "open" || item.status === "creating")) && !(balance?.bookings?.find(item => item.reservationId === reservation.id)?.discountCents || balance?.bookings?.find(item => item.reservationId === reservation.id)?.creditAppliedCents) && (() => {
+                {CHANGEABLE_STATES.has(reservation.state) && reservation.paymentRequired && !invoices.some(item => item.reservationId === reservation.id && (item.status === "open" || item.status === "creating")) && !(balance?.bookings?.find(item => item.reservationId === reservation.id)?.discountCents || balance?.bookings?.find(item => item.reservationId === reservation.id)?.creditAppliedCents || balance?.bookings?.find(item => item.reservationId === reservation.id)?.paidCents) && (() => {
                   const changing = changeTarget === reservation.id;
                   const otherHeld = new Set(liveReservations.filter(item => item.id !== reservation.id).flatMap(item => item.finalDates));
                   const today = todayEastern();

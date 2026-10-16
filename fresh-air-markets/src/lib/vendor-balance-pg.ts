@@ -47,6 +47,8 @@ export interface LedgerLine {
   amountCents: number;
   runningCents: number;
   adjustmentId?: string;
+  /** A payment staff recorded from outside the portal (e.g. the Square app); undoable. */
+  manualPaymentId?: string;
   reservationId?: string;
   voidable?: boolean;
 }
@@ -60,7 +62,12 @@ export interface VendorBalance {
 
 interface ReservationRow { id: string; state: string; total_cents: string | number; final_dates: unknown; created_at: Date }
 interface AdjustmentRow { id: string; reservation_id: string | null; kind: "discount" | "credit" | "credit_applied"; amount_cents: string | number; percent: string | null; reason: string; created_at: Date }
-interface PaymentRow { reservation_id: string; amount_cents: string | number; at: Date; source: "checkout" | "invoice" }
+interface PaymentRow { reservation_id: string; amount_cents: string | number; at: Date; source: "checkout" | "invoice" | "manual"; id?: string; note?: string }
+
+async function manualPaymentsReady(sql: QuerySql): Promise<boolean> {
+  const [row] = await sql<{ present: boolean }[]>`SELECT to_regclass('fame_manual_payments') IS NOT NULL AS present`;
+  return Boolean(row?.present);
+}
 
 async function adjustmentsReady(sql: QuerySql): Promise<boolean> {
   const [row] = await sql<{ present: boolean }[]>`SELECT to_regclass('fame_vendor_adjustments') IS NOT NULL AS present`;
@@ -86,7 +93,10 @@ export async function vendorBalance(marketId: string, applicationId: string, sql
     WHERE market_id = ${marketId} AND reservation_id = ANY(${ids}::text[]) AND status = 'paid'`,
   ...(await invoicesReady(sql) ? await sql<PaymentRow[]>`
     SELECT i.reservation_id, p.amount_cents, p.received_at AS at, 'invoice' AS source FROM fame_invoice_payments p
-    JOIN fame_invoices i ON i.id = p.invoice_id WHERE i.market_id = ${marketId} AND i.reservation_id = ANY(${ids}::text[])` : [])] : [];
+    JOIN fame_invoices i ON i.id = p.invoice_id WHERE i.market_id = ${marketId} AND i.reservation_id = ANY(${ids}::text[])` : []),
+  ...(await manualPaymentsReady(sql) ? await sql<PaymentRow[]>`
+    SELECT reservation_id, amount_cents, (paid_on::timestamp + interval '12 hours') AS at, 'manual' AS source, id, note FROM fame_manual_payments
+    WHERE market_id = ${marketId} AND reservation_id = ANY(${ids}::text[]) AND voided_at IS NULL` : [])] : [];
 
   const counted = new Set(reservations.filter(row => COUNTED_STATES.includes(row.state)).map(row => row.id));
   const datesOf = (row: ReservationRow) => Array.isArray(row.final_dates) ? row.final_dates.filter((d): d is string => typeof d === "string").sort() : [];
@@ -121,7 +131,11 @@ export async function vendorBalance(marketId: string, applicationId: string, sql
   }
   for (const p of payments) {
     const row = byId.get(p.reservation_id);
-    events.push({ at: new Date(p.at).toISOString(), kind: "payment", label: `Payment${p.source === "invoice" ? " (Square invoice)" : ""}${row ? ` for ${bookingLabel(datesOf(row))}` : ""}`, amountCents: -Number(p.amount_cents), reservationId: p.reservation_id });
+    events.push({
+      at: new Date(p.at).toISOString(), kind: "payment",
+      label: `Payment${p.source === "invoice" ? " (Square invoice)" : p.source === "manual" ? " taken in Square" : ""}${row ? ` for ${bookingLabel(datesOf(row))}` : ""}${p.note ? `: ${p.note}` : ""}`,
+      amountCents: -Number(p.amount_cents), reservationId: p.reservation_id, ...(p.source === "manual" && p.id ? { manualPaymentId: p.id } : {}),
+    });
   }
   events.sort((a, b) => a.at.localeCompare(b.at));
   let running = 0;
@@ -130,7 +144,7 @@ export async function vendorBalance(marketId: string, applicationId: string, sql
     running += event.amountCents;
     const voidable = event.kind === "credit" ? creditGiven - creditUsed >= -event.amountCents
       : (event.kind === "discount" || event.kind === "credit_applied") && Boolean(event.reservationId && adjustable.has(event.reservationId));
-    return { ...event, runningCents: running, ...(event.adjustmentId ? { voidable } : {}) };
+    return { ...event, runningCents: running, ...(event.adjustmentId ? { voidable } : event.manualPaymentId ? { voidable: true } : {}) };
   });
   const chargedCents = bookings.reduce((n, b) => n + b.chargeCents, 0);
   const discountCents = bookings.reduce((n, b) => n + b.discountCents, 0);
@@ -150,14 +164,90 @@ export async function bookingBalanceDue(marketId: string, reservationId: string,
   return booking ? { ...booking, applicationId: row.application_id, creditAvailableCents: balance.creditAvailableCents } : null;
 }
 
-/** True when staff changed this booking's price; the full-price payment link must not be used then. */
+/**
+ * True when staff changed what this booking owes (discount, credit, or a
+ * payment taken in Square); the full-price payment link must not be used then.
+ */
 export async function hasPriceAdjustment(marketId: string, reservationId: string, sql: QuerySql = configuredClient()): Promise<boolean> {
   try {
-    if (!await adjustmentsReady(sql)) return false;
-    const [row] = await sql<{ adjusted: boolean }[]>`SELECT EXISTS (SELECT 1 FROM fame_vendor_adjustments WHERE market_id = ${marketId}
-      AND reservation_id = ${reservationId} AND kind IN ('discount', 'credit_applied') AND voided_at IS NULL) AS adjusted`;
-    return Boolean(row?.adjusted);
+    if (await adjustmentsReady(sql)) {
+      const [row] = await sql<{ adjusted: boolean }[]>`SELECT EXISTS (SELECT 1 FROM fame_vendor_adjustments WHERE market_id = ${marketId}
+        AND reservation_id = ${reservationId} AND kind IN ('discount', 'credit_applied') AND voided_at IS NULL) AS adjusted`;
+      if (row?.adjusted) return true;
+    }
+    if (await manualPaymentsReady(sql)) {
+      const [row] = await sql<{ paid: boolean }[]>`SELECT EXISTS (SELECT 1 FROM fame_manual_payments WHERE market_id = ${marketId}
+        AND reservation_id = ${reservationId} AND voided_at IS NULL) AS paid`;
+      if (row?.paid) return true;
+    }
+    return false;
   } catch { return false; }
+}
+
+export type ManualPaymentResult =
+  | { kind: "saved"; paymentId: string; amountCents: number; bookingPaid: boolean }
+  | { kind: "not_found" }
+  | { kind: "not_allowed"; reason: string }
+  | { kind: "invalid"; error: string };
+
+const DATE = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * Records a payment staff took outside the portal (e.g. a payment request
+ * sent from the Square app). When payments cover what the booking owes, the
+ * booking becomes paid.
+ */
+export async function recordManualPayment(input: {
+  marketId: string; reservationId: string; amountCents: unknown; paidOn: unknown; note: unknown; today: string; actorAccountId: string; now?: Date;
+}, sql: Sql = configuredClient()): Promise<ManualPaymentResult> {
+  const amount = Number(input.amountCents);
+  if (!Number.isSafeInteger(amount) || amount < 1) return { kind: "invalid", error: "Enter the amount the vendor paid." };
+  const paidOn = typeof input.paidOn === "string" ? input.paidOn : "";
+  if (!DATE.test(paidOn) || new Date(`${paidOn}T12:00:00Z`).toISOString().slice(0, 10) !== paidOn) return { kind: "invalid", error: "Enter the date the vendor paid." };
+  if (paidOn > input.today) return { kind: "invalid", error: "The payment date can't be in the future." };
+  if (paidOn < "2026-01-01") return { kind: "invalid", error: "That payment date is before this season." };
+  const note = typeof input.note === "string" ? input.note.replace(/\s+/g, " ").trim() : "";
+  if (note.length > 300) return { kind: "invalid", error: "Keep the note under 300 characters." };
+  return sql.begin(async tx => {
+    const [row] = await tx<{ application_id: string | null; state: string; payment_required: boolean }[]>`
+      SELECT application_id, state, payment_required FROM fame_reservations WHERE id = ${input.reservationId} AND market_id = ${input.marketId} FOR UPDATE`;
+    if (!row?.application_id) return { kind: "not_found" } as const;
+    if (!row.payment_required) return { kind: "not_allowed", reason: "Nonprofit bookings have nothing to pay." } as const;
+    if (!ADJUSTABLE_STATES.includes(row.state)) return { kind: "not_allowed", reason: row.state === "paid" || row.state === "confirmed" ? "This booking is already paid." : `This booking is ${row.state.replace("_", " ")}.` } as const;
+    if (await liveInvoice(tx, input.marketId, input.reservationId)) return { kind: "not_allowed", reason: "This booking has an open invoice from the portal. Cancel it first so the vendor isn't billed twice." } as const;
+    const owed = (await bookingBalanceDue(input.marketId, input.reservationId, tx))?.balanceCents ?? 0;
+    if (amount > owed) return { kind: "invalid", error: `That's more than the ${(owed / 100).toLocaleString("en-US", { style: "currency", currency: "USD" })} still owed on this booking.` } as const;
+    const covered = amount === owed;
+    const id = randomUUID();
+    const now = input.now ?? new Date();
+    await tx`INSERT INTO fame_manual_payments (id, market_id, application_id, reservation_id, amount_cents, paid_on, note, marked_booking_paid, created_by_account_id, created_at)
+      VALUES (${id}, ${input.marketId}, ${row.application_id}, ${input.reservationId}, ${amount}, ${paidOn}::date, ${note}, ${covered}, ${input.actorAccountId}, ${now})`;
+    if (covered) {
+      await tx`UPDATE fame_reservations SET state = 'paid', payment_due_at = NULL, updated_at = ${now} WHERE id = ${input.reservationId} AND market_id = ${input.marketId}`;
+    }
+    return { kind: "saved", paymentId: id, amountCents: amount, bookingPaid: covered } as const;
+  });
+}
+
+/** Undo a mistaken recorded payment. If it was what marked the booking paid, the booking goes back to awaiting payment. */
+export async function voidManualPayment(input: { marketId: string; paymentId: string; now?: Date }, sql: Sql = configuredClient()): Promise<{ kind: "voided"; bookingReopened: boolean } | { kind: "not_found" }> {
+  return sql.begin(async tx => {
+    const [row] = await tx<{ reservation_id: string }[]>`
+      SELECT reservation_id FROM fame_manual_payments WHERE id = ${input.paymentId} AND market_id = ${input.marketId} AND voided_at IS NULL FOR UPDATE`;
+    if (!row) return { kind: "not_found" } as const;
+    const now = input.now ?? new Date();
+    await tx`UPDATE fame_manual_payments SET voided_at = ${now} WHERE id = ${input.paymentId}`;
+    const [booking] = await tx<{ state: string }[]>`SELECT state FROM fame_reservations WHERE id = ${row.reservation_id} AND market_id = ${input.marketId} FOR UPDATE`;
+    const still = await bookingBalanceDue(input.marketId, row.reservation_id, tx);
+    // Only reopen bookings this ledger marked paid; a booking paid through the portal's own checkout stays paid.
+    const [checkout] = await tx<{ paid: boolean }[]>`SELECT EXISTS (SELECT 1 FROM fame_payment_orders WHERE market_id = ${input.marketId}
+      AND reservation_id = ${row.reservation_id} AND status = 'paid') AS paid`;
+    if (booking?.state === "paid" && still && still.balanceCents > 0 && !checkout?.paid) {
+      await tx`UPDATE fame_reservations SET state = 'payment_pending', updated_at = ${now} WHERE id = ${row.reservation_id} AND market_id = ${input.marketId}`;
+      return { kind: "voided", bookingReopened: true } as const;
+    }
+    return { kind: "voided", bookingReopened: false } as const;
+  });
 }
 
 async function liveInvoice(tx: QuerySql, marketId: string, reservationId: string): Promise<boolean> {
