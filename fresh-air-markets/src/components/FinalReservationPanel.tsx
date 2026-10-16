@@ -42,6 +42,14 @@ const LAST_MARKET_DATE = FRESH_AIR_SEASON_DATES[FRESH_AIR_SEASON_DATES.length - 
 const LIVE_STATES = new Set<FinalReservationView["state"]>(["held", "payment_pending", "paid", "confirmed", "manual_review"]);
 /** Bookings a manager may withdraw (nothing paid yet). */
 const WITHDRAWABLE_STATES = new Set<FinalReservationView["state"]>(["held", "payment_pending", "expired", "manual_review"]);
+/**
+ * Billing by portal invoice and per-booking discounts stay built but hidden:
+ * staff bill one-off charges from their own Square account and record the
+ * payment here instead (decision 2026-10-16). An invoice or discount that
+ * already exists still shows so it can be followed up or cancelled.
+ */
+const SHOW_PORTAL_BILLING = false;
+
 /** Bookings whose Saturdays a manager may change in one step (nothing paid yet). */
 const CHANGEABLE_STATES = new Set<FinalReservationView["state"]>(["held", "payment_pending", "expired"]);
 
@@ -825,7 +833,8 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
               </table>
             </div>
           )}
-          {!creditOpen && <button type="button" disabled={disabled} onClick={() => { setCreditOpen(true); setError(""); setNotice(""); }} className={`${QUIET_BUTTON} mt-4`}>Add a credit</button>}
+          {/* Credits are only used when billing from the portal, which is hidden. */}
+          {SHOW_PORTAL_BILLING && !creditOpen && <button type="button" disabled={disabled} onClick={() => { setCreditOpen(true); setError(""); setNotice(""); }} className={`${QUIET_BUTTON} mt-4`}>Add a credit</button>}
           {creditOpen && <div className="mt-4 flex flex-wrap items-end gap-3 text-sm">
             <label className="font-semibold text-pine-deep">Credit ($)
               <input type="number" min={0.01} step="0.01" value={creditAmount} disabled={disabled} onChange={event => setCreditAmount(event.target.value)} className={`${FIELD} w-32`} />
@@ -875,7 +884,7 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
                 )}
 
                 {reservation.paymentRequired && ["held", "payment_pending"].includes(reservation.state) && (balance?.bookings?.find(item => item.reservationId === reservation.id)?.discountCents || balance?.bookings?.find(item => item.reservationId === reservation.id)?.creditAppliedCents || balance?.bookings?.find(item => item.reservationId === reservation.id)?.paidCents) && !invoices.some(item => item.reservationId === reservation.id && (item.status === "open" || item.status === "creating")) ? (
-                  <p className="mt-5 rounded-2xl bg-amber/15 p-4 text-sm text-clay">This booking's price was changed or part of it was paid in Square, so the full-price payment link is turned off. Bill the rest in Square and record it here.</p>
+                  <p className="mt-5 rounded-2xl bg-amber/15 p-4 text-sm text-clay">Part of this booking was paid in Square (or its price was changed), so the full-price payment link is turned off. Bill the rest in Square and record it with "Record a payment".</p>
                 ) : null}
                 {reservation.paymentRequired && ["held", "payment_pending"].includes(reservation.state) && !invoices.some(item => item.reservationId === reservation.id && (item.status === "open" || item.status === "creating")) && !(balance?.bookings?.find(item => item.reservationId === reservation.id)?.discountCents || balance?.bookings?.find(item => item.reservationId === reservation.id)?.creditAppliedCents || balance?.bookings?.find(item => item.reservationId === reservation.id)?.paidCents) && (
                   <section className="mt-5 rounded-2xl border border-pine/15 bg-white/60 p-5">
@@ -960,7 +969,7 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
                 {(() => {
                   const invoice = invoices.find(item => item.reservationId === reservation.id) ?? null;
                   const live = invoice && (invoice.status === "open" || invoice.status === "creating");
-                  const canBill = billingAvailable && reservation.paymentRequired && (reservation.state === "held" || reservation.state === "payment_pending") && (!live || billTarget === reservation.id);
+                  const canBill = SHOW_PORTAL_BILLING && billingAvailable && reservation.paymentRequired && (reservation.state === "held" || reservation.state === "payment_pending") && (!live || billTarget === reservation.id);
                   if (!invoice && !canBill) return null;
                   const billing = billTarget === reservation.id;
                   const planned = billing ? billingRequest(reservation) : null;
@@ -981,7 +990,7 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
                           {invoice.status === "failed" && invoice.lastError && <p className="mt-2 text-xs text-clay">{invoice.lastError}</p>}
                           <div className="mt-3 flex flex-wrap gap-3">
                             {invoice.publicUrl && <a href={invoice.publicUrl} target="_blank" rel="noreferrer" className="text-sm font-semibold text-pine underline underline-offset-4">Open the invoice in Square</a>}
-                            {live && billTarget !== reservation.id && <button type="button" disabled={disabled} onClick={() => startBilling(reservation, invoice.id)} className={QUIET_BUTTON}>Change amount</button>}
+                            {SHOW_PORTAL_BILLING && live && billTarget !== reservation.id && <button type="button" disabled={disabled} onClick={() => startBilling(reservation, invoice.id)} className={QUIET_BUTTON}>Change amount</button>}
                             {live && <button type="button" disabled={disabled} onClick={() => void cancelInvoice(invoice)} className={QUIET_BUTTON}>Cancel invoice</button>}
                           </div>
                         </div>
@@ -1033,7 +1042,7 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
                   );
                 })()}
 
-                {(reservation.state === "held" || reservation.state === "payment_pending") && reservation.paymentRequired && billingAvailable && !invoices.some(item => item.reservationId === reservation.id && (item.status === "open" || item.status === "creating")) && (
+                {SHOW_PORTAL_BILLING && (reservation.state === "held" || reservation.state === "payment_pending") && reservation.paymentRequired && billingAvailable && !invoices.some(item => item.reservationId === reservation.id && (item.status === "open" || item.status === "creating")) && (
                   <section className="mt-5 rounded-2xl border border-pine/15 bg-white/60 p-5">
                     <h4 className="font-semibold text-pine-deep">Discount this booking</h4>
                     {discountTarget !== reservation.id && <>
