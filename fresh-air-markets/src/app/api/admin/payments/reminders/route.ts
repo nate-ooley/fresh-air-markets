@@ -6,6 +6,7 @@ import { notifyPaymentRequest } from "@/lib/notifications";
 import { cleanReminderTemplate } from "@/lib/payment-reminder-template";
 import { readObjectBody } from "@/lib/request-body";
 import { reservationsOnInvoice } from "@/lib/vendor-invoice-pg";
+import { hasPriceAdjustment } from "@/lib/vendor-balance-pg";
 import { squarePaymentRuntimeConfig, squarePortalOrigin, verifySquareIdentity } from "@/lib/square";
 import { dispatchSquareCheckout } from "@/lib/square-payment";
 import { postgresSquarePaymentCheckoutStore } from "@/lib/square-payment-pg";
@@ -44,7 +45,10 @@ async function unpaidBookings(marketId: string): Promise<Unpaid[]> {
     WHERE r.market_id = ${marketId} AND r.payment_required AND r.state IN ('held', 'payment_pending', 'expired')
       AND a.review_state = 'approved'
     ORDER BY r.created_at`;
-  return rows.filter(row => !invoiced.has(row.id));
+  // A booking whose price was changed is billed by invoice; a reminder would resend the full-price link.
+  const adjusted = new Set<string>();
+  for (const row of rows) if (!invoiced.has(row.id) && await hasPriceAdjustment(marketId, row.id, db())) adjusted.add(row.id);
+  return rows.filter(row => !invoiced.has(row.id) && !adjusted.has(row.id));
 }
 
 /** Reserved Saturdays and booth count per booking, for the preview. */

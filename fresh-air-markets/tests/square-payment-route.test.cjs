@@ -31,6 +31,7 @@ function loadRoute({ authenticated = true, configured = true, verifiedIdentity, 
     };
     if (id === '@/lib/square-payment-pg') return { postgresSquarePaymentCheckoutStore: { qa: true } };
     if (id === '@/lib/vendor-invoice-pg') return { hasOpenInvoice: async () => false };
+    if (id === '@/lib/vendor-balance-pg') return { hasPriceAdjustment: async () => false };
     if (id === '@/lib/square-qa-faults') return {
       squareQaSupportConfig: qaSupport || (() => null),
       squareQaCheckoutTransport: qaTransport || (() => undefined),

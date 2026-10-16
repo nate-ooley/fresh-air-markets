@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { adminGate } from "@/lib/admin-gate";
+import { cancelInvoiceAtSquare } from "@/lib/invoice-cancel";
 import { squarePaymentRuntimeConfig } from "@/lib/square";
-import { cancelSquareInvoice } from "@/lib/square-invoice";
-import { getInvoice, invoiceView, markInstallmentCancelled, markInvoiceCancelled } from "@/lib/vendor-invoice-pg";
+import { getInvoice, invoiceView } from "@/lib/vendor-invoice-pg";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -23,20 +23,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   let setup;
   try { setup = squarePaymentRuntimeConfig(process.env); }
   catch { return NextResponse.json({ error: "Square is not configured." }, { status: 503, headers }); }
-  const square = { environment: setup.environment, accessToken: setup.accessToken, locationId: setup.locationId };
-  // Stop every payment Square hasn't been paid for yet; paid ones stay as they are.
-  const targets = invoice.squareInstallments.length && invoice.squareInstallments.some(item => item.squareInvoiceId)
-    ? invoice.squareInstallments.filter(item => item.squareInvoiceId && item.squareInvoiceVersion !== null && !item.cancelled && item.paidCents < item.amountCents)
-      .map(item => ({ seq: item.seq as number | null, id: item.squareInvoiceId!, version: item.squareInvoiceVersion!, published: item.published }))
-    : invoice.squareInvoiceId && invoice.squareInvoiceVersion !== null
-      ? [{ seq: null, id: invoice.squareInvoiceId, version: invoice.squareInvoiceVersion, published: invoice.status === "open" }] : [];
-  for (const target of targets) {
-    try { await cancelSquareInvoice(square, target.id, target.version, target.published); }
-    catch {
-      return NextResponse.json({ error: "Square did not confirm every payment was cancelled, so some may still be collecting. Try again, or cancel them in the Square app." }, { status: 503, headers });
-    }
-    if (target.seq !== null) await markInstallmentCancelled({ invoiceId: invoice.id, seq: target.seq });
-  }
-  await markInvoiceCancelled({ marketId: gated.marketId, invoiceId: id });
+  const done = await cancelInvoiceAtSquare({ environment: setup.environment, accessToken: setup.accessToken, locationId: setup.locationId }, gated.marketId, invoice).catch(() => false);
+  if (!done) return NextResponse.json({ error: "Square did not confirm every payment was cancelled, so some may still be collecting. Try again, or cancel them in the Square app." }, { status: 503, headers });
   return NextResponse.json({ invoice: { ...invoiceView(invoice), status: "cancelled" } }, { headers });
 }

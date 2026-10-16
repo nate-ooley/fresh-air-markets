@@ -9,6 +9,7 @@ const { claimSquarePaymentCheckout } = require('../../.test-build/square-payment
 const { withdrawReservation, withdrawApplication, applicationBookingSummary, retireCheckoutLinks } = require('../../.test-build/reservation-withdraw-pg.js');
 const invoices = require('../../.test-build/vendor-invoice-pg.js');
 const { persistSquarePaymentWebhook } = require('../../.test-build/square-webhook-pg.js');
+const ledger = require('../../.test-build/vendor-balance-pg.js');
 
 // This suite creates and drops only a private schema inside the disposable CI DB.
 const url = new URL(process.env.DATABASE_TEST_URL || 'postgres://invalid/');
@@ -77,6 +78,7 @@ before(async () => {
       '031-open-payment-links.sql',
       '032-vendor-invoices.sql',
       '033-invoice-per-installment.sql',
+      '034-vendor-adjustments.sql',
     ]) await migration.unsafe(fs.readFileSync(path.join(__dirname, '../../docs/migrations', file), 'utf8'));
   } finally {
     await migration.end();
@@ -657,4 +659,75 @@ test('only unpaid bookings can be billed; a cancelled or failed invoice frees th
   // The database itself refuses a changed amount without a reason.
   await assert.rejects(first`INSERT INTO fame_invoices (id, market_id, reservation_id, square_environment, plan, total_cents, quoted_cents, status, created_by_account_id)
     VALUES (${randomUUID()}, ${marketId}, ${id}, 'sandbox', 'full', 1000, 4000, 'failed', ${marketId})`);
+});
+
+test('rolling balance: discounts, credits and payments add up per vendor; undo is recorded; price changes turn off the full-price link', async () => {
+  const { applicationId, id, totalCents } = await bookingWithLiveLink(['2026-10-03', '2026-10-10']);
+  assert.equal(totalCents, 8000);
+  let balance = await ledger.vendorBalance(marketId, applicationId, first);
+  assert.deepEqual(balance.totals, { chargedCents: 8000, discountCents: 0, creditCents: 0, paidCents: 0, owedCents: 8000 });
+  assert.equal(await ledger.hasPriceAdjustment(marketId, id, first), false);
+
+  // 10% discount, with a reason; too-big discounts and missing reasons are refused.
+  assert.equal((await ledger.addDiscount({ marketId, reservationId: id, percent: 10, reason: '', actorAccountId: marketId }, first)).kind, 'invalid');
+  assert.equal((await ledger.addDiscount({ marketId, reservationId: id, amountCents: 8001, reason: 'x', actorAccountId: marketId }, first)).kind, 'invalid');
+  const discount = await ledger.addDiscount({ marketId, reservationId: id, percent: 10, reason: 'Returning vendor', actorAccountId: marketId, now: later(1) }, first);
+  assert.deepEqual([discount.kind, discount.amountCents], ['saved', 800]);
+  assert.equal(await ledger.hasPriceAdjustment(marketId, id, first), true);
+  assert.deepEqual(await planDateChange({ marketId, reservationId: id, dates: ['2026-10-10'], booths: 1, today: '2026-10-01', config: config(2) }, first), { kind: 'not_changeable', state: 'price_adjusted' });
+
+  // A $20 credit on the vendor's balance, then $20 of it used on the booking.
+  const credit = await ledger.addCredit({ marketId, applicationId, amountCents: 2000, reason: 'Rain-out Oct 3', actorAccountId: marketId, now: later(2) }, first);
+  assert.equal(credit.kind, 'saved');
+  assert.equal((await ledger.addCredit({ marketId, applicationId, amountCents: 600000, reason: 'typo', actorAccountId: marketId }, first)).kind, 'invalid');
+  balance = await ledger.vendorBalance(marketId, applicationId, first);
+  assert.deepEqual([balance.totals.owedCents, balance.creditAvailableCents], [5200, 2000]);
+  const used = await ledger.applyCredit({ marketId, reservationId: id, amountCents: 99999, actorAccountId: marketId, now: later(3) }, first);
+  assert.deepEqual([used.kind, used.amountCents], ['saved', 2000]);
+  balance = await ledger.vendorBalance(marketId, applicationId, first);
+  assert.deepEqual([balance.totals.owedCents, balance.creditAvailableCents, balance.bookings[0].balanceCents], [5200, 0, 5200]);
+  // Running balance: +80, -8, -20, credit used (0) → 52.
+  assert.deepEqual(balance.lines.map(line => [line.kind, line.amountCents, line.runningCents]), [['charge', 8000, 8000], ['discount', -800, 7200], ['credit', -2000, 5200], ['credit_applied', 0, 5200]]);
+  // The credit can't be undone while it's used; undoing the use gives it back.
+  const creditLine = balance.lines.find(line => line.kind === 'credit');
+  assert.equal(creditLine.voidable, false);
+  assert.equal((await ledger.voidAdjustment({ marketId, adjustmentId: creditLine.adjustmentId }, first)).kind, 'not_voidable');
+  assert.equal((await ledger.voidAdjustment({ marketId, adjustmentId: used.adjustmentId }, first)).kind, 'voided');
+  assert.equal((await ledger.vendorBalance(marketId, applicationId, first)).creditAvailableCents, 2000);
+  await ledger.applyCredit({ marketId, reservationId: id, amountCents: 2000, actorAccountId: marketId, now: later(4) }, first);
+
+  // Billed by invoice for the $52 owed, paid through Square: the booking is paid, nothing is owed, the discount is locked.
+  const owed = (await ledger.bookingBalanceDue(marketId, id, first)).balanceCents;
+  const started = await invoices.beginInvoice({ marketId, reservationId: id, request: { plan: 'full', totalCents: owed, reason: '', installments: [{ seq: 1, dueOn: '2026-11-01', amountCents: owed }] }, environment: 'sandbox', actorAccountId: marketId, now, quotedCents: owed }, first);
+  assert.equal(started.kind, 'started');
+  await invoices.recordInstallmentDraft({ invoiceId: started.invoice.id, seq: 1, customerId: 'C', orderId: 'BAL-ORD-1', squareInvoiceId: 'BAL-INV-1', version: 0, now }, first);
+  await invoices.markInvoiceOpen({ invoiceId: started.invoice.id, publicUrl: null, now }, first);
+  assert.equal((await ledger.addDiscount({ marketId, reservationId: id, amountCents: 100, reason: 'x', actorAccountId: marketId }, first)).kind, 'not_adjustable', 'discount while invoiced');
+  await persistSquarePaymentWebhook(payment('BAL-ORD-1', 'BAL-PAY-1', owed), { environment: 'sandbox', now: later(5) }, first);
+  balance = await ledger.vendorBalance(marketId, applicationId, first);
+  assert.equal(balance.bookings[0].state, 'paid');
+  assert.deepEqual([balance.totals.paidCents, balance.totals.owedCents, balance.bookings[0].balanceCents], [5200, 0, 0]);
+  assert.equal(balance.lines.at(-1).kind, 'payment');
+  assert.equal(balance.lines.find(line => line.kind === 'discount').voidable, false);
+  assert.equal((await ledger.marketBalances(marketId, first)).find(row => row.applicationId === applicationId).owedCents, 0);
+});
+
+test('credit used on a booking that is later withdrawn goes back to the vendor; a withdrawn booking charges nothing', async () => {
+  const { applicationId, id } = await bookingWithLiveLink(['2026-10-03']);
+  await ledger.addCredit({ marketId, applicationId, amountCents: 1500, reason: 'Goodwill', actorAccountId: marketId, now }, first);
+  await ledger.applyCredit({ marketId, reservationId: id, amountCents: 1500, actorAccountId: marketId, now: later(1) }, first);
+  assert.equal((await ledger.vendorBalance(marketId, applicationId, first)).creditAvailableCents, 0);
+  assert.equal((await withdrawReservation({ marketId, reservationId: id, note: 'Vendor cancelled.', now: later(2), cancelLink: async () => 'cancelled' }, first)).kind, 'withdrawn');
+  const balance = await ledger.vendorBalance(marketId, applicationId, first);
+  assert.deepEqual([balance.creditAvailableCents, balance.totals.chargedCents, balance.totals.owedCents, balance.bookings.length], [1500, 0, -1500, 0]);
+});
+
+test('changing dates keeps Saturdays that already happened on the booking (still charged)', async () => {
+  const { applicationId } = await seedEligibleApplication();
+  const made = await reserve(applicationId, selection({ selectedDates: ['2026-10-03'] }), first, 2);
+  // Oct 3 has passed: it must stay; Oct 10 can be added.
+  assert.deepEqual(await planDateChange({ marketId, reservationId: made.reservation.id, dates: ['2026-10-10'], booths: 1, today: '2026-10-05', config: config(2) }, first), { kind: 'past_dates_removed', dates: ['2026-10-03'] });
+  const kept = await planDateChange({ marketId, reservationId: made.reservation.id, dates: ['2026-10-03', '2026-10-10'], booths: 1, today: '2026-10-05', config: config(2) }, first);
+  assert.equal(kept.kind, 'ok');
+  assert.deepEqual(kept.quote.dates, ['2026-10-03', '2026-10-10']);
 });

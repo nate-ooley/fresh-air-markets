@@ -160,6 +160,8 @@ export type BeginInvoiceResult =
  */
 export async function beginInvoice(input: {
   marketId: string; reservationId: string; request: BillingRequest; environment: "sandbox" | "production"; actorAccountId: string; now?: Date;
+  /** What is owed on the booking after discounts, credit and payments; defaults to the booking price. */
+  quotedCents?: number;
 }, sql: Sql = configuredClient()): Promise<BeginInvoiceResult> {
   const now = input.now ?? new Date();
   if (!await invoicesReady(sql)) return { kind: "unavailable" };
@@ -188,7 +190,7 @@ export async function beginInvoice(input: {
       INSERT INTO fame_invoices (id, market_id, reservation_id, square_environment, plan, total_cents, quoted_cents,
         adjustment_reason, status, created_by_account_id, created_at, updated_at)
       VALUES (${id}, ${input.marketId}, ${reservation.id}, ${input.environment}, ${input.request.plan}, ${input.request.totalCents},
-        ${target.quotedCents}, ${input.request.totalCents === target.quotedCents ? "" : input.request.reason}, 'creating',
+        ${input.quotedCents ?? target.quotedCents}, ${input.request.totalCents === (input.quotedCents ?? target.quotedCents) ? "" : input.request.reason}, 'creating',
         ${input.actorAccountId}, ${now}, ${now})`;
     for (const item of input.request.installments) {
       await tx`INSERT INTO fame_invoice_installments (invoice_id, seq, due_on, amount_cents) VALUES (${id}, ${item.seq}, ${item.dueOn}::date, ${item.amountCents})`;

@@ -109,6 +109,18 @@ const INVOICE_STATUS: Record<InvoiceInfo["status"], string> = {
   creating: "Being sent", open: "Sent by Square, collecting", paid: "Paid in full", cancelled: "Cancelled", failed: "Not sent",
 };
 
+interface BalanceBooking { reservationId: string; chargeCents: number; discountCents: number; creditAppliedCents: number; paidCents: number; balanceCents: number }
+interface BalanceLine { at: string; kind: string; label: string; amountCents: number; runningCents: number; adjustmentId?: string; voidable?: boolean }
+interface BalanceView {
+  bookings: BalanceBooking[]; lines: BalanceLine[]; creditAvailableCents: number;
+  totals: { chargedCents: number; discountCents: number; creditCents: number; paidCents: number; owedCents: number };
+}
+
+function balanceView(value: unknown): BalanceView | null {
+  const data = (value as { balance?: unknown } | null)?.balance as BalanceView | undefined;
+  return data && Array.isArray(data.bookings) && Array.isArray(data.lines) && data.totals && typeof data.totals.owedCents === "number" ? data : null;
+}
+
 interface BookingRequestView { id: string; dates: string[]; booths: number; vendorNote: string; createdAt: string }
 
 function bookingRequestView(value: unknown): BookingRequestView | null {
@@ -176,6 +188,17 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
   const [bookingRequest, setBookingRequest] = useState<BookingRequestView | null>(null);
   const [declineNote, setDeclineNote] = useState("");
   const [declining, setDeclining] = useState(false);
+  // Rolling balance, discounts and credits. Declared last so earlier state keeps its order.
+  const [balance, setBalance] = useState<BalanceView | null>(null);
+  const [discountTarget, setDiscountTarget] = useState<string | null>(null);
+  const [discountMode, setDiscountMode] = useState<"amount" | "percent">("amount");
+  const [discountValue, setDiscountValue] = useState("");
+  const [discountReason, setDiscountReason] = useState("");
+  const [creditOpen, setCreditOpen] = useState(false);
+  const [creditAmount, setCreditAmount] = useState("");
+  const [creditReason, setCreditReason] = useState("");
+  const [billUseCredit, setBillUseCredit] = useState(false);
+  const [billReplace, setBillReplace] = useState<string | null>(null);
 
   const endpoint = `/api/admin/applications/${encodeURIComponent(applicationId)}/reserve`;
   const load = useCallback(async (signal?: AbortSignal) => {
@@ -216,6 +239,11 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
           fullSeason: current.fullSeason && expiresOn >= LAST_MARKET_DATE,
         }));
       }
+      try {
+        const owed = await fetch(`/api/admin/applications/${encodeURIComponent(applicationId)}/balance`, { headers: { Accept: "application/json" }, cache: "no-store", signal });
+        const body = await jsonBody(owed);
+        if (!signal?.aborted && revision === statusRead.current.revision) setBalance(owed.ok ? balanceView(body) : null);
+      } catch { /* the balance is optional; the rest of the panel still works */ }
       try {
         const billed = await fetch(`/api/admin/applications/${encodeURIComponent(applicationId)}/invoices`, { headers: { Accept: "application/json" }, cache: "no-store", signal });
         const body = await jsonBody(billed);
@@ -445,9 +473,8 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
 
   function startChange(reservation: FinalReservationView) {
     setChangeTarget(reservation.id);
-    // Saturdays that already happened can't be rebooked; start from the ones still ahead.
-    const today = todayEastern();
-    setChangeDates(reservation.finalDates.filter(date => date >= today).sort());
+    // Saturdays that already happened stay on the booking and its bill; only upcoming ones can change.
+    setChangeDates([...reservation.finalDates].sort());
     setChangeBooths(String(reservation.finalBoothQuantity));
     setChangeNote("");
     setWithdrawTarget(null);
@@ -487,22 +514,36 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
     }
   }
 
-  function startBilling(reservation: FinalReservationView) {
+  function owedOn(reservation: FinalReservationView): number {
+    return balance?.bookings?.find(item => item.reservationId === reservation.id)?.balanceCents ?? reservation.totalCents;
+  }
+
+  function startBilling(reservation: FinalReservationView, replaceInvoiceId: string | null = null) {
     setBillTarget(reservation.id);
+    setBillReplace(replaceInvoiceId);
     setBillPlan("full");
     setBillCount("3");
     setBillFirstDue(todayEastern());
-    setBillAmount((reservation.totalCents / 100).toFixed(2));
+    setBillUseCredit(false);
+    setBillAmount((owedOn(reservation) / 100).toFixed(2));
     setBillReason("");
     setChangeTarget(null); setWithdrawTarget(null); setError(""); setNotice("");
   }
 
+  /** What this bill starts from: owed on the booking, less vendor credit when ticked. */
+  function billBase(reservation: FinalReservationView): number {
+    const owed = owedOn(reservation);
+    return billUseCredit ? Math.max(0, owed - Math.min(balance?.creditAvailableCents ?? 0, owed)) : owed;
+  }
+
   function billingRequest(reservation: FinalReservationView) {
     const cents = Math.round(Number(billAmount) * 100);
+    const base = billBase(reservation);
+    if (Number.isFinite(cents) && cents > base) return { error: `That's more than the ${money(base)} owed. To charge more, add dates instead.` };
     return planBilling({
       plan: billPlan, installments: Number(billCount), firstDueOn: billFirstDue,
       totalCents: Number.isFinite(cents) ? cents : NaN, reason: billReason,
-      quotedCents: reservation.totalCents, today: todayEastern(),
+      quotedCents: base, today: todayEastern(),
     });
   }
 
@@ -513,13 +554,13 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
     const summary = planned.plan === "full"
       ? `one payment of ${money(planned.totalCents)} due ${reservationDateLabel(planned.installments[0].dueOn)}`
       : `${planned.installments.length} monthly payments totalling ${money(planned.totalCents)}, first due ${reservationDateLabel(planned.installments[0].dueOn)}`;
-    if (!window.confirm(`Square will email this vendor an invoice for ${summary}. Their current payment link stops working. Send it?`)) return;
+    if (!window.confirm(`${billReplace ? "The current invoice's unpaid payments will be cancelled and replaced. " : ""}Square will email this vendor ${planned.plan === "full" ? "an invoice" : "invoices"} for ${summary}. Their current payment link stops working. Send it?`)) return;
     inFlight.current = true;
     setBusy("bill"); setError(""); setNotice("");
     try {
       const response = await fetch(`/api/admin/reservations/${encodeURIComponent(reservation.id)}/invoice`, {
         method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json" },
-        body: JSON.stringify({ plan: planned.plan, installments: planned.installments.length, firstDueOn: planned.installments[0].dueOn, totalCents: planned.totalCents, reason: planned.reason }),
+        body: JSON.stringify({ plan: planned.plan, installments: planned.installments.length, firstDueOn: planned.installments[0].dueOn, totalCents: planned.totalCents, reason: planned.reason, useCredit: billUseCredit, ...(billReplace ? { replaceInvoiceId: billReplace } : {}) }),
       });
       const payload = await jsonBody(response);
       if (response.status === 401) { router.replace("/login"); return; }
@@ -549,6 +590,45 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
     } catch {
       setError("The invoice could not be cancelled. Reload reservation status and try again.");
     } finally { inFlight.current = false; setBusy(null); }
+  }
+
+  async function postAdjustment(url: string, body: unknown, done: string) {
+    if (inFlight.current || statusRead.current.pending || loadError) return false;
+    inFlight.current = true;
+    setBusy("bill"); setError(""); setNotice("");
+    try {
+      const response = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json" }, body: JSON.stringify(body) });
+      const payload = await jsonBody(response);
+      if (response.status === 401) { router.replace("/login"); return false; }
+      inFlight.current = false;
+      if (!response.ok) { setError(reservationError(payload, "That change could not be saved.")); return false; }
+      await load();
+      setNotice(done);
+      return true;
+    } catch { setError("That change could not be saved. Reload and try again."); return false; }
+    finally { inFlight.current = false; setBusy(null); }
+  }
+
+  async function saveDiscount(reservation: FinalReservationView) {
+    const value = Number(discountValue);
+    if (!Number.isFinite(value) || value <= 0) { setError("Enter a discount above zero."); return; }
+    if (!discountReason.trim()) { setError("Say why (kept on record)."); return; }
+    const body = discountMode === "percent" ? { percent: value, reason: discountReason } : { amountCents: Math.round(value * 100), reason: discountReason };
+    if (await postAdjustment(`/api/admin/reservations/${encodeURIComponent(reservation.id)}/discount`, body, "Discount saved. Bill the vendor with \"Bill this vendor\" so they pay the new amount.")) setDiscountTarget(null);
+  }
+
+  async function saveCredit() {
+    const value = Number(creditAmount);
+    if (!Number.isFinite(value) || value <= 0) { setError("Enter a credit above zero."); return; }
+    if (!creditReason.trim()) { setError("Say why (kept on record)."); return; }
+    if (await postAdjustment(`/api/admin/applications/${encodeURIComponent(applicationId)}/credit`, { amountCents: Math.round(value * 100), reason: creditReason }, "Credit added to the vendor's balance. Tick \"Use vendor credit\" when you bill a booking.")) {
+      setCreditOpen(false); setCreditAmount(""); setCreditReason("");
+    }
+  }
+
+  async function undoAdjustment(line: BalanceLine) {
+    if (!line.adjustmentId || !window.confirm(`Undo "${line.label}"? It stays on record as undone.`)) return;
+    await postAdjustment(`/api/admin/adjustments/${encodeURIComponent(line.adjustmentId)}/void`, {}, "Undone.");
   }
 
   async function confirmRequest(request: BookingRequestView) {
@@ -672,6 +752,50 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
         </section>
       )}
 
+      {!loading && !loadError && balance && (balance.bookings?.length > 0 || balance.totals?.creditCents > 0) && (
+        <section className="mt-6 rounded-2xl border border-pine/15 bg-white p-5">
+          <div className="flex flex-wrap items-baseline justify-between gap-2">
+            <h3 className="font-semibold text-pine-deep">Balance</h3>
+            <p className={`text-lg font-bold ${balance.totals.owedCents > 0 ? "text-clay" : "text-pine"}`}>{balance.totals.owedCents >= 0 ? `${money(balance.totals.owedCents)} owed` : `${money(-balance.totals.owedCents)} in credit`}</p>
+          </div>
+          <dl className="mt-3 grid grid-cols-2 gap-3 text-sm sm:grid-cols-4">
+            <div><dt className="text-ink/55">Booked</dt><dd className="font-semibold text-pine-deep">{money(balance.totals.chargedCents)}</dd></div>
+            <div><dt className="text-ink/55">Discounts</dt><dd className="font-semibold text-pine-deep">{money(balance.totals.discountCents)}</dd></div>
+            <div><dt className="text-ink/55">Credits</dt><dd className="font-semibold text-pine-deep">{money(balance.totals.creditCents)}{balance.creditAvailableCents > 0 ? ` (${money(balance.creditAvailableCents)} unused)` : ""}</dd></div>
+            <div><dt className="text-ink/55">Paid</dt><dd className="font-semibold text-pine-deep">{money(balance.totals.paidCents)}</dd></div>
+          </dl>
+          {balance.lines.length > 0 && (
+            <div className="mt-4 overflow-x-auto">
+              <table className="w-full text-left text-sm">
+                <thead className="text-xs uppercase tracking-wide text-ink/50"><tr><th className="py-1 pr-3">Date</th><th className="py-1 pr-3">What</th><th className="py-1 pr-3 text-right">Amount</th><th className="py-1 pr-3 text-right">Balance</th><th /></tr></thead>
+                <tbody>
+                  {balance.lines.map((line, index) => (
+                    <tr key={`${line.at}-${index}`} className="border-t border-pine/10 align-top">
+                      <td className="py-2 pr-3 whitespace-nowrap text-ink/60">{new Date(line.at).toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "America/New_York" })}</td>
+                      <td className="py-2 pr-3 text-ink/80">{line.label}</td>
+                      <td className="py-2 pr-3 text-right whitespace-nowrap">{line.amountCents === 0 ? "—" : line.amountCents > 0 ? money(line.amountCents) : `−${money(-line.amountCents)}`}</td>
+                      <td className="py-2 pr-3 text-right whitespace-nowrap font-semibold text-pine-deep">{money(line.runningCents)}</td>
+                      <td className="py-2 text-right">{line.adjustmentId && line.voidable && <button type="button" disabled={disabled} onClick={() => void undoAdjustment(line)} className="text-xs font-semibold text-clay underline underline-offset-4">Undo</button>}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+          {!creditOpen && <button type="button" disabled={disabled} onClick={() => { setCreditOpen(true); setError(""); setNotice(""); }} className={`${QUIET_BUTTON} mt-4`}>Add a credit</button>}
+          {creditOpen && <div className="mt-4 flex flex-wrap items-end gap-3 text-sm">
+            <label className="font-semibold text-pine-deep">Credit ($)
+              <input type="number" min={0.01} step="0.01" value={creditAmount} disabled={disabled} onChange={event => setCreditAmount(event.target.value)} className={`${FIELD} w-32`} />
+            </label>
+            <label className="min-w-64 flex-1 font-semibold text-pine-deep">Why (kept on record)
+              <input type="text" maxLength={300} value={creditReason} disabled={disabled} onChange={event => setCreditReason(event.target.value)} placeholder="Example: Rain-out on Oct 10" className={FIELD} />
+            </label>
+            <button type="button" disabled={disabled} onClick={() => void saveCredit()} className={BUTTON}>Save credit</button>
+            <button type="button" disabled={disabled} onClick={() => setCreditOpen(false)} className={QUIET_BUTTON}>Cancel</button>
+          </div>}
+        </section>
+      )}
+
       {!loading && !loadError && reservations.length > 0 && (
         <div className="mt-6 space-y-5">
           {reservations.map((reservation, index) => {
@@ -689,6 +813,11 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
                   <div><dt className="text-ink/55">Booths per date</dt><dd className="mt-1 font-semibold text-pine-deep">{reservation.finalBoothQuantity}</dd></div>
                   <div className="col-span-2"><dt className="text-ink/55">Reserved dates ({reservation.finalDates.length})</dt><dd className="mt-1 text-pine-deep">{reservation.finalDates.map(reservationDateLabel).join(" · ")}</dd></div>
                 </dl>
+                {(() => {
+                  const owed = balance?.bookings?.find(item => item.reservationId === reservation.id);
+                  if (!owed || (!owed.discountCents && !owed.creditAppliedCents && !owed.paidCents)) return null;
+                  return <p className="mt-3 text-sm text-pine-deep">Owed on this booking: <strong>{money(owed.balanceCents)}</strong> <span className="text-ink/60">({money(owed.chargeCents)}{owed.discountCents ? ` − ${money(owed.discountCents)} discount` : ""}{owed.creditAppliedCents ? ` − ${money(owed.creditAppliedCents)} credit` : ""}{owed.paidCents ? ` − ${money(owed.paidCents)} paid` : ""})</span></p>;
+                })()}
                 {!reservation.paymentRequired && reservation.state !== "cancelled" && <p className="mt-4 text-sm text-pine">This nonprofit reservation has no payment due.</p>}
                 {reservation.state === "cancelled" && <p className="mt-4 text-sm text-ink/65">Withdrawn{reservation.withdrawnAt ? ` ${deadlineLabel(reservation.withdrawnAt)}` : ""}. The dates were released and its payment link no longer works.{reservation.withdrawalNote ? ` Note: ${reservation.withdrawalNote}` : ""}</p>}
 
@@ -702,7 +831,10 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
                   </section>
                 )}
 
-                {reservation.paymentRequired && ["held", "payment_pending"].includes(reservation.state) && !invoices.some(item => item.reservationId === reservation.id && (item.status === "open" || item.status === "creating")) && (
+                {reservation.paymentRequired && ["held", "payment_pending"].includes(reservation.state) && (balance?.bookings?.find(item => item.reservationId === reservation.id)?.discountCents || balance?.bookings?.find(item => item.reservationId === reservation.id)?.creditAppliedCents) && !invoices.some(item => item.reservationId === reservation.id && (item.status === "open" || item.status === "creating")) ? (
+                  <p className="mt-5 rounded-2xl bg-amber/15 p-4 text-sm text-clay">This booking's price was changed, so the full-price payment link is turned off. Use "Bill this vendor" to send the new amount.</p>
+                ) : null}
+                {reservation.paymentRequired && ["held", "payment_pending"].includes(reservation.state) && !invoices.some(item => item.reservationId === reservation.id && (item.status === "open" || item.status === "creating")) && !(balance?.bookings?.find(item => item.reservationId === reservation.id)?.discountCents || balance?.bookings?.find(item => item.reservationId === reservation.id)?.creditAppliedCents) && (
                   <section className="mt-5 rounded-2xl border border-pine/15 bg-white/60 p-5">
                     <h4 className="font-semibold text-pine-deep">Payment request</h4>
                     <p className="mt-2 text-sm leading-relaxed text-ink/65">{deadlineEnforced
@@ -716,7 +848,7 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
                   </section>
                 )}
 
-                {canCreateAccess(reservation) && !invoices.some(item => item.reservationId === reservation.id && (item.status === "open" || item.status === "creating")) && (
+                {canCreateAccess(reservation) && !invoices.some(item => item.reservationId === reservation.id && (item.status === "open" || item.status === "creating")) && !(balance?.bookings?.find(item => item.reservationId === reservation.id)?.discountCents || balance?.bookings?.find(item => item.reservationId === reservation.id)?.creditAppliedCents) && (
                   <section className="mt-5 rounded-2xl border border-pine/15 bg-white/60 p-5">
                     <h4 className="font-semibold text-pine-deep">Email the payment link</h4>
                     <p className="mt-2 text-sm leading-relaxed text-ink/65">Emails the vendor their private reservation page with the total and their dates{deadlineEnforced ? " and the 48-hour deadline" : ", and asks them to pay within 48 hours"}. The link is only for this vendor; anyone who has it can open this reservation. Sending again issues a fresh link and revokes the old one.</p>
@@ -739,11 +871,13 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
                 {(() => {
                   const invoice = invoices.find(item => item.reservationId === reservation.id) ?? null;
                   const live = invoice && (invoice.status === "open" || invoice.status === "creating");
-                  const canBill = billingAvailable && reservation.paymentRequired && (reservation.state === "held" || reservation.state === "payment_pending") && !live;
+                  const canBill = billingAvailable && reservation.paymentRequired && (reservation.state === "held" || reservation.state === "payment_pending") && (!live || billTarget === reservation.id);
                   if (!invoice && !canBill) return null;
                   const billing = billTarget === reservation.id;
                   const planned = billing ? billingRequest(reservation) : null;
                   const amountCents = Math.round(Number(billAmount) * 100);
+                  const base = billing ? billBase(reservation) : 0;
+                  const creditAvailable = balance?.creditAvailableCents ?? 0;
                   return (
                     <section className="mt-5 rounded-2xl border border-amber/40 bg-white/60 p-5">
                       <h4 className="font-semibold text-pine-deep">Bill with a Square invoice</h4>
@@ -758,6 +892,7 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
                           {invoice.status === "failed" && invoice.lastError && <p className="mt-2 text-xs text-clay">{invoice.lastError}</p>}
                           <div className="mt-3 flex flex-wrap gap-3">
                             {invoice.publicUrl && <a href={invoice.publicUrl} target="_blank" rel="noreferrer" className="text-sm font-semibold text-pine underline underline-offset-4">Open the invoice in Square</a>}
+                            {live && billTarget !== reservation.id && <button type="button" disabled={disabled} onClick={() => startBilling(reservation, invoice.id)} className={QUIET_BUTTON}>Change amount</button>}
                             {live && <button type="button" disabled={disabled} onClick={() => void cancelInvoice(invoice)} className={QUIET_BUTTON}>Cancel invoice</button>}
                           </div>
                         </div>
@@ -767,6 +902,8 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
                         <button type="button" disabled={disabled} onClick={() => startBilling(reservation)} className={`${QUIET_BUTTON} mt-4`}>Bill this vendor</button>
                       </>}
                       {canBill && billing && <div className="mt-4 space-y-3 text-sm">
+                        {billReplace && <p className="rounded-xl bg-amber/15 p-3 text-clay">Changing the amount cancels this invoice's unpaid payments and sends new ones. Payments already made stay on the balance.</p>}
+                        {creditAvailable > 0 && <label className="flex items-center gap-2"><input type="checkbox" checked={billUseCredit} disabled={disabled} onChange={event => { setBillUseCredit(event.target.checked); const owed = owedOn(reservation); setBillAmount(((event.target.checked ? owed - Math.min(creditAvailable, owed) : owed) / 100).toFixed(2)); }} /> Use vendor credit ({money(Math.min(creditAvailable, owedOn(reservation)))} available)</label>}
                         <div className="flex flex-wrap gap-4">
                           <label className="flex items-center gap-2"><input type="radio" checked={billPlan === "full"} disabled={disabled} onChange={() => setBillPlan("full")} /> Pay in full</label>
                           <label className="flex items-center gap-2"><input type="radio" checked={billPlan === "monthly"} disabled={disabled} onChange={() => setBillPlan("monthly")} /> Monthly plan</label>
@@ -784,8 +921,8 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
                             <input type="number" min={1} step="0.01" value={billAmount} disabled={disabled} onChange={event => setBillAmount(event.target.value)} className={`${FIELD} w-32`} />
                           </label>
                         </div>
-                        {Number.isFinite(amountCents) && amountCents !== reservation.totalCents && (
-                          <label className="block font-semibold text-pine-deep">Why is the amount different from {money(reservation.totalCents)}? (kept on record, not shown to the vendor)
+                        {Number.isFinite(amountCents) && amountCents < base && (
+                          <label className="block font-semibold text-pine-deep">Why is it less than the {money(base)} owed? (saved as a discount on the balance, not shown to the vendor)
                             <input type="text" value={billReason} maxLength={300} disabled={disabled} onChange={event => setBillReason(event.target.value)} placeholder="Example: 10% discount agreed with Thomas" className={FIELD} />
                           </label>
                         )}
@@ -800,14 +937,43 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
                           </div>)}
                         <div className="flex flex-wrap gap-3">
                           <button type="button" disabled={disabled || !planned || "error" in planned} onClick={() => void sendInvoice(reservation)} className={BUTTON}>{busy === "bill" ? "Sending…" : "Send invoice"}</button>
-                          <button type="button" disabled={disabled} onClick={() => setBillTarget(null)} className={QUIET_BUTTON}>Cancel</button>
+                          <button type="button" disabled={disabled} onClick={() => { setBillTarget(null); setBillReplace(null); }} className={QUIET_BUTTON}>Cancel</button>
                         </div>
                       </div>}
                     </section>
                   );
                 })()}
 
-                {CHANGEABLE_STATES.has(reservation.state) && reservation.paymentRequired && !invoices.some(item => item.reservationId === reservation.id && (item.status === "open" || item.status === "creating")) && (() => {
+                {(reservation.state === "held" || reservation.state === "payment_pending") && reservation.paymentRequired && billingAvailable && !invoices.some(item => item.reservationId === reservation.id && (item.status === "open" || item.status === "creating")) && (
+                  <section className="mt-5 rounded-2xl border border-pine/15 bg-white/60 p-5">
+                    <h4 className="font-semibold text-pine-deep">Discount this booking</h4>
+                    {discountTarget !== reservation.id && <>
+                      <p className="mt-2 text-sm leading-relaxed text-ink/65">Lower this booking's price by an amount or a percent. It shows on the vendor's balance; bill them with "Bill this vendor" so they pay the new amount.</p>
+                      <button type="button" disabled={disabled} onClick={() => { setDiscountTarget(reservation.id); setDiscountMode("amount"); setDiscountValue(""); setDiscountReason(""); setError(""); setNotice(""); }} className={`${QUIET_BUTTON} mt-4`}>Add a discount</button>
+                    </>}
+                    {discountTarget === reservation.id && <div className="mt-3 space-y-3 text-sm">
+                      <div className="flex flex-wrap gap-4">
+                        <label className="flex items-center gap-2"><input type="radio" checked={discountMode === "amount"} disabled={disabled} onChange={() => setDiscountMode("amount")} /> Dollar amount</label>
+                        <label className="flex items-center gap-2"><input type="radio" checked={discountMode === "percent"} disabled={disabled} onChange={() => setDiscountMode("percent")} /> Percent of {money(reservation.totalCents)}</label>
+                      </div>
+                      <div className="flex flex-wrap items-end gap-3">
+                        <label className="font-semibold text-pine-deep">{discountMode === "percent" ? "Percent (%)" : "Amount ($)"}
+                          <input type="number" min={0.01} step="0.01" value={discountValue} disabled={disabled} onChange={event => setDiscountValue(event.target.value)} className={`${FIELD} w-32`} />
+                        </label>
+                        <p className="pb-3 text-pine-deep">New price: <strong>{(() => { const v = Number(discountValue); const cut = discountMode === "percent" ? Math.round(reservation.totalCents * v / 100) : Math.round(v * 100); return Number.isFinite(cut) && cut > 0 ? money(Math.max(0, owedOn(reservation) - cut)) : "—"; })()}</strong></p>
+                      </div>
+                      <label className="block font-semibold text-pine-deep">Why (kept on record, not shown to the vendor)
+                        <input type="text" maxLength={300} value={discountReason} disabled={disabled} onChange={event => setDiscountReason(event.target.value)} placeholder="Example: Returning vendor, 10% off" className={FIELD} />
+                      </label>
+                      <div className="flex flex-wrap gap-3">
+                        <button type="button" disabled={disabled} onClick={() => void saveDiscount(reservation)} className={BUTTON}>Save discount</button>
+                        <button type="button" disabled={disabled} onClick={() => setDiscountTarget(null)} className={QUIET_BUTTON}>Cancel</button>
+                      </div>
+                    </div>}
+                  </section>
+                )}
+
+                {CHANGEABLE_STATES.has(reservation.state) && reservation.paymentRequired && !invoices.some(item => item.reservationId === reservation.id && (item.status === "open" || item.status === "creating")) && !(balance?.bookings?.find(item => item.reservationId === reservation.id)?.discountCents || balance?.bookings?.find(item => item.reservationId === reservation.id)?.creditAppliedCents) && (() => {
                   const changing = changeTarget === reservation.id;
                   const otherHeld = new Set(liveReservations.filter(item => item.id !== reservation.id).flatMap(item => item.finalDates));
                   const today = todayEastern();
@@ -819,18 +985,18 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
                       {!changing && <button type="button" disabled={disabled} onClick={() => startChange(reservation)} className={`${QUIET_BUTTON} mt-4`}>Change dates</button>}
                       {changing && <div className="mt-4">
                         <p className="text-sm font-semibold text-pine-deep">New Saturdays ({changeDates.length} picked)</p>
-                        {reservation.finalDates.some(date => date < today) && <p className="mt-1 text-xs text-clay">{reservation.finalDates.filter(date => date < today).map(reservationDateLabel).join(", ")} already happened and won't be on the new booking or its bill.</p>}
+                        {reservation.finalDates.some(date => date < today) && <p className="mt-1 text-xs text-ink/60">{reservation.finalDates.filter(date => date < today).map(reservationDateLabel).join(", ")} already happened. {reservation.finalDates.filter(date => date < today).length === 1 ? "It stays" : "They stay"} on the booking and the bill.</p>}
                         <div className="mt-2 grid max-h-64 grid-cols-2 gap-x-4 gap-y-1 overflow-y-auto rounded-xl border border-pine/15 bg-white p-3 text-sm sm:grid-cols-3">
-                          {FRESH_AIR_SEASON_DATES.map(date => {
-                            const past = date < today;
+                          {FRESH_AIR_SEASON_DATES.filter(date => date >= today || reservation.finalDates.includes(date)).map(date => {
+                            const kept = date < today;
                             const taken = otherHeld.has(date);
                             const noInsurance = uninsured(date);
-                            const blocked = past || taken || noInsurance;
+                            const blocked = kept || taken || noInsurance;
                             return (
-                              <label key={date} className={`flex items-center gap-2 py-1 ${blocked ? "text-ink/35" : "text-ink/80"}`}>
-                                <input type="checkbox" disabled={disabled || blocked} checked={!blocked && changeDates.includes(date)}
+                              <label key={date} className={`flex items-center gap-2 py-1 ${blocked ? "text-ink/45" : "text-ink/80"}`}>
+                                <input type="checkbox" disabled={disabled || blocked} checked={kept ? true : !blocked && changeDates.includes(date)}
                                   onChange={event => setChangeDates(current => event.target.checked ? [...current, date].sort() : current.filter(d => d !== date))} />
-                                {reservationDateLabel(date)}{past ? " (past)" : taken ? " (other booking)" : noInsurance ? " (after insurance)" : ""}
+                                {reservationDateLabel(date)}{kept ? " (happened, stays)" : taken ? " (other booking)" : noInsurance ? " (after insurance)" : ""}
                               </label>
                             );
                           })}
@@ -919,17 +1085,17 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
               <p className="mt-1 text-xs leading-relaxed text-ink/60">35 Saturdays, October 3, 2026 through May 29, 2027. Requested dates are suggestions; confirm the final selection with the vendor.{reservations.length ? " This booking is priced on its own dates: $40 per Saturday, $35 when it covers 4 or more Saturdays in a row." : ""}</p>
               {hasUnmappedRequestedDates && <p className="mt-3 rounded-xl bg-amber/15 p-3 text-sm text-clay">Some requested values do not match the confirmed calendar. Review the original request above and choose the final dates here.</p>}
               {insuranceExpiresOn && !fullSeasonCovered && <p className="mt-3 rounded-xl bg-amber/15 p-3 text-sm text-clay">Their certificate of insurance expires {reservationDateLabel(insuranceExpiresOn)}. Saturdays after that are greyed out until a renewed certificate is approved.</p>}
-              {heldDates.size === 0 && fullSeasonCovered && <label className="mt-3 flex items-start gap-3 rounded-xl border border-pine/20 bg-parchment/40 p-4 text-sm font-semibold text-pine-deep">
+              {heldDates.size === 0 && fullSeasonCovered && todayEastern() <= FRESH_AIR_SEASON_DATES[0] && <label className="mt-3 flex items-start gap-3 rounded-xl border border-pine/20 bg-parchment/40 p-4 text-sm font-semibold text-pine-deep">
                 <input type="checkbox" checked={form.fullSeason} onChange={event => edit({ fullSeason: event.target.checked, selectedDates: [] })} className="mt-0.5" />
                 Full season — all 35 dates through Saturday, May 29, 2027
               </label>}
               {!form.fullSeason && <div className="mt-3 grid max-h-80 grid-cols-1 gap-2 overflow-y-auto rounded-xl border border-pine/15 p-3 sm:grid-cols-2">
-                {FRESH_AIR_SEASON_DATES.map(date => <label key={date} className={`flex items-center gap-2 rounded-lg px-2 py-2 text-sm hover:bg-parchment/60 ${heldDates.has(date) || uninsured(date) ? "text-ink/40" : "text-pine-deep"}`}>
+                {FRESH_AIR_SEASON_DATES.filter(date => date >= todayEastern()).map(date => <label key={date} className={`flex items-center gap-2 rounded-lg px-2 py-2 text-sm hover:bg-parchment/60 ${heldDates.has(date) || uninsured(date) ? "text-ink/40" : "text-pine-deep"}`}>
                   <input type="checkbox" disabled={heldDates.has(date) || uninsured(date)} checked={form.selectedDates.includes(date)} onChange={event => edit({ selectedDates: event.target.checked ? [...form.selectedDates, date].sort() : form.selectedDates.filter(value => value !== date) })} />
                   {reservationDateLabel(date)}{heldDates.has(date) ? " (already booked)" : uninsured(date) ? " (after insurance expires)" : ""}
                 </label>)}
               </div>}
-              <p className="mt-2 text-xs font-semibold text-pine">{form.fullSeason ? 35 : form.selectedDates.length} market dates selected</p>
+              <p className="mt-2 text-xs font-semibold text-pine">{form.fullSeason ? 35 : form.selectedDates.filter(date => date >= todayEastern()).length} market dates selected</p>
               {snapshot.requiresFinalDateConfirmation && <label className="mt-4 flex items-start gap-3 rounded-xl bg-amber/15 p-4 text-sm text-clay">
                 <input required type="checkbox" checked={form.finalDatesConfirmed} onChange={event => edit({ finalDatesConfirmed: event.target.checked })} className="mt-0.5" />
                 <span>The earlier request referred to May 27. I have confirmed the final dates with the vendor, including Saturday, May 29, 2027 when selected.</span>

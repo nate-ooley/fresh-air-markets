@@ -1,4 +1,5 @@
 import { hasOpenInvoice } from "@/lib/vendor-invoice-pg";
+import { hasPriceAdjustment } from "@/lib/vendor-balance-pg";
 import { NextRequest, NextResponse } from "next/server";
 import { getSessionAccountId } from "@/lib/auth";
 import { squarePaymentRuntimeConfig, squarePortalOrigin, verifySquareIdentity } from "@/lib/square";
@@ -87,6 +88,9 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     return NextResponse.json({ error: "Payment checkout is not configured for this market." }, { status: 403 });
   }
 
+  if (await hasPriceAdjustment(marketId, reservationId)) {
+    return NextResponse.json({ error: "This booking's price was changed (discount or credit). Bill it with \"Bill this vendor\" so the vendor pays the new amount." }, { status: 409 });
+  }
   if (await hasOpenInvoice(marketId, reservationId)) {
     return NextResponse.json({ error: "This booking is being billed by a Square invoice. Cancel the invoice first to send a payment link instead." }, { status: 409 });
   }

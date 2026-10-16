@@ -1,4 +1,5 @@
 import { hasOpenInvoice } from "@/lib/vendor-invoice-pg";
+import { hasPriceAdjustment } from "@/lib/vendor-balance-pg";
 import { NextRequest, NextResponse } from "next/server";
 import { getSessionAccountId } from "@/lib/auth";
 import { validSquareReservationId } from "@/lib/square-payment";
@@ -25,6 +26,9 @@ export async function POST(request: NextRequest, context: { params: Promise<{ id
   const body = await readVendorAccessBody(request);
   if (!validSquareReservationId(id) || !body || Object.keys(body).length) {
     return NextResponse.json({ error: "A reservation and empty JSON object are required." }, { status: 400, headers });
+  }
+  if (await hasPriceAdjustment(config.marketId, id)) {
+    return NextResponse.json({ error: "This booking's price was changed (discount or credit). Bill it with \"Bill this vendor\" so the vendor pays the new amount." }, { status: 409, headers });
   }
   if (await hasOpenInvoice(config.marketId, id)) {
     return NextResponse.json({ error: "This booking is being billed by a Square invoice. Cancel the invoice first to send a payment link instead." }, { status: 409, headers });

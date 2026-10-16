@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import PaymentRemindersCard from "./PaymentRemindersCard";
+import VendorBalancesCard from "./VendorBalancesCard";
 import Link from "next/link";
 
 interface Vendor { reservationId: string; applicationId: string; businessName: string; vendorName: string; email: string; phone: string; applicantType: string; category: string; booths: number; status: "paid" | "confirmed" | "pending"; paymentDueAt: string | null }
@@ -131,6 +132,7 @@ export default function RosterPanel() {
         )}
         {!roster && !error && <p role="status" className="text-sm text-ink/60">Loading the roster…</p>}
         <PaymentRemindersCard />
+        <VendorBalancesCard />
       </div>
     </main>
   );

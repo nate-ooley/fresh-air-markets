@@ -105,6 +105,8 @@ function renderPanel(options = {}) {
     // billing: invoices, target, plan, count, first due, amount, reason
     options.invoices ?? [], false, null, 'full', '3', '', '', '',
     null, null, '', false,
+    // balance: balance, discount target/mode/value/reason, credit open/amount/reason, use credit, replace
+    options.balance ?? null, null, 'amount', '', '', false, '', '', false, null,
   ];
   let index = 0;
   const updates = [];

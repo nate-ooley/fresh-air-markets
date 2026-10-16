@@ -76,6 +76,8 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   if (plan.kind === "not_changeable") {
     return NextResponse.json({ error: plan.state === "paid" || plan.state === "confirmed"
       ? "This booking is paid, so its dates can't be changed here yet. Refund it in Square first, or add a new booking for extra dates."
+      : plan.state === "price_adjusted"
+        ? "This booking has a discount or credit on it. Undo that on the balance first, change the dates, then discount the new booking."
       : plan.state === "on_billing_plan"
         ? "This booking is being billed by a Square invoice. Cancel the invoice first, then change the dates."
       : plan.state === "manual_review"
@@ -84,6 +86,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   }
   if (plan.kind === "same_dates") return NextResponse.json({ error: "Those are already the booking's dates. Nothing to change." }, { status: 409, headers });
   if (plan.kind === "past_dates") return NextResponse.json({ error: `${label(plan.dates)} ${plan.dates.length === 1 ? "has" : "have"} already happened. Pick upcoming Saturdays.` }, { status: 409, headers });
+  if (plan.kind === "past_dates_removed") return NextResponse.json({ error: `${label(plan.dates)} already happened and stay on this booking and its bill. Keep ${plan.dates.length === 1 ? "it" : "them"} ticked.` }, { status: 409, headers });
   if (plan.kind === "overlap") return NextResponse.json({ error: `The vendor already has ${label(plan.dates)} in another booking.` }, { status: 409, headers });
   if (plan.kind === "insurance_expires") return NextResponse.json({ error: `Their insurance certificate expires ${plan.expiresOn}; ${label(plan.dates)} can't be booked until a renewed certificate is approved.` }, { status: 409, headers });
   if (plan.kind === "unavailable") return NextResponse.json({ error: `No room left on ${label(plan.dates)}. Nothing was changed.` }, { status: 409, headers });

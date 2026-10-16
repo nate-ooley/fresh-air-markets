@@ -9,7 +9,9 @@ import { SquareInvoiceError, cancelSquareInvoice, createDraftSquareInvoice, ensu
 import { squareLinkCanceller } from "@/lib/square-link-cancel";
 import { validSquareReservationId } from "@/lib/square-payment";
 import { marketToday } from "@/lib/vendor-booking-pg";
-import { beginInvoice, invoiceView, markInstallmentPublished, markInvoiceFailed, markInvoiceOpen, readBillingQuote, recordInstallmentDraft } from "@/lib/vendor-invoice-pg";
+import { beginInvoice, getInvoice, invoiceView, markInstallmentPublished, markInvoiceFailed, markInvoiceOpen, recordInstallmentDraft } from "@/lib/vendor-invoice-pg";
+import { addDiscount, applyCredit, bookingBalanceDue } from "@/lib/vendor-balance-pg";
+import { cancelInvoiceAtSquare } from "@/lib/invoice-cancel";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -46,13 +48,21 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   const decoded = await readInquiryBody(request);
   if ("status" in decoded) return NextResponse.json({ error: decoded.error }, { status: decoded.status, headers });
 
-  let quoted;
-  try { quoted = await readBillingQuote(marketId, id); }
-  catch { return NextResponse.json({ error: "Billing is unavailable right now." }, { status: 503, headers }); }
-  if (quoted === null) return NextResponse.json({ error: "Reservation not found." }, { status: 404, headers });
   const body = decoded.body;
-  const request_ = planBilling({ plan: body.plan, installments: body.installments, firstDueOn: body.firstDueOn, totalCents: body.totalCents, reason: body.reason, quotedCents: quoted, today: marketToday() });
-  if ("error" in request_) return NextResponse.json({ error: request_.error }, { status: 400, headers });
+  const replaceId = typeof body.replaceInvoiceId === "string" ? body.replaceInvoiceId : null;
+  let due;
+  try { due = await bookingBalanceDue(marketId, id); }
+  catch { return NextResponse.json({ error: "Billing is unavailable right now." }, { status: 503, headers }); }
+  if (!due) return NextResponse.json({ error: "Reservation not found." }, { status: 404, headers });
+  // Check the request against what's owed before anything changes (credit and discounts come off first).
+  const credit = body.useCredit === true ? Math.min(due.creditAvailableCents, due.balanceCents) : 0;
+  const owedAfterCredit = due.balanceCents - credit;
+  const asked = body.totalCents;
+  if (typeof asked === "number" && Number.isSafeInteger(asked) && asked > owedAfterCredit && !replaceId) {
+    return NextResponse.json({ error: `That's more than the ${(owedAfterCredit / 100).toLocaleString("en-US", { style: "currency", currency: "USD" })} still owed on this booking. To charge more, add dates instead.` }, { status: 400, headers });
+  }
+  const checked = planBilling({ plan: body.plan, installments: body.installments, firstDueOn: body.firstDueOn, totalCents: body.totalCents, reason: body.reason, quotedCents: replaceId ? Number(asked) : owedAfterCredit, today: marketToday() });
+  if ("error" in checked) return NextResponse.json({ error: checked.error }, { status: 400, headers });
 
   let square: SquareInvoiceConfig;
   try {
@@ -61,8 +71,32 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     square = { environment: setup.environment, accessToken: setup.accessToken, locationId: identity.locationId };
   } catch { return NextResponse.json({ error: "Square is not reachable right now. Nothing was sent; try again." }, { status: 503, headers }); }
 
+  // "Change amount" on a sent invoice: stop its unpaid payments first; paid ones stay on the balance.
+  if (replaceId) {
+    const old = await getInvoice(marketId, replaceId).catch(() => null);
+    if (!old || old.reservationId !== id || (old.status !== "open" && old.status !== "creating")) return NextResponse.json({ error: "That invoice isn't open on this booking any more. Reload the page." }, { status: 409, headers });
+    if (!await cancelInvoiceAtSquare(square, marketId, old).catch(() => false)) return NextResponse.json({ error: "Square did not confirm the old invoice was cancelled, so nothing was changed. Try again." }, { status: 503, headers });
+    due = await bookingBalanceDue(marketId, id).catch(() => null);
+    if (!due) return NextResponse.json({ error: "Reservation not found." }, { status: 404, headers });
+  }
+
+  // Use credit and record a lower amount as a discount, so the vendor's balance matches what Square collects.
+  if (credit > 0) {
+    const used = await applyCredit({ marketId, reservationId: id, amountCents: credit, actorAccountId: marketId }).catch(() => null);
+    if (!used || used.kind !== "saved") return NextResponse.json({ error: "The vendor's credit could not be used. Nothing was sent; try again." }, { status: 409, headers });
+    due = { ...due, balanceCents: due.balanceCents - used.amountCents };
+  }
+  if (checked.totalCents > due.balanceCents) return NextResponse.json({ error: `That's more than the ${(due.balanceCents / 100).toLocaleString("en-US", { style: "currency", currency: "USD" })} still owed on this booking.` }, { status: 400, headers });
+  if (checked.totalCents < due.balanceCents) {
+    const reason = checked.reason || (typeof body.reason === "string" ? body.reason.trim() : "");
+    if (!reason) return NextResponse.json({ error: "Say why the amount is lower than what's owed (it's kept on record)." }, { status: 400, headers });
+    const discounted = await addDiscount({ marketId, reservationId: id, amountCents: due.balanceCents - checked.totalCents, reason, actorAccountId: marketId }).catch(() => null);
+    if (!discounted || discounted.kind !== "saved") return NextResponse.json({ error: discounted && "error" in discounted ? discounted.error : discounted && "reason" in discounted ? discounted.reason : "The discount could not be saved. Nothing was sent; try again." }, { status: 409, headers });
+  }
+  const request_ = { ...checked, reason: "" };
+
   let begun;
-  try { begun = await beginInvoice({ marketId, reservationId: id, request: request_, environment: square.environment, actorAccountId: marketId }); }
+  try { begun = await beginInvoice({ marketId, reservationId: id, request: request_, environment: square.environment, actorAccountId: marketId, quotedCents: request_.totalCents }); }
   catch { return NextResponse.json({ error: "Billing is unavailable right now. Nothing was sent; try again." }, { status: 503, headers }); }
   if (begun.kind === "unavailable") return NextResponse.json({ error: "Billing by invoice isn't switched on yet (its database update hasn't been applied). Nothing was sent." }, { status: 503, headers });
   if (begun.kind === "not_found") return NextResponse.json({ error: "Reservation not found." }, { status: 404, headers });

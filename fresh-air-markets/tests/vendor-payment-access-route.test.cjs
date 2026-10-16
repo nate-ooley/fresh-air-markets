@@ -18,6 +18,7 @@ function loadRoute(name, store = {}, actor = 'private-market') {
     if (id === '@/lib/vendor-payment-access') return access;
     if (id === '@/lib/vendor-payment-access-pg') return { postgresVendorPaymentAccessStore: store };
     if (id === '@/lib/vendor-invoice-pg') return { hasOpenInvoice: async () => false };
+    if (id === '@/lib/vendor-balance-pg') return { hasPriceAdjustment: async () => false };
     if (id === '@/lib/square-payment') return require('../.test-build/square-payment.js');
     if (id === '@/lib/notifications') return { notifyPaymentRequest: async () => 'not_sent' };
     return require(id);

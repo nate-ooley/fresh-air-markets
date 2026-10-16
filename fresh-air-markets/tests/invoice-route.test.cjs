@@ -20,7 +20,8 @@ function invoice(patch = {}) {
 }
 const target = { reservationId: RES, applicationId: 'app-1', state: 'payment_pending', quotedCents: 105000, dates: ['2026-10-24'], booths: 1, description: '1 market date, 1 booth' };
 
-function load({ session = 'fame-market', log = [], begun = { kind: 'started', invoice: invoice(), target }, retired = { kind: 'retired', linksCancelled: 1 }, customerError = null, publishError = null, contact = { email: 'v@vendor.org', name: 'Ann Lee', businessName: 'Ann Co' } } = {}) {
+function load({ session = 'fame-market', log = [], begun = { kind: 'started', invoice: invoice(), target }, retired = { kind: 'retired', linksCancelled: 1 }, customerError = null, publishError = null, contact = { email: 'v@vendor.org', name: 'Ann Lee', businessName: 'Ann Co' }, owed = 105000, credit = 0, oldInvoice = null } = {}) {
+  let balance = owed;
   const filename = path.resolve(__dirname, '../src/app/api/admin/reservations/[id]/invoice/route.ts');
   const compiled = ts.transpileModule(fs.readFileSync(filename, 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
   const mod = new Module(filename, module);
@@ -39,6 +40,12 @@ function load({ session = 'fame-market', log = [], begun = { kind: 'started', in
     };
     if (id === '@/lib/square-link-cancel') return { squareLinkCanceller: () => async () => 'cancelled' };
     if (id === '@/lib/vendor-booking-pg') return { marketToday: () => '2026-10-15' };
+    if (id === '@/lib/vendor-balance-pg') return {
+      bookingBalanceDue: async () => ({ reservationId: RES, applicationId: 'app-1', balanceCents: balance, creditAvailableCents: credit }),
+      applyCredit: async input => { const used = Math.min(input.amountCents, credit, balance); balance -= used; log.push(['credit', used]); return { kind: 'saved', adjustmentId: 'a1', amountCents: used }; },
+      addDiscount: async input => { balance -= input.amountCents; log.push(['discount', input.amountCents, input.reason]); return { kind: 'saved', adjustmentId: 'a2', amountCents: input.amountCents }; },
+    };
+    if (id === '@/lib/invoice-cancel') return { cancelInvoiceAtSquare: async (_s, _m, old) => { log.push(['cancel-old', old.id]); return true; } };
     if (id === '@/lib/vendor-invoice-pg') return {
       readBillingQuote: async () => 105000,
       beginInvoice: async input => { log.push(['begin', input.request.plan, input.request.installments.length, input.request.totalCents]); return begun; },
@@ -47,6 +54,7 @@ function load({ session = 'fame-market', log = [], begun = { kind: 'started', in
       markInvoiceOpen: async input => { log.push(['open', input.invoiceId, input.publicUrl]); },
       markInvoiceFailed: async input => { log.push(['failed', input.error]); },
       invoiceView: record => ({ id: record.id, status: record.status, installments: record.installments }),
+      getInvoice: async () => oldInvoice,
     };
     if (id.startsWith('@/lib/')) return require('../.test-build/' + id.slice(6) + '.js');
     return require(id);
@@ -125,6 +133,7 @@ test('open invoices, paid, nonprofit and lapsed bookings, missing email and bad 
     [{ contact: null }, monthly, 409, /no usable email/],
     [{}, { ...monthly, installments: 13 }, 400, /2 to 12 payments/],
     [{}, { ...monthly, totalCents: 90000 }, 400, /Say why/],
+    [{}, { ...monthly, totalCents: 105100 }, 400, /more than the \$1,050\.00 still owed/],
     [{}, { ...monthly, firstDueOn: '2026-10-01' }, 400, /past/],
   ];
   for (const [options, body, status, message] of cases) {
@@ -136,4 +145,34 @@ test('open invoices, paid, nonprofit and lapsed bookings, missing email and bad 
   }
   assert.equal((await call(load({ session: null }), monthly)).status, 401);
   assert.equal((await call(load(), monthly, 'bad%20id')).status, 400);
+}));
+
+test('billing less than is owed records the difference as a discount on the balance, with the reason', () => withEnv(env, async () => {
+  const log = [];
+  const response = await call(load({ log }), { ...monthly, totalCents: 90000, reason: 'Returning vendor' });
+  assert.equal(response.status, 201);
+  assert.deepEqual(log.find(entry => entry[0] === 'discount'), ['discount', 15000, 'Returning vendor']);
+  assert.deepEqual(log.find(entry => entry[0] === 'begin'), ['begin', 'monthly', 3, 90000]);
+}));
+
+test('vendor credit comes off before billing', () => withEnv(env, async () => {
+  const log = [];
+  const response = await call(load({ log, credit: 5000 }), { ...monthly, totalCents: 100000, useCredit: true });
+  assert.equal(response.status, 201);
+  assert.deepEqual(log.find(entry => entry[0] === 'credit'), ['credit', 5000]);
+  assert.equal(log.some(entry => entry[0] === 'discount'), false);
+  assert.deepEqual(log.find(entry => entry[0] === 'begin'), ['begin', 'monthly', 3, 100000]);
+}));
+
+test('change amount cancels the open invoice first, then bills the new amount', () => withEnv(env, async () => {
+  const log = [];
+  const oldInvoice = invoice({ id: 'old-inv', status: 'open' });
+  const response = await call(load({ log, oldInvoice, owed: 70000 }), { ...monthly, installments: 2, totalCents: 60000, reason: 'Agreed lower price', replaceInvoiceId: 'old-inv' });
+  assert.equal(response.status, 201);
+  const order = log.map(entry => entry[0]);
+  assert.ok(order.indexOf('cancel-old') < order.indexOf('discount'));
+  assert.ok(order.indexOf('discount') < order.indexOf('begin'));
+  assert.deepEqual(log.find(entry => entry[0] === 'discount'), ['discount', 10000, 'Agreed lower price']);
+  const wrong = await call(load({ oldInvoice: invoice({ id: 'old-inv', status: 'open', reservationId: 'someone-else' }) }), { ...monthly, replaceInvoiceId: 'old-inv' });
+  assert.equal(wrong.status, 409);
 }));

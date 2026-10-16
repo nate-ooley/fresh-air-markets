@@ -620,6 +620,7 @@ export type DateChangePlan =
   | { kind: "invalid_selection" }
   | { kind: "same_dates" }
   | { kind: "past_dates"; dates: string[] }
+  | { kind: "past_dates_removed"; dates: string[] }
   | { kind: "overlap"; dates: string[] }
   | { kind: "insurance_expires"; expiresOn: string; dates: string[] }
   | { kind: "unavailable"; dates: string[] };
@@ -653,6 +654,12 @@ export async function planDateChange(input: {
   const [invoice] = !await invoicesReady(sql) ? [] : await sql<{ live: boolean }[]>`SELECT EXISTS (SELECT 1 FROM fame_invoices WHERE market_id = ${input.marketId}
     AND reservation_id = ${input.reservationId} AND status IN ('creating', 'open')) AS live`;
   if (invoice?.live) return { kind: "not_changeable", state: "on_billing_plan" };
+  const [adjusted] = await sql<{ present: boolean }[]>`SELECT to_regclass('fame_vendor_adjustments') IS NOT NULL AS present`;
+  if (adjusted?.present) {
+    const [row2] = await sql<{ any: boolean }[]>`SELECT EXISTS (SELECT 1 FROM fame_vendor_adjustments WHERE market_id = ${input.marketId}
+      AND reservation_id = ${input.reservationId} AND kind IN ('discount', 'credit_applied') AND voided_at IS NULL) AS any`;
+    if (row2?.any) return { kind: "not_changeable", state: "price_adjusted" };
+  }
   const currentDates = asFinalDates(row.final_dates);
   if (!currentDates) throw new Error("Stored final reservation is invalid.");
   const profile = {
@@ -669,8 +676,11 @@ export async function planDateChange(input: {
   if (!selection || wanted.length !== input.dates.length) return { kind: "invalid_selection" };
   let preflight;
   try { preflight = preflightFinalReservation(calendar, selection); } catch { return { kind: "invalid_selection" }; }
-  const past = preflight.dates.filter(date => date < input.today);
+  // Saturdays already on the booking stay (and stay charged) even once they've happened; new ones must be upcoming.
+  const past = preflight.dates.filter(date => date < input.today && !currentDates.includes(date));
   if (past.length) return { kind: "past_dates", dates: past };
+  const dropped = currentDates.filter(date => date < input.today && !preflight.dates.includes(date));
+  if (dropped.length) return { kind: "past_dates_removed", dates: dropped.sort() };
   if (!resuming && preflight.dates.join() === [...currentDates].sort().join() && input.booths === Number(row.final_booth_quantity)) return { kind: "same_dates" };
 
   // Other live bookings of the same vendor still count; this one does not.
