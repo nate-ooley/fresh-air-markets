@@ -101,10 +101,18 @@ export function checkVendorBooking(
   const isNonprofit = request.applicantType === "Non-Profit Organization";
   const isFoodTruck = category === "Food Truck";
   // Consecutive means adjacent entries in the market calendar, including any
-  // scheduled holiday gaps. The whole selected set must be consecutive.
-  const first = calendarDates.indexOf(dates[0]);
-  const consecutive = dates.length >= 4
-    && dates.every((d, i) => calendarDates[first + i] === d);
+  // scheduled holiday gaps. A booking that includes a run of four or more
+  // consecutive Saturdays gets the $35 rate on every date, even when it also
+  // has Saturdays outside that run (client decision 2026-10-16: keep the
+  // lower price when a vendor adds a date to a four-week run).
+  let run = 0;
+  let longest = 0;
+  for (let i = 0; i < dates.length; i++) {
+    const adjacent = i > 0 && calendarDates.indexOf(dates[i]) === calendarDates.indexOf(dates[i - 1]) + 1;
+    run = adjacent ? run + 1 : 1;
+    longest = Math.max(longest, run);
+  }
+  const consecutive = longest >= 4;
   const tier = isNonprofit ? "nonprofit" : request.fullSeason ? "full-season"
     : consecutive ? "consecutive" : "standard";
   const rateCents = isNonprofit ? 0 : request.fullSeason ? 3000 : consecutive ? 3500 : 4000;

@@ -20,8 +20,14 @@ test("four and five consecutive markets use $35, including a calendar holiday ga
   }
 });
 
-test("nonconsecutive selection stays at $40 even with a four-date run", () => {
+test("a booking that includes a four-date run keeps $35 on every date, even with an extra Saturday elsewhere", () => {
   const quote = checkVendorBooking(calendar, { ...base, selectedDates: [...dates.slice(0, 4), dates[5]] }, empty);
+  assert.equal(quote.rateCents, 3500);
+  assert.equal(quote.totalCents, 5 * 3500);
+});
+
+test("without any run of four in a row, every date is $40", () => {
+  const quote = checkVendorBooking(calendar, { ...base, selectedDates: [dates[0], dates[1], dates[2], dates[4], dates[5]] }, empty);
   assert.equal(quote.rateCents, 4000);
 });
 

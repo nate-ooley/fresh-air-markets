@@ -45,7 +45,7 @@ const WITHDRAWABLE_STATES = new Set<FinalReservationView["state"]>(["held", "pay
 /** Bookings whose Saturdays a manager may change in one step (nothing paid yet). */
 const CHANGEABLE_STATES = new Set<FinalReservationView["state"]>(["held", "payment_pending", "expired"]);
 
-/** Price for a set of Saturdays, using the same rule the server charges ($40, $35 for 4+ in a row, $30 full season). */
+/** Price for a set of Saturdays, using the same rule the server charges ($40, $35 when it includes 4+ in a row, $30 full season). */
 function previewTotal(dates: string[], booths: number): number | null {
   if (!dates.length || !Number.isSafeInteger(booths) || booths < 1) return null;
   const fullSeason = FRESH_AIR_SEASON_DATES.every(date => dates.includes(date));
@@ -1107,7 +1107,7 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
             </fieldset>
             <fieldset>
               <legend className="text-sm font-semibold text-pine-deep">Final market dates</legend>
-              <p className="mt-1 text-xs leading-relaxed text-ink/60">35 Saturdays, October 3, 2026 through May 29, 2027. Requested dates are suggestions; confirm the final selection with the vendor.{reservations.length ? " This booking is priced on its own dates: $40 per Saturday, $35 when it covers 4 or more Saturdays in a row." : ""}</p>
+              <p className="mt-1 text-xs leading-relaxed text-ink/60">35 Saturdays, October 3, 2026 through May 29, 2027. Requested dates are suggestions; confirm the final selection with the vendor.{reservations.length ? " This booking is priced on its own dates: $40 per Saturday, $35 when it includes 4 or more Saturdays in a row." : ""}</p>
               {hasUnmappedRequestedDates && <p className="mt-3 rounded-xl bg-amber/15 p-3 text-sm text-clay">Some requested values do not match the confirmed calendar. Review the original request above and choose the final dates here.</p>}
               {insuranceExpiresOn && !fullSeasonCovered && <p className="mt-3 rounded-xl bg-amber/15 p-3 text-sm text-clay">Their certificate of insurance expires {reservationDateLabel(insuranceExpiresOn)}. Saturdays after that are greyed out until a renewed certificate is approved.</p>}
               {heldDates.size === 0 && fullSeasonCovered && todayEastern() <= FRESH_AIR_SEASON_DATES[0] && <label className="mt-3 flex items-start gap-3 rounded-xl border border-pine/20 bg-parchment/40 p-4 text-sm font-semibold text-pine-deep">
