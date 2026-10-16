@@ -4,6 +4,7 @@ import { type FormEvent, useCallback, useEffect, useRef, useState } from "react"
 import { useRouter } from "next/navigation";
 import { FRESH_AIR_SEASON_DATES } from "@/lib/fresh-air-season";
 import { FAME_VENDOR_CATEGORIES, checkVendorBooking } from "@/lib/vendor-booking-rules";
+import SaturdayPicker from "./SaturdayPicker";
 import { MAX_INSTALLMENTS, MIN_INSTALLMENTS, invoiceSendDate, planBilling, type Installment } from "@/lib/billing-plan";
 import {
   finalReservationRequest,
@@ -199,6 +200,9 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
   const [creditReason, setCreditReason] = useState("");
   const [billUseCredit, setBillUseCredit] = useState(false);
   const [billReplace, setBillReplace] = useState<string | null>(null);
+  // Review-then-confirm steps for saving dates.
+  const [addConfirming, setAddConfirming] = useState(false);
+  const [changeConfirming, setChangeConfirming] = useState(false);
 
   const endpoint = `/api/admin/applications/${encodeURIComponent(applicationId)}/reserve`;
   const load = useCallback(async (signal?: AbortSignal) => {
@@ -275,6 +279,7 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
 
   function edit(patch: Partial<FinalReservationForm>) {
     setForm(current => ({ ...current, ...patch }));
+    setAddConfirming(false);
     setError("");
     setNotice("");
     setUnavailable([]);
@@ -293,8 +298,18 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
   async function reserve(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (inFlight.current || statusRead.current.pending || loading || loadError || !showForm) return;
+    // First press shows the review; nothing is saved until "Confirm and save".
+    if (!addConfirming) {
+      const upcoming = { ...form, selectedDates: form.selectedDates.filter(date => date >= todayEastern()) };
+      const checked = finalReservationRequest(upcoming, snapshot.requiresFinalDateConfirmation);
+      if ("error" in checked) { setError(checked.error); return; }
+      setForm(upcoming);
+      setError("");
+      setAddConfirming(true);
+      return;
+    }
     const request = finalReservationRequest(form, snapshot.requiresFinalDateConfirmation);
-    if ("error" in request) { setError(request.error); return; }
+    if ("error" in request) { setError(request.error); setAddConfirming(false); return; }
     inFlight.current = true;
     setBusy("reserve");
     setError("");
@@ -473,6 +488,7 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
 
   function startChange(reservation: FinalReservationView) {
     setChangeTarget(reservation.id);
+    setChangeConfirming(false);
     // Saturdays that already happened stay on the booking and its bill; only upcoming ones can change.
     setChangeDates([...reservation.finalDates].sort());
     setChangeBooths(String(reservation.finalBoothQuantity));
@@ -986,20 +1002,11 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
                       {changing && <div className="mt-4">
                         <p className="text-sm font-semibold text-pine-deep">New Saturdays ({changeDates.length} picked)</p>
                         {reservation.finalDates.some(date => date < today) && <p className="mt-1 text-xs text-ink/60">{reservation.finalDates.filter(date => date < today).map(reservationDateLabel).join(", ")} already happened. {reservation.finalDates.filter(date => date < today).length === 1 ? "It stays" : "They stay"} on the booking and the bill.</p>}
-                        <div className="mt-2 grid max-h-64 grid-cols-2 gap-x-4 gap-y-1 overflow-y-auto rounded-xl border border-pine/15 bg-white p-3 text-sm sm:grid-cols-3">
-                          {FRESH_AIR_SEASON_DATES.filter(date => date >= today || reservation.finalDates.includes(date)).map(date => {
-                            const kept = date < today;
-                            const taken = otherHeld.has(date);
-                            const noInsurance = uninsured(date);
-                            const blocked = kept || taken || noInsurance;
-                            return (
-                              <label key={date} className={`flex items-center gap-2 py-1 ${blocked ? "text-ink/45" : "text-ink/80"}`}>
-                                <input type="checkbox" disabled={disabled || blocked} checked={kept ? true : !blocked && changeDates.includes(date)}
-                                  onChange={event => setChangeDates(current => event.target.checked ? [...current, date].sort() : current.filter(d => d !== date))} />
-                                {reservationDateLabel(date)}{kept ? " (happened, stays)" : taken ? " (other booking)" : noInsurance ? " (after insurance)" : ""}
-                              </label>
-                            );
-                          })}
+                        <div className="mt-2">
+                          <SaturdayPicker dates={FRESH_AIR_SEASON_DATES} today={today} booked={reservation.finalDates} selected={changeDates}
+                            onChange={next => { setChangeDates(next); setChangeConfirming(false); }}
+                            blockedReason={date => otherHeld.has(date) ? "Other booking" : uninsured(date) ? "After insurance" : null}
+                            disabled={disabled || changeConfirming} />
                         </div>
                         <div className="mt-3 flex flex-wrap items-end gap-4">
                           <label className="text-sm font-semibold text-pine-deep">Booths per Saturday
@@ -1010,10 +1017,28 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
                         <label className="mt-3 block text-sm font-semibold text-pine-deep">Note to the vendor (optional)
                           <textarea value={changeNote} disabled={disabled} maxLength={500} rows={2} onChange={event => setChangeNote(event.target.value)} placeholder="Example: As we discussed on the phone, here are your October dates." className={FIELD} />
                         </label>
-                        <div className="mt-3 flex flex-wrap gap-3">
-                          <button type="button" disabled={disabled || !changeDates.length} onClick={() => void changeBookingDates(reservation)} className={BUTTON}>{busy === "change" ? "Changing…" : "Change dates and email the vendor"}</button>
+                        {!changeConfirming && <div className="mt-3 flex flex-wrap gap-3">
+                          <button type="button" disabled={disabled || !changeDates.length} onClick={() => { setError(""); setChangeConfirming(true); }} className={BUTTON}>Review changes</button>
                           <button type="button" disabled={disabled} onClick={() => setChangeTarget(null)} className={QUIET_BUTTON}>Cancel</button>
-                        </div>
+                        </div>}
+                        {changeConfirming && (() => {
+                          const adding = changeDates.filter(date => !reservation.finalDates.includes(date));
+                          const removing = reservation.finalDates.filter(date => !changeDates.includes(date));
+                          return (
+                            <div role="region" aria-label="Confirm date change" className="mt-4 rounded-2xl border-2 border-pine bg-parchment/70 p-4 text-sm">
+                              <h5 className="font-semibold text-pine-deep">Confirm the new dates</h5>
+                              {adding.length > 0 && <p className="mt-2 text-pine-deep">Adding: {adding.map(reservationDateLabel).join(" · ")}</p>}
+                              {removing.length > 0 && <p className="mt-1 text-clay">Removing: {removing.map(reservationDateLabel).join(" · ")}</p>}
+                              {!adding.length && !removing.length && <p className="mt-2 text-ink/70">Same Saturdays; booths per Saturday change to {changeBooths}.</p>}
+                              <p className="mt-1 text-pine-deep">New total: <strong>{total === null ? "—" : money(total)}</strong> (was {money(reservation.totalCents)})</p>
+                              <p className="mt-2 text-xs text-ink/60">Saving cancels the old payment link and emails the vendor their new dates and a new payment link.</p>
+                              <div className="mt-3 flex flex-wrap gap-3">
+                                <button type="button" disabled={disabled || !changeDates.length} onClick={() => void changeBookingDates(reservation)} className={BUTTON}>{busy === "change" ? "Saving…" : "Confirm and save"}</button>
+                                <button type="button" disabled={disabled} onClick={() => setChangeConfirming(false)} className={QUIET_BUTTON}>Go back</button>
+                              </div>
+                            </div>
+                          );
+                        })()}
                       </div>}
                     </section>
                   );
@@ -1089,11 +1114,11 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
                 <input type="checkbox" checked={form.fullSeason} onChange={event => edit({ fullSeason: event.target.checked, selectedDates: [] })} className="mt-0.5" />
                 Full season — all 35 dates through Saturday, May 29, 2027
               </label>}
-              {!form.fullSeason && <div className="mt-3 grid max-h-80 grid-cols-1 gap-2 overflow-y-auto rounded-xl border border-pine/15 p-3 sm:grid-cols-2">
-                {FRESH_AIR_SEASON_DATES.filter(date => date >= todayEastern()).map(date => <label key={date} className={`flex items-center gap-2 rounded-lg px-2 py-2 text-sm hover:bg-parchment/60 ${heldDates.has(date) || uninsured(date) ? "text-ink/40" : "text-pine-deep"}`}>
-                  <input type="checkbox" disabled={heldDates.has(date) || uninsured(date)} checked={form.selectedDates.includes(date)} onChange={event => edit({ selectedDates: event.target.checked ? [...form.selectedDates, date].sort() : form.selectedDates.filter(value => value !== date) })} />
-                  {reservationDateLabel(date)}{heldDates.has(date) ? " (already booked)" : uninsured(date) ? " (after insurance expires)" : ""}
-                </label>)}
+              {!form.fullSeason && <div className="mt-3">
+                <SaturdayPicker dates={FRESH_AIR_SEASON_DATES} today={todayEastern()} booked={[...heldDates]} lockBooked
+                  selected={[...heldDates, ...form.selectedDates.filter(date => !heldDates.has(date))]}
+                  onChange={next => edit({ selectedDates: next.filter(date => !heldDates.has(date)) })}
+                  blockedReason={date => uninsured(date) ? "After insurance" : null} disabled={disabled || addConfirming} />
               </div>}
               <p className="mt-2 text-xs font-semibold text-pine">{form.fullSeason ? 35 : form.selectedDates.filter(date => date >= todayEastern()).length} market dates selected</p>
               {snapshot.requiresFinalDateConfirmation && <label className="mt-4 flex items-start gap-3 rounded-xl bg-amber/15 p-4 text-sm text-clay">
@@ -1105,10 +1130,27 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
           <div className="flex flex-wrap items-center justify-between gap-4 border-t border-pine/10 pt-5">
             <p className="max-w-md text-xs leading-relaxed text-ink/60">Saving reserves the complete selected set if all checks pass. Payment is a separate action below. A saved booking cannot be edited; withdraw it and add new dates instead.</p>
             <div className="flex flex-wrap gap-3">
-              {reservations.length > 0 && addingDates && <button type="button" disabled={disabled} onClick={() => setAddingDates(false)} className={QUIET_BUTTON}>Cancel</button>}
-              <button type="submit" disabled={disabled} className={BUTTON}>{busy === "reserve" ? "Checking and reserving…" : "Check availability and reserve"}</button>
+              {reservations.length > 0 && addingDates && <button type="button" disabled={disabled} onClick={() => { setAddingDates(false); setAddConfirming(false); }} className={QUIET_BUTTON}>Cancel</button>}
+              {!addConfirming && <button type="submit" disabled={disabled} className={BUTTON}>Review booking</button>}
             </div>
           </div>
+          {addConfirming && (() => {
+            const chosen = form.fullSeason ? [...FRESH_AIR_SEASON_DATES] : form.selectedDates;
+            const booths = Number(form.boothsPerMarket);
+            const total = form.applicantType === "Non-Profit Organization" ? 0 : previewTotal(chosen, booths);
+            return (
+              <div role="region" aria-label="Confirm booking" className="rounded-2xl border-2 border-pine bg-parchment/70 p-5">
+                <h4 className="font-semibold text-pine-deep">Confirm this booking</h4>
+                <p className="mt-2 text-sm text-pine-deep">{booths} booth{booths === 1 ? "" : "s"} on {chosen.length} Saturday{chosen.length === 1 ? "" : "s"}: {chosen.map(reservationDateLabel).join(" · ")}</p>
+                <p className="mt-1 text-sm text-pine-deep">Price: <strong>{total === null ? "checked on save" : money(total)}</strong></p>
+                <p className="mt-2 text-xs text-ink/60">Saving reserves these dates if there is still room. You send the payment request next.</p>
+                <div className="mt-4 flex flex-wrap gap-3">
+                  <button type="submit" disabled={disabled} className={BUTTON}>{busy === "reserve" ? "Saving…" : "Confirm and save"}</button>
+                  <button type="button" disabled={disabled} onClick={() => setAddConfirming(false)} className={QUIET_BUTTON}>Go back</button>
+                </div>
+              </div>
+            );
+          })()}
         </form>
       )}
 

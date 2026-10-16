@@ -13,7 +13,10 @@ function sourceModule(relative, overrides = {}) {
   mod.require = id => {
     if (Object.hasOwn(overrides, id)) return overrides[id];
     if (id.startsWith('@/lib/')) return sourceModule(`src/lib/${id.slice(6)}.ts`);
-    if (id.startsWith('./')) return sourceModule(path.relative(path.resolve(__dirname, '..'), path.resolve(path.dirname(filename), `${id}.ts`)));
+    if (id.startsWith('./')) {
+      const base = path.resolve(path.dirname(filename), id);
+      return sourceModule(path.relative(path.resolve(__dirname, '..'), fs.existsSync(`${base}.ts`) ? `${base}.ts` : `${base}.tsx`));
+    }
     return require(id);
   };
   mod._compile(ts.transpileModule(fs.readFileSync(filename, 'utf8'), {
@@ -107,6 +110,8 @@ function renderPanel(options = {}) {
     null, null, '', false,
     // balance: balance, discount target/mode/value/reason, credit open/amount/reason, use credit, replace
     options.balance ?? null, null, 'amount', '', '', false, '', '', false, null,
+    // review steps: add confirming (tests submit straight through), change confirming
+    options.confirmed ?? true, false,
   ];
   let index = 0;
   const updates = [];
@@ -222,3 +227,12 @@ test('private access requires explicit replacement consent and keeps the returne
   assert.deepEqual(links.find(value => value[reservation.id]), { [reservation.id]: { invitationUrl: payload.invitationUrl, expiresAt: payload.expiresAt } });
 }));
 
+
+test('the first press only opens the review; nothing is saved until "Confirm and save"', async () => browserBoundary(async () => {
+  const calls = [];
+  global.fetch = async (url, options) => { calls.push([url, options]); return new Response('{}', { status: 201 }); };
+  const panel = renderPanel({ confirmed: false, form: { selectedDates: ['2027-05-29'] } });
+  await panel.submit();
+  assert.equal(calls.length, 0);
+  assert.ok(panel.updates.some(([, value]) => value === true), 'review step opened');
+}));
