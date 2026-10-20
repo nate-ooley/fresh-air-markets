@@ -22,6 +22,7 @@
     "database:remove-demo:production": "node scripts/bootstrap-qa-account.mjs remove-demo-tenant --production"
   },
   "dependencies": {
+    "@vercel/analytics": "^2.0.1",
     "next": "^15.3.4",
     "postgres": "^3.4.5",
     "react": "^19.1.0",
