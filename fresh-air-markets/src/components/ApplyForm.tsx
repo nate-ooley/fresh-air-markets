@@ -67,7 +67,7 @@ export default function ApplyForm({ dates, categories, fullSeasonLabel, maxBooth
       registrationType: type,
       firstName: form.get("firstName"), lastName: form.get("lastName"), email: form.get("email"), phone: form.get("phone"),
       businessName: form.get("businessName"), vendorCategory: vendor ? category : "", otherCategory: form.get("otherCategory") ?? "",
-      fullSeason: vendor && fullSeason, dates: vendor && !fullSeason ? [...selected] : [], booths: vendor ? booths : 1,
+      fullSeason: vendor && fullSeason, dates: vendor && !fullSeason ? [...selected].filter(date => dates.includes(date)) : [], booths: vendor ? booths : 1,
       message: form.get("message"), agreementAccepted: form.get("agreementAccepted") === "on", signatureName: form.get("signatureName"),
       website: form.get("website"),
       ...(prefillToken.current ? { prefillToken: prefillToken.current } : {}),
@@ -146,9 +146,9 @@ export default function ApplyForm({ dates, categories, fullSeasonLabel, maxBooth
       {vendor && (
         <fieldset>
           <legend className={LABEL}>Which Saturdays would you like?</legend>
-          <label className="mt-3 flex items-center gap-3 rounded-2xl bg-sky/10 p-4 text-navy">
+          <label title={fullSeasonLabel} className="mt-3 flex items-center gap-3 rounded-2xl bg-sky/10 p-4 text-navy">
             <input type="checkbox" checked={fullSeason} onChange={e => setFullSeason(e.target.checked)} className="h-5 w-5" />
-            <span><span className="font-semibold">{fullSeasonLabel}</span> — $30 per booth per week, every market Saturday</span>
+            <span><span className="font-semibold">Rest of the season</span> — all {dates.length} remaining Saturday{dates.length === 1 ? "" : "s"} through May 29, $30 per booth per week</span>
           </label>
           {!fullSeason && (
             <div className="mt-4 space-y-4">

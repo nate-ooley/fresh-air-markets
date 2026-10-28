@@ -137,8 +137,10 @@ export function finalReservationSelectionFingerprint(
 
 export function finalReservationBookingRequest(
   selection: ParsedFinalReservationSelection,
+  seasonStart?: string,
 ): BookingRequest {
   return {
+    ...(seasonStart ? { seasonStart } : {}),
     applicantType: selection.applicantType,
     vendorCategory: selection.vendorCategory,
     selectedDates: selection.selectedDates,
@@ -152,8 +154,9 @@ export function quoteFinalReservation(
   calendar: MarketCalendar,
   selection: ParsedFinalReservationSelection,
   occupancy: Occupancy[],
+  seasonStart?: string,
 ) {
-  return checkVendorBooking(calendar, finalReservationBookingRequest(selection), occupancy);
+  return checkVendorBooking(calendar, finalReservationBookingRequest(selection, seasonStart), occupancy);
 }
 
 /**
@@ -165,12 +168,24 @@ export function quoteFinalReservation(
 export function preflightFinalReservation(
   calendar: MarketCalendar,
   selection: ParsedFinalReservationSelection,
+  seasonStart?: string,
 ) {
   return quoteFinalReservation(
     calendar,
     selection,
     calendar.dates.map(date => ({ date, booths: 0, foodTrucks: 0, nonprofits: 0 })),
+    seasonStart,
   );
+}
+
+/** Today's date where the market is (Florida), as YYYY-MM-DD. */
+export function marketDateOf(now: Date): string {
+  return now.toLocaleDateString("en-CA", { timeZone: "America/New_York" });
+}
+
+/** Saturdays still to come: what "full season" means once the season has started. */
+export function remainingSeasonDates(calendarDates: readonly string[], today: string): string[] {
+  return calendarDates.filter(date => date >= today);
 }
 
 /** Do not put vendor names, emails, or caller-provided prices in Square metadata. */

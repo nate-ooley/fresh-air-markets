@@ -54,7 +54,8 @@ export function parseVendorPaymentView(value: unknown): VendorPaymentView | null
   if (row.rateCents !== rates[row.quoteTier] || row.totalCents !== row.dates.length * row.boothsPerMarket * row.rateCents
     || row.paymentRequired !== (row.quoteTier !== "nonprofit")
     || (row.paymentRequired && row.environment === null && row.status !== "unavailable")
-    || (row.quoteTier === "full-season" && row.dates.length !== FRESH_AIR_SEASON_DATES.length)) return null;
+    // A full season runs from the Saturday it was booked to the last one of the season.
+    || (row.quoteTier === "full-season" && row.dates.join() !== (FRESH_AIR_SEASON_DATES as readonly string[]).slice((FRESH_AIR_SEASON_DATES as readonly string[]).indexOf(row.dates[0])).join())) return null;
   return row;
 }
 

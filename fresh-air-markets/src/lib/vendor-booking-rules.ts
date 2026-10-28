@@ -12,6 +12,12 @@ export interface BookingRequest {
   vendorCategory: string;
   selectedDates: string[];
   fullSeason: boolean;
+  /**
+   * First Saturday a full-season booking covers (normally today, in market
+   * time). A full season is every Saturday from here to the end, at $30 each,
+   * so a vendor joining mid-season isn't charged for Saturdays already past.
+   */
+  seasonStart?: string;
   boothsPerMarket: number;
 }
 
@@ -93,7 +99,7 @@ export function checkVendorBooking(
     throw new Error("Select each market date only once.");
   }
   const dates = request.fullSeason
-    ? calendarDates
+    ? calendarDates.filter(date => !request.seasonStart || date >= request.seasonStart)
     : [...new Set(request.selectedDates)].sort();
   if (!dates.length || dates.some(d => !calendarDates.includes(d))) {
     throw new Error("Select dates from the configured market calendar.");

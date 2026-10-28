@@ -144,7 +144,8 @@ export default function VendorPaymentPanel() {
             </dl>
             <details className="mt-6 rounded-2xl border border-pine/15 p-4" open={reservation.dates.length < 5}>
               <summary className="cursor-pointer text-sm font-semibold text-pine">Your approved dates</summary>
-              <ul className="mt-3 grid gap-2 text-sm text-ink/65 sm:grid-cols-2">{reservation.dates.map(date => <li key={date}>{marketDate(date)}</li>)}</ul>
+              {/* Only Saturdays still to come are listed; the total above covers the whole booking. */}
+              <ul className="mt-3 grid gap-2 text-sm text-ink/65 sm:grid-cols-2">{reservation.dates.filter(date => date >= new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" })).map(date => <li key={date}>{marketDate(date)}</li>)}</ul>
             </details>
             {payable && <div className="mt-7 border-t border-pine/10 pt-6">
               {reservation.deadlineEnforced === false

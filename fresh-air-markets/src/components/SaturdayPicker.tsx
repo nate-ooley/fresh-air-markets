@@ -4,8 +4,8 @@
  * Season Saturdays as tiles grouped by month, for staff booking screens.
  * A Saturday already on the booking looks different from an open weekend,
  * and the change being made (adding / removing) is shown on each tile.
- * Past Saturdays are hidden unless they are on the booking, where they
- * stay locked (they happened and stay charged).
+ * Past Saturdays are never shown. Ones already on a booking stay on it
+ * (and in its total) without appearing here.
  */
 
 export type TileState = "booked" | "removing" | "adding" | "open" | "kept" | "blocked";
@@ -50,7 +50,7 @@ const TAG: Record<TileState, string> = {
 };
 
 export default function SaturdayPicker(props: SaturdayPickerProps) {
-  const visible = props.dates.filter(date => date >= props.today || props.booked.includes(date));
+  const visible = props.dates.filter(date => date >= props.today);
   const months = [...new Set(visible.map(MONTH))];
   const toggle = (date: string, state: TileState) => {
     if (props.disabled || state === "kept" || state === "blocked") return;

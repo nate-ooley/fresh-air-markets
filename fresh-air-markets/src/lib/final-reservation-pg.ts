@@ -10,7 +10,9 @@ import {
   finalReservationEligibilityReason,
   finalReservationSelectionFingerprint,
   parseFinalReservationSelection,
+  marketDateOf,
   preflightFinalReservation,
+  remainingSeasonDates,
   validFinalReservationApplicationId,
   validFinalReservationIdempotencyKey,
   quoteFinalReservation,
@@ -450,6 +452,7 @@ export async function reserveFinalApplication(
       preflight = preflightFinalReservation(
         { dates: [...input.config.calendarDates], boothCapacity: input.config.boothCapacity },
         input.selection,
+        marketDateOf(now),
       );
     } catch {
       return { kind: "invalid_selection" };
@@ -469,6 +472,7 @@ export async function reserveFinalApplication(
         { dates: [...input.config.calendarDates], boothCapacity: input.config.boothCapacity },
         input.selection,
         occupancy,
+        marketDateOf(now),
       );
     } catch {
       return { kind: "invalid_selection" };
@@ -669,13 +673,15 @@ export async function planDateChange(input: {
   };
   const calendar = { dates: [...input.config.calendarDates], boothCapacity: input.config.boothCapacity };
   const wanted = [...new Set(input.dates)].sort();
-  const fullSeason = calendar.dates.every(date => wanted.includes(date));
+  // A full season is every Saturday still to come, and nothing else.
+  const remaining = remainingSeasonDates(calendar.dates, input.today);
+  const fullSeason = remaining.length > 0 && wanted.length === remaining.length && remaining.every(date => wanted.includes(date));
   const selection = parseFinalReservationSelection({
     ...profile, selectedDates: fullSeason ? [] : wanted, fullSeason, boothsPerMarket: input.booths,
   }, "00000000-0000-4000-8000-000000000000");
   if (!selection || wanted.length !== input.dates.length) return { kind: "invalid_selection" };
   let preflight;
-  try { preflight = preflightFinalReservation(calendar, selection); } catch { return { kind: "invalid_selection" }; }
+  try { preflight = preflightFinalReservation(calendar, selection, input.today); } catch { return { kind: "invalid_selection" }; }
   // Saturdays already on the booking stay (and stay charged) even once they've happened; new ones must be upcoming.
   const past = preflight.dates.filter(date => date < input.today && !currentDates.includes(date));
   if (past.length) return { kind: "past_dates", dates: past };
@@ -697,7 +703,7 @@ export async function planDateChange(input: {
 
   const occupancy = await Promise.all(calendar.dates.map(date => occupancyForDate(sql, input.marketId, date, input.reservationId)));
   let quote;
-  try { quote = quoteFinalReservation(calendar, selection, occupancy); } catch { return { kind: "invalid_selection" }; }
+  try { quote = quoteFinalReservation(calendar, selection, occupancy, input.today); } catch { return { kind: "invalid_selection" }; }
   if (!quote.allDatesAvailable) return { kind: "unavailable", dates: quote.availability.filter(a => !a.available).map(a => a.date) };
   return {
     kind: "ok", applicationId: row.application_id, profile, ...(resuming ? { resuming } : {}),

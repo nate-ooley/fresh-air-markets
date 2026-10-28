@@ -762,3 +762,16 @@ test('a payment taken in Square is recorded on the booking and balance; paying i
   assert.deepEqual([balance.totals.owedCents, balance.bookings[0].state], [5000, 'payment_pending']);
   assert.deepEqual(await ledger.voidManualPayment({ marketId, paymentId: rest.paymentId }, first), { kind: 'not_found' });
 });
+
+test('a full season booked after the season started charges only the Saturdays left, at $30 each', async () => {
+  const { applicationId } = await seedEligibleApplication();
+  // Oct 3 has passed on Oct 5: the full season is Oct 10 only.
+  const made = await reserve(applicationId, selection({ selectedDates: [], fullSeason: true }), first, 2, new Date('2026-10-05T12:00:00Z'));
+  assert.equal(made.kind, 'created');
+  assert.deepEqual(made.reservation.finalDates, ['2026-10-10']);
+  assert.equal(made.reservation.totalCents, 3000);
+  // Before the season starts it is every Saturday.
+  const { applicationId: other } = await seedEligibleApplication();
+  const early = await reserve(other, selection({ selectedDates: [], fullSeason: true }), first, 2, new Date('2026-09-20T12:00:00Z'));
+  assert.deepEqual([early.reservation.finalDates.length, early.reservation.totalCents], [2, 6000]);
+});

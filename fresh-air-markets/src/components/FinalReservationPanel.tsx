@@ -53,14 +53,21 @@ const SHOW_PORTAL_BILLING = false;
 /** Bookings whose Saturdays a manager may change in one step (nothing paid yet). */
 const CHANGEABLE_STATES = new Set<FinalReservationView["state"]>(["held", "payment_pending", "expired"]);
 
-/** Price for a set of Saturdays, using the same rule the server charges ($40, $35 when it includes 4+ in a row, $30 full season). */
+/** Saturdays from today to the end of the season: what "full season" covers now. */
+function remainingSaturdays(): string[] {
+  const today = todayEastern();
+  return FRESH_AIR_SEASON_DATES.filter(date => date >= today);
+}
+
+/** Price for a set of Saturdays, using the same rule the server charges ($40, $35 when it includes 4+ in a row, $30 each for the rest of the season). */
 function previewTotal(dates: string[], booths: number): number | null {
   if (!dates.length || !Number.isSafeInteger(booths) || booths < 1) return null;
-  const fullSeason = FRESH_AIR_SEASON_DATES.every(date => dates.includes(date));
+  const remaining = remainingSaturdays();
+  const fullSeason = remaining.length > 0 && dates.length === remaining.length && remaining.every(date => dates.includes(date));
   try {
     const quote = checkVendorBooking(
       { dates: [...FRESH_AIR_SEASON_DATES], boothCapacity: 1000 },
-      { applicantType: "Vendor", vendorCategory: FAME_VENDOR_CATEGORIES[0], selectedDates: fullSeason ? [] : [...dates].sort(), fullSeason, boothsPerMarket: booths },
+      { applicantType: "Vendor", vendorCategory: FAME_VENDOR_CATEGORIES[0], selectedDates: fullSeason ? [] : [...dates].sort(), fullSeason, boothsPerMarket: booths, seasonStart: todayEastern() },
       FRESH_AIR_SEASON_DATES.map(date => ({ date, booths: 0, foodTrucks: 0, nonprofits: 0 })),
     );
     return quote.totalCents;
@@ -863,7 +870,13 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
                 <dl className="mt-4 grid grid-cols-2 gap-4 text-sm">
                   <div><dt className="text-ink/55">Total</dt><dd className="mt-1 text-2xl font-bold text-pine-deep">{money(reservation.totalCents)}</dd></div>
                   <div><dt className="text-ink/55">Booths per date</dt><dd className="mt-1 font-semibold text-pine-deep">{reservation.finalBoothQuantity}</dd></div>
-                  <div className="col-span-2"><dt className="text-ink/55">Reserved dates ({reservation.finalDates.length})</dt><dd className="mt-1 text-pine-deep">{reservation.finalDates.map(reservationDateLabel).join(" · ")}</dd></div>
+                  {(() => {
+                    // Only Saturdays still to come are listed; ones already past stay on the booking (and its total).
+                    const today = todayEastern();
+                    const upcoming = reservation.finalDates.filter(date => date >= today);
+                    const earlier = reservation.finalDates.length - upcoming.length;
+                    return <div className="col-span-2"><dt className="text-ink/55">Upcoming dates ({upcoming.length})</dt><dd className="mt-1 text-pine-deep">{upcoming.length ? upcoming.map(reservationDateLabel).join(" · ") : "None left this season"}{earlier > 0 ? <span className="text-ink/50"> (plus {earlier} earlier Saturday{earlier === 1 ? "" : "s"})</span> : null}</dd></div>;
+                  })()}
                 </dl>
                 {(() => {
                   const owed = balance?.bookings?.find(item => item.reservationId === reservation.id);
@@ -1082,8 +1095,7 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
                       <p className="mt-2 text-sm leading-relaxed text-ink/65">Move this unpaid booking to other Saturdays in one step. The old payment link is cancelled and the vendor gets one email with their new dates, new total and a new payment link.</p>
                       {!changing && <button type="button" disabled={disabled} onClick={() => startChange(reservation)} className={`${QUIET_BUTTON} mt-4`}>Change dates</button>}
                       {changing && <div className="mt-4">
-                        <p className="text-sm font-semibold text-pine-deep">New Saturdays ({changeDates.length} picked)</p>
-                        {reservation.finalDates.some(date => date < today) && <p className="mt-1 text-xs text-ink/60">{reservation.finalDates.filter(date => date < today).map(reservationDateLabel).join(", ")} already happened. {reservation.finalDates.filter(date => date < today).length === 1 ? "It stays" : "They stay"} on the booking and the bill.</p>}
+                        <p className="text-sm font-semibold text-pine-deep">New Saturdays ({changeDates.filter(date => date >= today).length} picked)</p>
                         <div className="mt-2">
                           <SaturdayPicker dates={FRESH_AIR_SEASON_DATES} today={today} booked={reservation.finalDates} selected={changeDates}
                             onChange={next => { setChangeDates(next); setChangeConfirming(false); }}
@@ -1110,7 +1122,7 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
                             <div role="region" aria-label="Confirm date change" className="mt-4 rounded-2xl border-2 border-pine bg-parchment/70 p-4 text-sm">
                               <h5 className="font-semibold text-pine-deep">Confirm the new dates</h5>
                               {adding.length > 0 && <p className="mt-2 text-pine-deep">Adding: {adding.map(reservationDateLabel).join(" · ")}</p>}
-                              {removing.length > 0 && <p className="mt-1 text-clay">Removing: {removing.map(reservationDateLabel).join(" · ")}</p>}
+                              {removing.filter(date => date >= today).length > 0 && <p className="mt-1 text-clay">Removing: {removing.filter(date => date >= today).map(reservationDateLabel).join(" · ")}</p>}
                               {!adding.length && !removing.length && <p className="mt-2 text-ink/70">Same Saturdays; booths per Saturday change to {changeBooths}.</p>}
                               <p className="mt-1 text-pine-deep">New total: <strong>{total === null ? "—" : money(total)}</strong> (was {money(reservation.totalCents)})</p>
                               <p className="mt-2 text-xs text-ink/60">Saving cancels the old payment link and emails the vendor their new dates and a new payment link.</p>
@@ -1189,12 +1201,12 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
             </fieldset>
             <fieldset>
               <legend className="text-sm font-semibold text-pine-deep">Final market dates</legend>
-              <p className="mt-1 text-xs leading-relaxed text-ink/60">35 Saturdays, October 3, 2026 through May 29, 2027. Requested dates are suggestions; confirm the final selection with the vendor.{reservations.length ? " This booking is priced on its own dates: $40 per Saturday, $35 when it includes 4 or more Saturdays in a row." : ""}</p>
+              <p className="mt-1 text-xs leading-relaxed text-ink/60">{remainingSaturdays().length} Saturdays left this season, through May 29, 2027. Requested dates are suggestions; confirm the final selection with the vendor.{reservations.length ? " This booking is priced on its own dates: $40 per Saturday, $35 when it includes 4 or more Saturdays in a row." : ""}</p>
               {hasUnmappedRequestedDates && <p className="mt-3 rounded-xl bg-amber/15 p-3 text-sm text-clay">Some requested values do not match the confirmed calendar. Review the original request above and choose the final dates here.</p>}
               {insuranceExpiresOn && !fullSeasonCovered && <p className="mt-3 rounded-xl bg-amber/15 p-3 text-sm text-clay">Their certificate of insurance expires {reservationDateLabel(insuranceExpiresOn)}. Saturdays after that are greyed out until a renewed certificate is approved.</p>}
-              {heldDates.size === 0 && fullSeasonCovered && todayEastern() <= FRESH_AIR_SEASON_DATES[0] && <label className="mt-3 flex items-start gap-3 rounded-xl border border-pine/20 bg-parchment/40 p-4 text-sm font-semibold text-pine-deep">
+              {heldDates.size === 0 && fullSeasonCovered && remainingSaturdays().length > 0 && <label className="mt-3 flex items-start gap-3 rounded-xl border border-pine/20 bg-parchment/40 p-4 text-sm font-semibold text-pine-deep">
                 <input type="checkbox" checked={form.fullSeason} onChange={event => edit({ fullSeason: event.target.checked, selectedDates: [] })} className="mt-0.5" />
-                Full season — all 35 dates through Saturday, May 29, 2027
+                Rest of the season — all {remainingSaturdays().length} Saturdays from {reservationDateLabel(remainingSaturdays()[0])} through May 29, 2027 at $30 each ({money(remainingSaturdays().length * 3000 * Math.max(1, Number(form.boothsPerMarket) || 1))})
               </label>}
               {!form.fullSeason && <div className="mt-3">
                 <SaturdayPicker dates={FRESH_AIR_SEASON_DATES} today={todayEastern()} booked={[...heldDates]} lockBooked
@@ -1202,7 +1214,7 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
                   onChange={next => edit({ selectedDates: next.filter(date => !heldDates.has(date)) })}
                   blockedReason={date => uninsured(date) ? "After insurance" : null} disabled={disabled || addConfirming} />
               </div>}
-              <p className="mt-2 text-xs font-semibold text-pine">{form.fullSeason ? 35 : form.selectedDates.filter(date => date >= todayEastern()).length} market dates selected</p>
+              <p className="mt-2 text-xs font-semibold text-pine">{form.fullSeason ? remainingSaturdays().length : form.selectedDates.filter(date => date >= todayEastern()).length} market dates selected</p>
               {snapshot.requiresFinalDateConfirmation && <label className="mt-4 flex items-start gap-3 rounded-xl bg-amber/15 p-4 text-sm text-clay">
                 <input required type="checkbox" checked={form.finalDatesConfirmed} onChange={event => edit({ finalDatesConfirmed: event.target.checked })} className="mt-0.5" />
                 <span>The earlier request referred to May 27. I have confirmed the final dates with the vendor, including Saturday, May 29, 2027 when selected.</span>
@@ -1217,7 +1229,7 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
             </div>
           </div>
           {addConfirming && (() => {
-            const chosen = form.fullSeason ? [...FRESH_AIR_SEASON_DATES] : form.selectedDates;
+            const chosen = form.fullSeason ? remainingSaturdays() : form.selectedDates;
             const booths = Number(form.boothsPerMarket);
             const total = form.applicantType === "Non-Profit Organization" ? 0 : previewTotal(chosen, booths);
             return (

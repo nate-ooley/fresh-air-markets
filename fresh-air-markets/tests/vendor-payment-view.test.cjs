@@ -38,3 +38,13 @@ test('browser only renders a valid server reservation and has no redirect-to-pai
   assert.equal(parseVendorPaymentView({ returned: '1', paid: 'true' }), null);
   for (const patch of [{ totalCents: -1 }, { currency: 'EUR' }, { dates: [] }, { dates: ['2026-99-99'] }, { dates: ['2026-10-03','2026-10-03'] }, { totalCents: 1 }, { rateCents: 3500 }, { paymentDueAt: 'not-a-date' }, { status: 'success' }, { checkoutUrl: 'https://evil.invalid' }]) assert.equal(parseVendorPaymentView({ ...view, ...patch }), null);
 });
+
+test('a full season booked mid-season (every Saturday from then to the end) is a valid payment view', () => {
+  const season = require('../.test-build/fresh-air-season.js').FRESH_AIR_SEASON_DATES;
+  const tail = season.slice(4);
+  const fullTail = { ...view, quoteTier: 'full-season', rateCents: 3000, dates: tail, totalCents: tail.length * 3000 };
+  assert.ok(parseVendorPaymentView(fullTail));
+  // A gap in the middle is not a full season.
+  const gappy = tail.filter((_, i) => i !== 3);
+  assert.equal(parseVendorPaymentView({ ...fullTail, dates: gappy, totalCents: gappy.length * 3000 }), null);
+});

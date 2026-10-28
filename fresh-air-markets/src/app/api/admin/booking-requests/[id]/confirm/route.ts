@@ -73,8 +73,9 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   const today = marketToday();
   const passed = bookingRequest.dates.filter(date => date < today);
   if (passed.length) return NextResponse.json({ error: `${passed.join(", ")} ${passed.length === 1 ? "has" : "have"} already happened. Decline this request and ask the vendor to pick upcoming Saturdays.` }, { status: 409, headers });
-  // Every Saturday of the season is the full-season rate, not 35 separate days.
-  const fullSeason = config.calendarDates.every(date => bookingRequest.dates.includes(date));
+  // Every Saturday still to come is the full-season rate, not that many separate days.
+  const remaining = config.calendarDates.filter(date => date >= today);
+  const fullSeason = remaining.length > 0 && bookingRequest.dates.length === remaining.length && remaining.every(date => bookingRequest.dates.includes(date));
   const selection = parseFinalReservationSelection({
     applicantType: typeof body.applicantType === "string" ? body.applicantType : overview.profile.applicantType,
     vendorCategory: typeof body.vendorCategory === "string" ? body.vendorCategory : overview.profile.vendorCategory,

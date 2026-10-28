@@ -164,3 +164,12 @@ test("food trucks have their own four spaces and never consume or count against 
   assert.equal(checkVendorBooking(calendar, { ...base, boothsPerMarket: 3 }, implied).allDatesAvailable, true);
   assert.equal(checkVendorBooking(calendar, { ...base, boothsPerMarket: 4 }, implied).allDatesAvailable, false);
 });
+
+test("a full season booked mid-season covers only the Saturdays left, at $30 each", () => {
+  const quote = checkVendorBooking(calendar, { ...base, selectedDates: [], fullSeason: true, boothsPerMarket: 1, seasonStart: dates[2] }, empty);
+  assert.deepEqual(quote.dates, dates.slice(2));
+  assert.equal(quote.rateCents, 3000);
+  assert.equal(quote.totalCents, (dates.length - 2) * 3000);
+  // Without a start date it is still the whole calendar.
+  assert.equal(checkVendorBooking(calendar, { ...base, selectedDates: [], fullSeason: true, boothsPerMarket: 1 }, empty).dates.length, dates.length);
+});
