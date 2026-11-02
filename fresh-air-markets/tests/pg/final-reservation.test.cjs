@@ -10,6 +10,7 @@ const { withdrawReservation, withdrawApplication, applicationBookingSummary, ret
 const invoices = require('../../.test-build/vendor-invoice-pg.js');
 const { persistSquarePaymentWebhook } = require('../../.test-build/square-webhook-pg.js');
 const ledger = require('../../.test-build/vendor-balance-pg.js');
+const vendorNotes = require('../../.test-build/vendor-notes-pg.js');
 
 // This suite creates and drops only a private schema inside the disposable CI DB.
 const url = new URL(process.env.DATABASE_TEST_URL || 'postgres://invalid/');
@@ -80,6 +81,7 @@ before(async () => {
       '033-invoice-per-installment.sql',
       '034-vendor-adjustments.sql',
       '035-manual-payments.sql',
+      '036-vendor-notes.sql',
     ]) await migration.unsafe(fs.readFileSync(path.join(__dirname, '../../docs/migrations', file), 'utf8'));
   } finally {
     await migration.end();
@@ -774,4 +776,25 @@ test('a full season booked after the season started charges only the Saturdays l
   const { applicationId: other } = await seedEligibleApplication();
   const early = await reserve(other, selection({ selectedDates: [], fullSeason: true }), first, 2, new Date('2026-09-20T12:00:00Z'));
   assert.deepEqual([early.reservation.finalDates.length, early.reservation.totalCents], [2, 6000]);
+});
+
+test('manager notes work at any stage, newest first; bad notes are refused; removed notes stay on record', async () => {
+  const { applicationId } = await seedEligibleApplication();
+  // No booking and nothing paid: notes still work, including after the application is not approved.
+  await first`UPDATE fame_applications SET review_state = 'needs_review' WHERE id = ${applicationId}`;
+  const add = (body, at) => vendorNotes.addVendorNote({ marketId, applicationId, body, authorName: 'Thomas', actorAccountId: marketId, now: at }, first);
+  assert.equal((await add('   ', now)).kind, 'invalid');
+  assert.equal((await add('x'.repeat(2001), now)).kind, 'invalid');
+  assert.deepEqual(await vendorNotes.addVendorNote({ marketId, applicationId: randomUUID(), body: 'x', authorName: 'T', actorAccountId: marketId }, first), { kind: 'not_found' });
+  const one = await add('Called, wants the end spot.', now);
+  const two = await add('  Line one\r\nLine two  ', later(5));
+  assert.equal(two.note.body, 'Line one\nLine two');
+  assert.deepEqual((await vendorNotes.listVendorNotes(marketId, applicationId, first)).map(n => [n.id, n.authorName]), [[two.note.id, 'Thomas'], [one.note.id, 'Thomas']]);
+  assert.deepEqual(await vendorNotes.listVendorNotes('another-market', applicationId, first), []);
+  assert.equal(await vendorNotes.removeVendorNote({ marketId: 'another-market', noteId: one.note.id }, first), false);
+  assert.equal(await vendorNotes.removeVendorNote({ marketId, noteId: one.note.id }, first), true);
+  assert.equal(await vendorNotes.removeVendorNote({ marketId, noteId: one.note.id }, first), false);
+  assert.deepEqual((await vendorNotes.listVendorNotes(marketId, applicationId, first)).map(n => n.id), [two.note.id]);
+  assert.equal(rows(await first`SELECT 1 FROM fame_vendor_notes WHERE application_id = ${applicationId}`).length, 2);
+  assert.equal(await vendorNotes.staffDisplayName(marketId, null, first), 'Owner');
 });

@@ -4,6 +4,7 @@ import { type FormEvent, useCallback, useEffect, useRef, useState } from "react"
 import { useRouter } from "next/navigation";
 import FinalReservationPanel from "./FinalReservationPanel";
 import ApplicationDocumentsPanel from "./ApplicationDocumentsPanel";
+import VendorNotesPanel from "./VendorNotesPanel";
 
 type ReviewAction = "approve" | "request_changes" | "decline";
 type ReviewState = "unreviewed" | "needs_review" | "changes_requested" | "approved" | "declined" | "withdrawn";
@@ -591,6 +592,8 @@ export default function ApplicationReviewPanel({ applicationId, deadlineEnforced
                   </button>
                 </div>
               </form>
+
+              <VendorNotesPanel applicationId={application.id} />
 
               <ApplicationDocumentsPanel applicationId={application.id} />
 
