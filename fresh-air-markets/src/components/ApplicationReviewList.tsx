@@ -1,7 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
+import { SORT_LABEL, viewApplications, type ApplicationSort } from "@/lib/application-list-view";
 
 type ReviewState = "unreviewed" | "needs_review" | "changes_requested" | "approved" | "declined" | "withdrawn";
 
@@ -98,6 +99,11 @@ export default function ApplicationReviewList() {
   const [applications, setApplications] = useState<ApplicationReviewListItem[] | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
+  const [query, setQuery] = useState("");
+  const [status, setStatus] = useState("all");
+  const [sort, setSort] = useState<ApplicationSort>("newest");
+  const shown = useMemo(() => viewApplications(applications ?? [], { query, status, sort }), [applications, query, status, sort]);
+  const countFor = (state: string) => (applications ?? []).filter(application => application.reviewState === state).length;
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -174,8 +180,36 @@ export default function ApplicationReviewList() {
           )}
 
           {!loading && applications && applications.length > 0 && (
-            <ul className="mt-6 grid gap-4">
-              {applications.map(application => {
+            <div className="mt-6 grid gap-3 rounded-2xl border border-pine/10 bg-parchment/30 p-4 sm:grid-cols-[1fr_auto_auto] sm:items-end">
+              <label className="text-xs font-semibold uppercase tracking-wide text-ink/55">Search
+                <input type="search" value={query} onChange={event => setQuery(event.target.value)} placeholder="Business, contact, email, phone or category"
+                  className="mt-1 block w-full rounded-full border border-pine/20 bg-white px-4 py-2 text-sm normal-case tracking-normal text-ink outline-none focus:border-amber focus:ring-2 focus:ring-amber/25" />
+              </label>
+              <label className="text-xs font-semibold uppercase tracking-wide text-ink/55">Status
+                <select value={status} onChange={event => setStatus(event.target.value)} className="mt-1 block w-full rounded-full border border-pine/20 bg-white px-4 py-2 text-sm normal-case tracking-normal text-ink">
+                  <option value="all">All ({applications.length})</option>
+                  {(Object.keys(STATE_LABEL) as ReviewState[]).map(state => <option key={state} value={state}>{STATE_LABEL[state]} ({countFor(state)})</option>)}
+                </select>
+              </label>
+              <label className="text-xs font-semibold uppercase tracking-wide text-ink/55">Sort
+                <select value={sort} onChange={event => setSort(event.target.value as ApplicationSort)} className="mt-1 block w-full rounded-full border border-pine/20 bg-white px-4 py-2 text-sm normal-case tracking-normal text-ink">
+                  {(Object.keys(SORT_LABEL) as ApplicationSort[]).map(option => <option key={option} value={option}>{SORT_LABEL[option]}</option>)}
+                </select>
+              </label>
+              <p role="status" className="text-xs text-ink/55 sm:col-span-3">Showing {shown.length} of {applications.length}</p>
+            </div>
+          )}
+
+          {!loading && applications && applications.length > 0 && shown.length === 0 && (
+            <div className="mt-4 rounded-2xl bg-parchment/60 p-5 text-sm text-ink/65">
+              No applications match.{" "}
+              <button type="button" onClick={() => { setQuery(""); setStatus("all"); }} className="font-semibold text-pine underline underline-offset-4">Clear search</button>
+            </div>
+          )}
+
+          {!loading && shown.length > 0 && (
+            <ul className="mt-4 grid gap-4">
+              {shown.map(application => {
                 const snapshot = application.identitySnapshot;
                 const reviewable = Boolean(snapshot && application.sourceEventId && application.hasOpportunity);
                 return (
