@@ -60,7 +60,7 @@ export interface VendorBalance {
   totals: { chargedCents: number; discountCents: number; creditCents: number; paidCents: number; owedCents: number };
 }
 
-interface ReservationRow { id: string; state: string; total_cents: string | number; final_dates: unknown; created_at: Date }
+interface ReservationRow { id: string; state: string; total_cents: string | number; final_dates: unknown; created_at: Date; withdrawal_note?: string | null }
 interface AdjustmentRow { id: string; reservation_id: string | null; kind: "discount" | "credit" | "credit_applied"; amount_cents: string | number; percent: string | null; reason: string; created_at: Date }
 interface PaymentRow { reservation_id: string; amount_cents: string | number; at: Date; source: "checkout" | "invoice" | "manual"; id?: string; note?: string }
 
@@ -82,7 +82,7 @@ function bookingLabel(dates: string[]): string {
 
 export async function vendorBalance(marketId: string, applicationId: string, sql: QuerySql = configuredClient()): Promise<VendorBalance> {
   const reservations = await sql<ReservationRow[]>`
-    SELECT id, state, total_cents, final_dates, created_at FROM fame_reservations
+    SELECT id, state, total_cents, final_dates, created_at, withdrawal_note FROM fame_reservations
     WHERE market_id = ${marketId} AND application_id = ${applicationId} ORDER BY created_at, id`;
   const ids = reservations.map(row => row.id);
   const adjustments = await adjustmentsReady(sql) ? await sql<AdjustmentRow[]>`
@@ -131,6 +131,8 @@ export async function vendorBalance(marketId: string, applicationId: string, sql
   }
   for (const p of payments) {
     const row = byId.get(p.reservation_id);
+    // A paid booking moved to new dates carries no charge; its payment shows as the credit it became.
+    if (!counted.has(p.reservation_id) && row?.withdrawal_note?.startsWith("Dates changed")) continue;
     events.push({
       at: new Date(p.at).toISOString(), kind: "payment",
       label: `Payment${p.source === "invoice" ? " (Square invoice)" : p.source === "manual" ? " taken in Square" : ""}${row ? ` for ${bookingLabel(datesOf(row))}` : ""}${p.note ? `: ${p.note}` : ""}`,

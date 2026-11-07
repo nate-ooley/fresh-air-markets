@@ -52,6 +52,8 @@ const SHOW_PORTAL_BILLING = false;
 
 /** Bookings whose Saturdays a manager may change in one step (nothing paid yet). */
 const CHANGEABLE_STATES = new Set<FinalReservationView["state"]>(["held", "payment_pending", "expired"]);
+/** Settled bookings: "Change dates" moves what was paid onto the new Saturdays. */
+const PAID_STATES = new Set<FinalReservationView["state"]>(["paid", "confirmed"]);
 
 /** Saturdays from today to the end of the season: what "full season" covers now. */
 function remainingSaturdays(): string[] {
@@ -520,7 +522,7 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
 
   async function changeBookingDates(reservation: FinalReservationView) {
     const booths = Number(changeBooths);
-    if (inFlight.current || statusRead.current.pending || loadError || !CHANGEABLE_STATES.has(reservation.state) || !changeDates.length) return;
+    if (inFlight.current || statusRead.current.pending || loadError || !(CHANGEABLE_STATES.has(reservation.state) || PAID_STATES.has(reservation.state)) || !changeDates.length) return;
     if (!Number.isSafeInteger(booths) || booths < 1 || booths > 10) { setError("Booths per Saturday must be between 1 and 10."); return; }
     inFlight.current = true;
     setBusy("change");
@@ -540,6 +542,9 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
       inFlight.current = false;
       await load();
       if (!response.ok) setError(reservationError(payload, "The new dates are booked, but the payment link could not be sent. Use the buttons on the new booking."));
+      else if ((payload as { paidSwap?: unknown } | null)?.paidSwap) setNotice(delivery === "sent"
+        ? "Dates changed. What the vendor paid moved to the new dates, and they were emailed their new dates."
+        : "Dates changed and the payment moved to the new dates, but the email to the vendor could not be sent.");
       else setNotice(delivery === "sent"
         ? "Dates changed. The old payment link was cancelled and the vendor was emailed their new dates and payment link."
         : "Dates changed and the old payment link was cancelled, but the email could not be sent. Use \"Email the payment link\" on the new booking.");
@@ -1084,7 +1089,8 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
                   </section>
                 )}
 
-                {CHANGEABLE_STATES.has(reservation.state) && reservation.paymentRequired && !invoices.some(item => item.reservationId === reservation.id && (item.status === "open" || item.status === "creating")) && !(balance?.bookings?.find(item => item.reservationId === reservation.id)?.discountCents || balance?.bookings?.find(item => item.reservationId === reservation.id)?.creditAppliedCents || balance?.bookings?.find(item => item.reservationId === reservation.id)?.paidCents) && (() => {
+                {((PAID_STATES.has(reservation.state) && !invoices.some(item => item.reservationId === reservation.id && (item.status === "open" || item.status === "creating"))) || (CHANGEABLE_STATES.has(reservation.state) && reservation.paymentRequired && !invoices.some(item => item.reservationId === reservation.id && (item.status === "open" || item.status === "creating")) && !(balance?.bookings?.find(item => item.reservationId === reservation.id)?.discountCents || balance?.bookings?.find(item => item.reservationId === reservation.id)?.creditAppliedCents || balance?.bookings?.find(item => item.reservationId === reservation.id)?.paidCents))) && (() => {
+                  const paidBooking = PAID_STATES.has(reservation.state);
                   const changing = changeTarget === reservation.id;
                   const otherHeld = new Set(liveReservations.filter(item => item.id !== reservation.id).flatMap(item => item.finalDates));
                   const today = todayEastern();
@@ -1092,7 +1098,9 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
                   return (
                     <section className="mt-5 rounded-2xl border border-pine/15 bg-white/60 p-5">
                       <h4 className="font-semibold text-pine-deep">Change dates</h4>
-                      <p className="mt-2 text-sm leading-relaxed text-ink/65">Move this unpaid booking to other Saturdays in one step. The old payment link is cancelled and the vendor gets one email with their new dates, new total and a new payment link.</p>
+                      <p className="mt-2 text-sm leading-relaxed text-ink/65">{paidBooking
+                        ? "Move this paid booking to other Saturdays. What the vendor paid moves to the new dates, so nothing is refunded and nothing new is owed as long as the new dates cost the same or less. The vendor gets one email with their new dates."
+                        : "Move this unpaid booking to other Saturdays in one step. The old payment link is cancelled and the vendor gets one email with their new dates, new total and a new payment link."}</p>
                       {!changing && <button type="button" disabled={disabled} onClick={() => startChange(reservation)} className={`${QUIET_BUTTON} mt-4`}>Change dates</button>}
                       {changing && <div className="mt-4">
                         <p className="text-sm font-semibold text-pine-deep">New Saturdays ({changeDates.filter(date => date >= today).length} picked)</p>
@@ -1125,7 +1133,7 @@ export default function FinalReservationPanel({ applicationId, sourceEventId, sn
                               {removing.filter(date => date >= today).length > 0 && <p className="mt-1 text-clay">Removing: {removing.filter(date => date >= today).map(reservationDateLabel).join(" · ")}</p>}
                               {!adding.length && !removing.length && <p className="mt-2 text-ink/70">Same Saturdays; booths per Saturday change to {changeBooths}.</p>}
                               <p className="mt-1 text-pine-deep">New total: <strong>{total === null ? "—" : money(total)}</strong> (was {money(reservation.totalCents)})</p>
-                              <p className="mt-2 text-xs text-ink/60">Saving cancels the old payment link and emails the vendor their new dates and a new payment link.</p>
+                              <p className="mt-2 text-xs text-ink/60">{paidBooking ? "Saving moves the vendor's payment to the new dates and emails them their new dates. No new payment link is sent." : "Saving cancels the old payment link and emails the vendor their new dates and a new payment link."}</p>
                               <div className="mt-3 flex flex-wrap gap-3">
                                 <button type="button" disabled={disabled || !changeDates.length} onClick={() => void changeBookingDates(reservation)} className={BUTTON}>{busy === "change" ? "Saving…" : "Confirm and save"}</button>
                                 <button type="button" disabled={disabled} onClick={() => setChangeConfirming(false)} className={QUIET_BUTTON}>Go back</button>

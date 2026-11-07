@@ -4,7 +4,7 @@ import { applicantContact, emailConfigured, sendEmail, sendStaffEmail, type Send
 import { BOOKING_LINK_TTL_MS, EMAILED_UPLOAD_TTL_MS, createApplicationLinkToken, createApplicationUploadToken } from "./application-upload-token";
 import {
   applicationInvitationEmail, applicationApprovedEmail, applicationWithdrawnEmail, bookingRequestDeclinedEmail, bookingRequestReceivedEmail, bookingWithdrawnEmail, documentUploadLinkEmail, applicationChangesRequestedEmail, applicationDeclinedEmail, applicationReceivedEmail,
-  bookingDatesChangedEmail, customPaymentReminderEmail, paymentReceivedEmail, staffBookingRequestEmail, paymentRequestEmail, passwordResetEmail, staffContactMessageEmail, staffInvitationEmail, staffNewApplicationEmail, staffPaymentReceivedEmail,
+  bookingDatesChangedEmail, paidBookingDatesChangedEmail, customPaymentReminderEmail, paymentReceivedEmail, staffBookingRequestEmail, paymentRequestEmail, passwordResetEmail, staffContactMessageEmail, staffInvitationEmail, staffNewApplicationEmail, staffPaymentReceivedEmail,
 } from "./email-templates";
 import { reminderDates, reminderMoney } from "./payment-reminder-template";
 
@@ -226,6 +226,30 @@ export async function notifyBookingDatesChanged(input: {
       name: contact.name, oldDates: dates(before.final_dates), newDates: dates(after.final_dates),
       booths: Number(after.final_booth_quantity), totalCents: Number(after.total_cents), link: input.invitationUrl,
       note: input.note, enforced: paymentDeadlineEnforced(),
+    });
+    return outcome(await sendEmail({ kind: "booking_dates_changed", to: contact.email, marketId: input.marketId, referenceId: input.newReservationId, ...content }, { sql: db }));
+  } catch { return "failed"; }
+}
+
+/** Staff moved a paid booking to other Saturdays; the payment went with it. */
+export async function notifyPaidBookingDatesChanged(input: {
+  oldReservationId: string; newReservationId: string; marketId: string; owedCents: number; leftoverCreditCents: number; note?: string;
+}, sql?: Sql): Promise<NotificationOutcome> {
+  if (!emailConfigured()) return "not_sent";
+  try {
+    const db = sql ?? configuredClient();
+    const rows = await db<{ id: string; application_id: string | null; final_dates: unknown; final_booth_quantity: number }[]>`
+      SELECT id, application_id, final_dates, final_booth_quantity FROM fame_reservations
+      WHERE market_id = ${input.marketId} AND id IN (${input.oldReservationId}, ${input.newReservationId})`;
+    const before = rows.find(row => row.id === input.oldReservationId);
+    const after = rows.find(row => row.id === input.newReservationId);
+    if (!after?.application_id || !before) return "not_sent";
+    const contact = await applicantContact(after.application_id, input.marketId, db);
+    if (!contact) return "not_sent";
+    const dates = (value: unknown) => Array.isArray(value) ? value.filter((d): d is string => typeof d === "string").sort() : [];
+    const content = paidBookingDatesChangedEmail({
+      name: contact.name, oldDates: dates(before.final_dates), newDates: dates(after.final_dates),
+      booths: Number(after.final_booth_quantity), owedCents: input.owedCents, leftoverCreditCents: input.leftoverCreditCents, note: input.note,
     });
     return outcome(await sendEmail({ kind: "booking_dates_changed", to: contact.email, marketId: input.marketId, referenceId: input.newReservationId, ...content }, { sql: db }));
   } catch { return "failed"; }

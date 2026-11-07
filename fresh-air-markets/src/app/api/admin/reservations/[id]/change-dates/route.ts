@@ -4,7 +4,8 @@ import { getSessionAccountId } from "@/lib/auth";
 import { parseFinalReservationSelection } from "@/lib/final-reservation";
 import { DATE_CHANGE_NOTE_PREFIX, freshAirFinalReservationConfig, planDateChange, reserveFinalApplication } from "@/lib/final-reservation-pg";
 import { readInquiryBody } from "@/lib/inquiry-body";
-import { notifyBookingDatesChanged } from "@/lib/notifications";
+import { notifyBookingDatesChanged, notifyPaidBookingDatesChanged } from "@/lib/notifications";
+import { carryPaymentToBooking, moneyOnBooking, PAID_BOOKING_STATES, restorePaidBooking, retirePaidBooking } from "@/lib/paid-date-change-pg";
 import { withdrawReservation } from "@/lib/reservation-withdraw-pg";
 import { squareLinkCanceller } from "@/lib/square-link-cancel";
 import { squarePaymentRuntimeConfig, squarePortalOrigin, verifySquareIdentity } from "@/lib/square";
@@ -70,7 +71,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
 
   // 1. Check the new dates without touching anything.
   let plan;
-  try { plan = await planDateChange({ marketId, reservationId: id, dates: wanted, booths, today: marketToday(), config }); }
+  try { plan = await planDateChange({ marketId, reservationId: id, dates: wanted, booths, today: marketToday(), config, allowPaid: true }); }
   catch { return NextResponse.json({ error: "The booking could not be checked right now. Nothing was changed; try again." }, { status: 503, headers }); }
   if (plan.kind === "not_found") return NextResponse.json({ error: "Reservation not found." }, { status: 404, headers });
   if (plan.kind === "not_changeable") {
@@ -91,6 +92,46 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   if (plan.kind === "insurance_expires") return NextResponse.json({ error: `Their insurance certificate expires ${plan.expiresOn}; ${label(plan.dates)} can't be booked until a renewed certificate is approved.` }, { status: 409, headers });
   if (plan.kind === "unavailable") return NextResponse.json({ error: `No room left on ${label(plan.dates)}. Nothing was changed.` }, { status: 409, headers });
   if (plan.kind === "invalid_selection") return NextResponse.json({ error: "Those dates can't be booked together. Check the Saturdays and booth count." }, { status: 400, headers });
+
+  // Paid booking: retire it, reserve the new dates, and move the payment onto them.
+  let money;
+  try { money = await moneyOnBooking(marketId, id); }
+  catch { return NextResponse.json({ error: "The booking could not be checked right now. Nothing was changed; try again." }, { status: 503, headers }); }
+  const paidSwap = (PAID_BOOKING_STATES as readonly string[]).includes(plan.currentState) || (plan.resuming === true && money.paidCents > 0);
+  if (paidSwap) {
+    const covered = money.paidCents + money.creditAppliedCents;
+    if (plan.quote.totalCents > covered) {
+      const usd = (cents: number) => (cents / 100).toLocaleString("en-US", { style: "currency", currency: "USD" });
+      return NextResponse.json({ error: `The new dates cost ${usd(plan.quote.totalCents)}, more than the ${usd(covered)} already paid. Swap for the same number of Saturdays, or keep these and use "Add dates" for the extra ones.` }, { status: 409, headers });
+    }
+    if (!plan.resuming) {
+      const note = `${DATE_CHANGE_NOTE_PREFIX} to ${label(plan.quote.dates)} (payment moved to the new dates).${staffNote ? ` ${staffNote}` : ""}`;
+      let retired;
+      try { retired = await retirePaidBooking({ marketId, reservationId: id, note }); }
+      catch { return NextResponse.json({ error: "The booking could not be changed right now. Nothing was changed; try again." }, { status: 503, headers }); }
+      if (retired.kind !== "retired") return NextResponse.json({ error: "The booking changed while you were editing it. Reload the page and try again." }, { status: 409, headers });
+    }
+    const pick = parseFinalReservationSelection({ ...plan.profile, selectedDates: plan.quote.fullSeason ? [] : plan.quote.dates, fullSeason: plan.quote.fullSeason, boothsPerMarket: plan.quote.booths },
+      changeKey("change-paid-dates", id, plan.quote.dates, plan.quote.booths));
+    let made;
+    try { made = pick ? await reserveFinalApplication({ marketId, applicationId: plan.applicationId, actorAccountId: marketId, selection: pick, config }) : null; }
+    catch { made = null; }
+    if (!made || (made.kind !== "created" && made.kind !== "duplicate")) {
+      let back = false;
+      if (!plan.resuming) { try { back = await restorePaidBooking({ marketId, reservationId: id, state: plan.currentState }); } catch { back = false; } }
+      return NextResponse.json({ error: back
+        ? "Those Saturdays could not be booked (another vendor may have just taken one, or a document needs approval). The vendor's paid dates were left as they were."
+        : "The new Saturdays could not be booked and the paid booking could not be put back. Press Confirm and save again to retry." }, { status: 409, headers });
+    }
+    let carried;
+    try { carried = await carryPaymentToBooking({ marketId, oldReservationId: id, newReservationId: made.reservation.id, paidCents: money.paidCents, label: label(plan.current.dates), actorAccountId: marketId }); }
+    catch { carried = null; }
+    if (!carried || carried.kind !== "carried") return NextResponse.json({ error: "The new dates are booked, but the payment could not be moved onto them yet. Press Confirm and save again to finish." }, { status: 503, headers });
+    let owed = 0;
+    if (!carried.bookingPaid) owed = Math.max(0, plan.quote.totalCents - covered);
+    const vendorNotification = await notifyPaidBookingDatesChanged({ oldReservationId: id, newReservationId: made.reservation.id, marketId, owedCents: owed, leftoverCreditCents: carried.leftoverCreditCents, note: staffNote || undefined });
+    return NextResponse.json({ reservation: { ...made.reservation, state: carried.bookingPaid ? "paid" : made.reservation.state }, paymentOrder: null, vendorNotification, paidSwap: true }, { status: 201, headers });
+  }
 
   // 2. Withdraw the old booking (Square link cancelled with proof). Skipped when a retry finds it already withdrawn by this change.
   if (!plan.resuming) {

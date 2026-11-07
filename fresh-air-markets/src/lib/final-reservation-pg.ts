@@ -614,6 +614,8 @@ export type DateChangePlan =
   | {
     kind: "ok";
     applicationId: string;
+    /** The booking's state when checked ("cancelled" when resuming an interrupted change). */
+    currentState: string;
     /** The booking as it stands, so a failed swap can be put back exactly. */
     current: { dates: string[]; booths: number; fullSeason: boolean };
     profile: { applicantType: ParsedFinalReservationSelection["applicantType"]; vendorCategory: string; foodLicenseRequired: boolean };
@@ -644,6 +646,8 @@ interface DateChangeRow {
 export async function planDateChange(input: {
   marketId: string; reservationId: string; dates: string[]; booths: number; today: string;
   config: FreshAirFinalReservationConfig;
+  /** Also accept paid/confirmed bookings (their payment is carried over to the new dates). */
+  allowPaid?: boolean;
 }, sql: Sql = configuredClient()): Promise<DateChangePlan & { resuming?: boolean }> {
   const [row] = await sql<DateChangeRow[]>`
     SELECT r.state, r.application_id, r.final_dates, r.final_booth_quantity, r.withdrawal_note,
@@ -654,12 +658,13 @@ export async function planDateChange(input: {
   if (!row) return { kind: "not_found" };
   // An earlier "Change dates" withdrew this booking and then stopped; let the retry finish it.
   const resuming = row.state === "cancelled" && Boolean(row.withdrawal_note?.startsWith(DATE_CHANGE_NOTE_PREFIX));
-  if (!resuming && !(DATE_CHANGEABLE_STATES as readonly string[]).includes(row.state)) return { kind: "not_changeable", state: row.state };
+  const paid = input.allowPaid && (row.state === "paid" || row.state === "confirmed");
+  if (!resuming && !paid && !(DATE_CHANGEABLE_STATES as readonly string[]).includes(row.state)) return { kind: "not_changeable", state: row.state };
   const [invoice] = !await invoicesReady(sql) ? [] : await sql<{ live: boolean }[]>`SELECT EXISTS (SELECT 1 FROM fame_invoices WHERE market_id = ${input.marketId}
     AND reservation_id = ${input.reservationId} AND status IN ('creating', 'open')) AS live`;
   if (invoice?.live) return { kind: "not_changeable", state: "on_billing_plan" };
   const [adjusted] = await sql<{ present: boolean }[]>`SELECT to_regclass('fame_vendor_adjustments') IS NOT NULL AS present`;
-  if (adjusted?.present) {
+  if (adjusted?.present && !paid && !resuming) {
     const [row2] = await sql<{ any: boolean }[]>`SELECT EXISTS (SELECT 1 FROM fame_vendor_adjustments WHERE market_id = ${input.marketId}
       AND reservation_id = ${input.reservationId} AND kind IN ('discount', 'credit_applied') AND voided_at IS NULL) AS any`;
     if (row2?.any) return { kind: "not_changeable", state: "price_adjusted" };
@@ -706,7 +711,7 @@ export async function planDateChange(input: {
   try { quote = quoteFinalReservation(calendar, selection, occupancy, input.today); } catch { return { kind: "invalid_selection" }; }
   if (!quote.allDatesAvailable) return { kind: "unavailable", dates: quote.availability.filter(a => !a.available).map(a => a.date) };
   return {
-    kind: "ok", applicationId: row.application_id, profile, ...(resuming ? { resuming } : {}),
+    kind: "ok", applicationId: row.application_id, currentState: row.state, profile, ...(resuming ? { resuming } : {}),
     current: { dates: [...currentDates].sort(), booths: Number(row.final_booth_quantity), fullSeason: row.full_season },
     quote: { dates: [...quote.dates], booths: quote.boothsPerMarket, totalCents: quote.totalCents, rateCents: quote.rateCents, fullSeason },
   };

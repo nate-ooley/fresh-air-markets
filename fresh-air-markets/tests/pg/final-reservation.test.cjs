@@ -798,3 +798,39 @@ test('manager notes work at any stage, newest first; bad notes are refused; remo
   assert.equal(rows(await first`SELECT 1 FROM fame_vendor_notes WHERE application_id = ${applicationId}`).length, 2);
   assert.equal(await vendorNotes.staffDisplayName(marketId, null, first), 'Owner');
 });
+
+test('a paid booking moves to other Saturdays: the old one is retired, the new one is paid from what was paid, and the balance stays square', async () => {
+  const paidChange = require('../../.test-build/paid-date-change-pg.js');
+  const { applicationId, id } = await bookingWithLiveLink(['2026-10-03']);
+  const paid = await ledger.recordManualPayment({ marketId, reservationId: id, amountCents: 4000, paidOn: '2026-10-01', note: '', today: '2026-10-01', actorAccountId: marketId, now: later(1) }, first);
+  assert.equal(paid.bookingPaid, true);
+  // Without opting in, a paid booking is still refused.
+  assert.deepEqual(await plan(id, ['2026-10-10'], 1, 2), { kind: 'not_changeable', state: 'paid' });
+  const ok = await planDateChange({ marketId, reservationId: id, dates: ['2026-10-10'], booths: 1, today: '2026-10-01', config: config(2), allowPaid: true }, first);
+  assert.equal(ok.kind, 'ok');
+  assert.equal(ok.currentState, 'paid');
+  assert.deepEqual(await paidChange.moneyOnBooking(marketId, id, first), { paidCents: 4000, creditAppliedCents: 0 });
+
+  // A failed swap puts the paid booking back as it was.
+  assert.deepEqual(await paidChange.retirePaidBooking({ marketId, reservationId: id, note: 'Dates changed to Oct 10.' }, first), { kind: 'retired' });
+  assert.equal(await paidChange.restorePaidBooking({ marketId, reservationId: id, state: 'paid' }, first), true);
+  assert.deepEqual(rows(await first`SELECT state, withdrawal_note FROM fame_reservations WHERE id = ${id}`), [{ state: 'paid', withdrawal_note: null }]);
+
+  // The real swap.
+  await paidChange.retirePaidBooking({ marketId, reservationId: id, note: 'Dates changed to Oct 10 (payment moved to the new dates).' }, first);
+  const made = await reserve(applicationId, selection({ selectedDates: ['2026-10-10'] }), first, 2, later(2));
+  assert.equal(made.kind, 'created');
+  const carry = () => paidChange.carryPaymentToBooking({ marketId, oldReservationId: id, newReservationId: made.reservation.id, paidCents: 4000, label: 'Oct 3', actorAccountId: marketId, now: later(3) }, first);
+  assert.deepEqual(await carry(), { kind: 'carried', bookingPaid: true, leftoverCreditCents: 0 });
+  // Running it again changes nothing.
+  assert.deepEqual(await carry(), { kind: 'carried', bookingPaid: true, leftoverCreditCents: 0 });
+  const balance = await ledger.vendorBalance(marketId, applicationId, first);
+  assert.deepEqual(balance.bookings.map(b => [b.dates, b.state, b.balanceCents]), [[['2026-10-10'], 'paid', 0]]);
+  assert.equal(balance.totals.owedCents, 0);
+  assert.equal(balance.lines.at(-1).runningCents, 0);
+  assert.equal(balance.lines.filter(line => line.kind === 'payment').length, 0);
+  assert.equal(balance.lines.filter(line => line.kind === 'credit').length, 1);
+  // Oct 3 is free again for other vendors.
+  const capacity = rows(await first`SELECT r.state FROM fame_reservation_allocations a JOIN fame_reservations r ON r.id = a.reservation_id WHERE a.market_date = '2026-10-03' AND r.application_id = ${applicationId}`);
+  assert.deepEqual(capacity, [{ state: 'cancelled' }]);
+});

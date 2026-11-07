@@ -123,6 +123,18 @@ export function bookingDatesChangedEmail(input: { name: string; oldDates: string
   ]) };
 }
 
+export function paidBookingDatesChangedEmail(input: { name: string; oldDates: string[]; newDates: string[]; booths: number; owedCents: number; leftoverCreditCents: number; note?: string }): EmailContent {
+  const list = (dates: string[]) => dates.length ? dates.map(day).join(", ") : "your reserved market dates";
+  return { subject: `Your market dates have changed: ${MARKET}`, ...wrap([
+    `Hi ${input.name},`,
+    `We've changed your booking. Your new dates are ${list(input.newDates)} (${input.booths} booth${input.booths === 1 ? "" : "s"}).`,
+    ...(input.note ? [input.note] : []),
+    `Your previous dates (${list(input.oldDates)}) are released. What you already paid has been moved to your new dates${input.owedCents > 0 ? `, leaving ${money(input.owedCents)} to pay; we'll send you a link for that.` : ", so there is nothing more to pay."}`,
+    ...(input.leftoverCreditCents > 0 ? [`You also have ${money(input.leftoverCreditCents)} of credit with us toward future dates.`] : []),
+    "See you at the market!",
+  ]) };
+}
+
 export function bookingWithdrawnEmail(input: { name: string; dates: string[]; note?: string; bookMoreLink?: string | null }): EmailContent {
   const list = input.dates.length ? input.dates.map(day).join(", ") : "your reserved market dates";
   return { subject: `Booking withdrawn: ${MARKET}`, ...wrap([

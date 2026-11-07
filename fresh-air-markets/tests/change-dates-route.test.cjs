@@ -10,11 +10,11 @@ const origin = 'https://freshairmarketsandevents.com';
 const env = { DATABASE_URL: 'postgres://unit-test.invalid/db', FAME_MARKET_ACCOUNT_ID: 'fame-market', FAME_SEASON_ID: '2026-2027', FAME_BOOTH_CAPACITY: '55', FAME_VENDOR_PORTAL_ORIGIN: origin, VERCEL: '1', VERCEL_ENV: 'production', SQUARE_ENVIRONMENT: 'production', SQUARE_ALLOW_LIVE_PAYMENTS: 'true', SQUARE_ACCESS_TOKEN: 'EAAA-unit', SQUARE_LOCATION_ID: 'L1', SQUARE_MERCHANT_ID: 'M1', SQUARE_WEBHOOK_SIGNATURE_KEY: 'sig', SQUARE_WEBHOOK_URL: `${origin}/api/payments/square/webhook` };
 const OLD = '11111111-1111-4111-8111-111111111111';
 const NEW = '22222222-2222-4222-8222-222222222222';
-const okPlan = { kind: 'ok', applicationId: 'app-1', profile: { applicantType: 'Vendor', vendorCategory: 'Arts & Crafts', foodLicenseRequired: false },
+const okPlan = { kind: 'ok', applicationId: 'app-1', currentState: 'payment_pending', profile: { applicantType: 'Vendor', vendorCategory: 'Arts & Crafts', foodLicenseRequired: false },
   current: { dates: ['2026-11-07'], booths: 1, fullSeason: false }, quote: { dates: ['2026-10-24', '2026-10-31'], booths: 1, totalCents: 8000, rateCents: 4000, fullSeason: false } };
 const created = { kind: 'created', reservation: { id: NEW, state: 'held', paymentRequired: true, totalCents: 8000, finalDates: ['2026-10-24', '2026-10-31'], finalBoothQuantity: 1, quoteVersion: 'v1' } };
 
-function load({ session = 'fame-market', log = [], plan = okPlan, withdrawn = { kind: 'withdrawn', reservationId: OLD, linksCancelled: 1 }, reserved = [created] } = {}) {
+function load({ session = 'fame-market', log = [], plan = okPlan, money = { paidCents: 0, creditAppliedCents: 0 }, restored = true, withdrawn = { kind: 'withdrawn', reservationId: OLD, linksCancelled: 1 }, reserved = [created] } = {}) {
   const filename = path.resolve(__dirname, '../src/app/api/admin/reservations/[id]/change-dates/route.ts');
   const compiled = ts.transpileModule(fs.readFileSync(filename, 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
   const mod = new Module(filename, module);
@@ -35,7 +35,17 @@ function load({ session = 'fame-market', log = [], plan = okPlan, withdrawn = { 
     if (id === '@/lib/vendor-booking-pg') return { marketToday: () => '2026-10-15' };
     if (id === '@/lib/vendor-payment-access') return { ...require('../.test-build/vendor-payment-access.js'), issueVendorPaymentInvitation: async input => { log.push(['link', input.reservationId]); return { kind: 'issued', invitationToken: 't', invitationUrl: `${origin}/vendor/payment#token=t`, expiresAt: '2027-10-15T00:00:00.000Z' }; } };
     if (id === '@/lib/vendor-payment-access-pg') return { postgresVendorPaymentAccessStore: {} };
-    if (id === '@/lib/notifications') return { notifyBookingDatesChanged: async input => { log.push(['email', input.oldReservationId, input.newReservationId, input.note]); return 'sent'; } };
+    if (id === '@/lib/notifications') return {
+      notifyBookingDatesChanged: async input => { log.push(['email', input.oldReservationId, input.newReservationId, input.note]); return 'sent'; },
+      notifyPaidBookingDatesChanged: async input => { log.push(['paid-email', input.oldReservationId, input.newReservationId, input.owedCents]); return 'sent'; },
+    };
+    if (id === '@/lib/paid-date-change-pg') return {
+      PAID_BOOKING_STATES: ['paid', 'confirmed'],
+      moneyOnBooking: async () => money,
+      retirePaidBooking: async input => { log.push(['retire', input.reservationId, input.note]); return { kind: 'retired' }; },
+      restorePaidBooking: async input => { log.push(['restore', input.reservationId, input.state]); return restored; },
+      carryPaymentToBooking: async input => { log.push(['carry', input.oldReservationId, input.newReservationId, input.paidCents]); return { kind: 'carried', bookingPaid: true, leftoverCreditCents: 0 }; },
+    };
     if (id.startsWith('@/lib/')) return require('../.test-build/' + id.slice(6) + '.js');
     return require(id);
   };
@@ -120,4 +130,35 @@ test('change dates needs a signed-in manager, same origin and a sensible body', 
     assert.equal((await call(load({ log }), bad)).status, 400, JSON.stringify(bad).slice(0, 60));
     assert.deepEqual(log, []);
   }
+}));
+
+test('a paid booking: retire it, reserve the new dates, carry the payment, send ONE email and no payment link', () => withEnv(env, async () => {
+  const log = [];
+  const paidPlan = { ...okPlan, currentState: 'paid', quote: { ...okPlan.quote, totalCents: 8000 } };
+  const route = load({ log, plan: paidPlan, money: { paidCents: 8000, creditAppliedCents: 0 } });
+  const response = await call(route, body);
+  assert.equal(response.status, 201);
+  const payload = await response.json();
+  assert.equal(payload.paidSwap, true);
+  assert.equal(payload.reservation.state, 'paid');
+  assert.deepEqual(log.map(entry => entry[0]), ['plan', 'retire', 'reserve', 'carry', 'paid-email']);
+  assert.match(log[1][2], /^Dates changed to .*payment moved/);
+}));
+
+test('a paid booking whose new dates cost more than was paid is refused before anything changes', () => withEnv(env, async () => {
+  const log = [];
+  const route = load({ log, plan: { ...okPlan, currentState: 'paid' }, money: { paidCents: 4000, creditAppliedCents: 0 } });
+  const response = await call(route, body);
+  assert.equal(response.status, 409);
+  assert.match((await response.json()).error, /more than the \$40\.00 already paid/);
+  assert.deepEqual(log.map(entry => entry[0]), ['plan']);
+}));
+
+test('a paid swap whose new dates cannot be booked puts the paid booking back', () => withEnv(env, async () => {
+  const log = [];
+  const route = load({ log, plan: { ...okPlan, currentState: 'paid' }, money: { paidCents: 8000, creditAppliedCents: 0 }, reserved: [] });
+  const response = await call(route, body);
+  assert.equal(response.status, 409);
+  assert.match((await response.json()).error, /left as they were/);
+  assert.deepEqual(log.map(entry => entry[0]), ['plan', 'retire', 'reserve', 'restore']);
 }));
