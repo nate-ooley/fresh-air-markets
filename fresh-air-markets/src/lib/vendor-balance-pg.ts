@@ -126,7 +126,7 @@ export async function vendorBalance(marketId: string, applicationId: string, sql
     const on = row ? ` on ${bookingLabel(datesOf(row))}` : "";
     const at = new Date(a.created_at).toISOString();
     if (a.kind === "discount") events.push({ at, kind: "discount", label: `Discount${a.percent ? ` (${Number(a.percent)}%)` : ""}${on}: ${a.reason}`, amountCents: -Number(a.amount_cents), adjustmentId: a.id, reservationId: a.reservation_id ?? undefined });
-    if (a.kind === "credit") events.push({ at, kind: "credit", label: `Credit: ${a.reason}`, amountCents: -Number(a.amount_cents), adjustmentId: a.id });
+    if (a.kind === "credit") events.push({ at, kind: "credit", label: `Credit: ${a.reason.replace(/\s*\[moved from booking [^\]]+\]$/, "")}`, amountCents: -Number(a.amount_cents), adjustmentId: a.id });
     if (a.kind === "credit_applied") events.push({ at, kind: "credit_applied", label: `Credit of ${(Number(a.amount_cents) / 100).toLocaleString("en-US", { style: "currency", currency: "USD" })} used${on}`, amountCents: 0, adjustmentId: a.id, reservationId: a.reservation_id ?? undefined });
   }
   for (const p of payments) {
