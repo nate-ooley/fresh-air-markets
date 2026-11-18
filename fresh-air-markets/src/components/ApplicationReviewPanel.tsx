@@ -250,9 +250,10 @@ export default function ApplicationReviewPanel({ applicationId, deadlineEnforced
 
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (!application || !application.sourceEventId || !application.identitySnapshot || saving || awaitingResubmission) return;
-    // Nothing to decide until the vendor answers a change request.
-    if (application.reviewState === "changes_requested" && !application.updatedSinceReview) return;
+    if (!application || !application.sourceEventId || !application.identitySnapshot || saving) return;
+    // A second change request waits until the vendor answers the first one;
+    // approve and decline stay available (they may have answered by phone or email).
+    if ((awaitingResubmission || (application.reviewState === "changes_requested" && !application.updatedSinceReview)) && action === "request_changes") return;
 
     const normalizedReason = reason.trim();
     if (action !== "approve" && !normalizedReason) {
@@ -347,10 +348,12 @@ export default function ApplicationReviewPanel({ applicationId, deadlineEnforced
   const resubmittedAfterDecision = Boolean(application && (application.reviewState === "approved" || application.reviewState === "declined") && application.resubmittedSinceReview);
   const terminal = application?.reviewState === "withdrawn" || ((application?.reviewState === "approved" || application?.reviewState === "declined") && !resubmittedAfterDecision);
   const canWithdraw = Boolean(application && application.reviewState !== "declined" && application.reviewState !== "withdrawn");
-  const waitingOnVendor = application?.reviewState === "changes_requested" && !application.updatedSinceReview;
-  const canReview = Boolean(application?.sourceEventId && application.hasOpportunity && application.identitySnapshot && !terminal && !awaitingResubmission && !waitingOnVendor);
+  const waitingOnVendor = awaitingResubmission || (application?.reviewState === "changes_requested" && !application.updatedSinceReview);
+  // Waiting on the vendor blocks only another change request, never approve or decline.
+  const canReview = Boolean(application?.sourceEventId && application.hasOpportunity && application.identitySnapshot && !terminal);
   const requiresReason = action !== "approve";
-  const canSubmit = canReview && !saving && (!requiresReason || Boolean(reason.trim()));
+  const actionBlocked = waitingOnVendor && action === "request_changes";
+  const canSubmit = canReview && !saving && !actionBlocked && (!requiresReason || Boolean(reason.trim()));
 
   return (
     <main className="min-h-screen bg-parchment/50 pb-16">
@@ -501,7 +504,7 @@ export default function ApplicationReviewPanel({ applicationId, deadlineEnforced
               )}
               {application.reviewState === "changes_requested" && !application.updatedSinceReview && (
                 <p role="status" className="mt-5 rounded-2xl bg-amber/15 p-4 text-sm text-clay">
-                  Changes were requested and the vendor was emailed your note. Waiting for their updated application; a new decision becomes possible when it arrives. If they reply by email instead, ask them to re-submit at the application page so their answers are on file.
+                  Changes were requested and the vendor was emailed your note. Waiting for their updated application. If they answered by phone, text or email and you're satisfied, you can still approve or decline below. Another change request becomes possible once they re-submit or upload a document.
                 </p>
               )}
 
@@ -539,6 +542,7 @@ export default function ApplicationReviewPanel({ applicationId, deadlineEnforced
                       <button
                         key={option.value}
                         type="button"
+                        disabled={waitingOnVendor && option.value === "request_changes"}
                         aria-pressed={action === option.value}
                         onClick={() => {
                           setAction(option.value);

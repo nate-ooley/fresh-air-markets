@@ -181,7 +181,7 @@ test('a correction requires a newer captured source event before a later approva
   assert.equal(correctionJobs[0].payload.reason, 'Upload the current certificate.');
   assert.equal(correctionJobs[0].payload.reviewState, 'changes_requested');
   assert.equal((await recordApplicationReview(decision(application, {
-    idempotencyKey: '88888888-8888-4888-8888-888888888888', action: 'approve',
+    idempotencyKey: '88888888-8888-4888-8888-888888888888', action: 'request_changes', reason: 'And the permit.',
   }), second)).kind, 'awaiting_resubmission');
   const newEvent = 'application:qa:resubmitted';
   await first`
@@ -456,7 +456,7 @@ test('a document uploaded after a change request counts as the vendor\'s answer:
   const application = await seedApplication({ contactId: 'contact-docanswer', opportunityId: 'opportunity-docanswer' });
   const { applicationId, marketId, eventId } = application;
   assert.equal((await recordApplicationReview(decision(application, { action: 'request_changes', reason: 'Send insurance.' }), first)).kind, 'applied');
-  assert.equal((await recordApplicationReview(decision(application), first)).kind, 'awaiting_resubmission');
+  assert.equal((await recordApplicationReview(decision(application, { action: 'request_changes', reason: 'Also the permit.' }), first)).kind, 'awaiting_resubmission');
   assert.equal((await getApplicationReviewDetail(applicationId, marketId, first)).updatedSinceReview, false);
   await first`INSERT INTO fame_application_documents (id, application_id, market_id, kind, version, source_event_id, source_file_id, storage_key, filename, content_type, size_bytes, content_sha256, submitted_at, validation_state, validation_reason, review_state, review_revision, review_reason, is_current)
     VALUES (${randomUUID()}, ${applicationId}, ${marketId}, 'insurance', 1, ${`applicant-upload:${randomUUID()}`}, 'file-1', ${`documents/${marketId}/${applicationId}/x`}, 'coi.pdf', 'application/pdf', 100, ${'d'.repeat(64)}, now() + interval '1 second', 'ready_for_review', 'qa', 'submitted', 0, '', true)`;
@@ -532,4 +532,23 @@ test('a re-submitted approved vendor with a live booking cannot be declined or s
   // Withdrawn is final until the vendor applies again (the handoff resets it).
   await first`UPDATE fame_applications SET review_state = 'withdrawn' WHERE id = ${applicationId}`;
   assert.deepEqual(await recordApplicationReview(decision({ ...application, eventId: third }), first), { kind: 'terminal', reviewState: 'withdrawn' });
+});
+
+test('a manager can approve while a change request still waits on the vendor (they answered by phone or email)', async () => {
+  const application = await seedApplication({ contactId: 'contact-offline-answer', opportunityId: 'opportunity-offline-answer' });
+  const { applicationId, marketId } = application;
+  assert.equal((await recordApplicationReview(decision(application, { action: 'request_changes', reason: 'Send a booth photo.' }), first)).kind, 'applied');
+  assert.equal((await recordApplicationReview(decision(application, { action: 'request_changes', reason: 'And a permit.' }), first)).kind, 'awaiting_resubmission');
+  const approved = await recordApplicationReview(decision(application, { action: 'approve' }), first);
+  assert.equal(approved.kind, 'applied');
+  assert.equal(approved.reviewState, 'approved');
+  assert.equal((await getApplicationReviewDetail(applicationId, marketId, first)).reviewState, 'approved');
+});
+
+test('a manager can decline while a change request still waits on the vendor', async () => {
+  const application = await seedApplication({ contactId: 'contact-offline-decline', opportunityId: 'opportunity-offline-decline' });
+  assert.equal((await recordApplicationReview(decision(application, { action: 'request_changes', reason: 'Send a booth photo.' }), first)).kind, 'applied');
+  const declined = await recordApplicationReview(decision(application, { action: 'decline', reason: 'Vendor withdrew by phone.' }), first);
+  assert.equal(declined.kind, 'applied');
+  assert.equal(declined.reviewState, 'declined');
 });
