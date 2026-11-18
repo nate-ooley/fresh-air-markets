@@ -8,7 +8,6 @@ export const MARKET = {
   phoneHref: "9417408866",
   location: "US 41 & Sumter, North Port",
   hours: "9:00 AM – 1:00 PM",
-  opening: "Saturday, October 3",
 };
 
 const NAV = [

@@ -19,7 +19,7 @@ export default function HomePage() {
           <div className="absolute inset-0 bg-navy/70" />
           <div className="relative mx-auto flex max-w-4xl flex-col items-center px-5 py-20 text-center text-white sm:py-28">
             <Image src="/site/logo.png" alt="Fresh Air Markets & Events" width={160} height={160} className="rounded-2xl bg-white p-2 shadow-xl" priority />
-            <h1 className="mt-8 font-display text-4xl leading-tight sm:text-6xl">{MARKET.market} Opens {MARKET.opening}</h1>
+            <h1 className="mt-8 font-display text-4xl leading-tight sm:text-6xl">{MARKET.market} is NOW OPEN</h1>
             <p className="mt-5 max-w-2xl text-lg text-white/85">Join us every Saturday from 9am to 1pm at the corner of US 41 &amp; Sumter in North Port for vibrant outdoor shopping, local vendors, food trucks, and live entertainment.</p>
             <div className="mt-8"><InfoPills /></div>
             <div className="mt-8 flex flex-wrap justify-center gap-3">
@@ -36,7 +36,7 @@ export default function HomePage() {
           <div className="grid items-center gap-10 lg:grid-cols-2">
             <div>
               <h2 className="font-display text-3xl text-navy sm:text-4xl">Register to Be a Vendor or Non-Profit</h2>
-              <p className="mt-4 text-lg text-ink/70">Are you a local maker, artisan, food truck, or small business owner? Join our weekly {MARKET.market} — opening {MARKET.opening}, every Saturday from 9am to 1pm at the corner of US 41 &amp; Sumter. Enjoy food trucks on site, live entertainment, and a featured non-profit each week!</p>
+              <p className="mt-4 text-lg text-ink/70">Are you a local maker, artisan, food truck, or small business owner? Join our weekly {MARKET.market} — NOW OPEN every Saturday from 9am to 1pm at the corner of US 41 &amp; Sumter. Enjoy food trucks on site, live entertainment, and a featured non-profit each week!</p>
               <div className="mt-6"><InfoPills /></div>
               <div className="mt-8 grid gap-4 sm:grid-cols-3">
                 {PERKS.map(perk => (
