@@ -39,13 +39,25 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ id:
  * is trusted, so a forwarded/tracked link cannot select a "most recent" CRM
  * opportunity on the caller's behalf.
  */
-export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+export async function PATCH(req: NextRequest, context: { params: Promise<{ id: string }> }) {
+  return review(req, context, false);
+}
+
+/** Dedicated method fails closed on older deployments (which have no POST). */
+export async function POST(req: NextRequest, context: { params: Promise<{ id: string }> }) {
+  return review(req, context, true);
+}
+
+async function review(req: NextRequest, { params }: { params: Promise<{ id: string }> }, silentOnly: boolean) {
   const marketId = await getSessionAccountId();
   if (!marketId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   const { id } = await params;
   if (!validApplicationId(id)) return NextResponse.json({ error: "Invalid application ID." }, { status: 400 });
   const body = await readObjectBody(req);
   if (!body) return NextResponse.json({ error: "A JSON object body is required." }, { status: 400 });
+  if (silentOnly ? body.communicationMode !== "silent" : body.communicationMode !== undefined) {
+    return NextResponse.json({ error: "This method does not support the requested communication mode." }, { status: 400 });
+  }
   const decision = parseApplicationReview(body, req.headers.get("Idempotency-Key"));
   if (!decision) return NextResponse.json({ error: "Invalid application review." }, { status: 400 });
   try {
@@ -62,7 +74,19 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
     if (result.kind === "terminal") return NextResponse.json({ error: `Application is already ${result.reviewState}.` }, { status: 409 });
     if (result.kind === "has_live_booking") return NextResponse.json({ error: "This vendor has a live booking (held, awaiting payment or paid). Withdraw it, or refund it in Square, before declining or sending the application back.", code: "has_live_booking" }, { status: 409 });
     if (result.kind === "awaiting_resubmission") return NextResponse.json({ error: "Changes were already requested on this submission and the vendor was emailed. You can approve or decline it now, or wait for their update before asking for more changes.", code: "awaiting_resubmission" }, { status: 409 });
+    if (result.kind === "pending_communications") return NextResponse.json({ error: "Earlier CRM delivery needs reconciliation before a silent approval. Nothing was changed.", code: "pending_communications" }, { status: 409 });
     if (result.kind === "conflict") return NextResponse.json({ error: "This review key was already used for different content." }, { status: 409 });
+    // The fingerprint binds silence to this exact decision on every replay.
+    // Never invoke either direct email or CRM automation for this mode.
+    if (decision.communicationMode === "silent") {
+      return NextResponse.json({
+        application: { id: result.applicationId, reviewState: result.reviewState },
+        reviewEventId: result.reviewEventId,
+        duplicate: result.kind === "duplicate",
+        delivery: "suppressed",
+        vendorNotification: "suppressed",
+      });
+    }
     // A saved decision must remain visible even if HighLevel is unavailable.
     // When delivery is configured, try only this committed outbox item right
     // away; the authenticated worker route owns later retry/recovery.

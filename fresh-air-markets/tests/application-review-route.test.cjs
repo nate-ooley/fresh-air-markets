@@ -9,7 +9,7 @@ const { NextRequest } = require('next/server');
 const appId = '11111111-1111-4111-8111-111111111111';
 const key = '22222222-2222-4222-8222-222222222222';
 
-function loadRoute({ authenticated = true, detail, record, deliveryConfigured = false, dispatch, deliver, outboxStatus } = {}) {
+function loadRoute({ authenticated = true, detail, record, deliveryConfigured = false, dispatch, deliver, outboxStatus, notify } = {}) {
   const filename = path.resolve(__dirname, '../src/app/api/admin/applications/[id]/review/route.ts');
   const compiled = ts.transpileModule(fs.readFileSync(filename, 'utf8'), {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
@@ -18,6 +18,7 @@ function loadRoute({ authenticated = true, detail, record, deliveryConfigured = 
   mod.filename = filename;
   mod.paths = module.paths;
   mod.require = (id) => {
+    if (id === '@/lib/notifications' && notify) return { notifyApplicationDecision: notify };
     if (id === '@/lib/auth') return { getSessionAccountId: async () => authenticated ? 'qa-market' : null };
     if (id === '@/lib/application-review-pg') return {
       getApplicationReviewDetail: detail || (async () => ({
@@ -205,4 +206,55 @@ test('missing, foreign or unavailable stored review status stays unknown rather 
     assert.equal(response.status, 200); const body = await response.json();
     assert.equal(body.delivery, 'unknown'); assert.equal(body.vendorNotification, 'not_sent'); assert.doesNotMatch(JSON.stringify(body), /private-vendor-and-token/);
   }
+});
+
+test('silent approve and replay suppress both email and CRM even when configured', async () => {
+  for (const kind of ['applied', 'duplicate']) {
+    let recorded;
+    const forbidden = async () => { throw new Error('external delivery forbidden'); };
+    const route = loadRoute({ deliveryConfigured: true, notify: forbidden, dispatch: forbidden, deliver: forbidden,
+      record: async input => { recorded = input; return { kind, applicationId: appId, reviewState: 'approved', reviewEventId: 'event', outboxId: null }; } });
+    const response = await route.POST(request({ action: 'approve', sourceEventId: 'application:qa:current',
+      reason: 'Reviewed offline evidence', communicationMode: 'silent' }, { 'Idempotency-Key': key }), { params: Promise.resolve({ id: appId }) });
+    assert.equal(response.status, 200);
+    assert.equal(recorded.communicationMode, 'silent');
+    const body = await response.json();
+    assert.equal(body.delivery, 'suppressed');
+    assert.equal(body.vendorNotification, 'suppressed');
+  }
+});
+test('silent requests reject missing reason, other dispositions and malformed modes', async () => {
+  const route = loadRoute({ record: async () => { throw new Error('must not persist'); } });
+  for (const body of [
+    { action: 'approve', communicationMode: 'silent' },
+    { action: 'decline', reason: 'Offline', communicationMode: 'silent' },
+    { action: 'request_changes', reason: 'Offline', communicationMode: 'silent' },
+    { action: 'approve', reason: 'Offline', communicationMode: false },
+  ]) {
+    const response = await route.POST(request({ ...body, sourceEventId: 'application:qa:current' }, { 'Idempotency-Key': key }), { params: Promise.resolve({ id: appId }) });
+    assert.equal(response.status, 400);
+  }
+});
+test('outstanding communications stop silent approval without reporting success', async () => {
+  const route = loadRoute({ record: async () => ({ kind: 'pending_communications' }) });
+  const response = await route.POST(request({ action: 'approve', sourceEventId: 'application:qa:current',
+    reason: 'Offline', communicationMode: 'silent' }, { 'Idempotency-Key': key }), { params: Promise.resolve({ id: appId }) });
+  assert.equal(response.status, 409);
+});
+
+test('normal PATCH refuses silent mode and silent POST refuses absent mode', async () => {
+  let calls = 0;
+  const route = loadRoute({ record: async () => { calls++; throw new Error('must not persist'); } });
+  const body = { action: 'approve', sourceEventId: 'application:qa:current', reason: 'Offline' };
+  assert.equal((await route.PATCH(request({ ...body, communicationMode: 'silent' }, { 'Idempotency-Key': key }), { params: Promise.resolve({ id: appId }) })).status, 400);
+  assert.equal((await route.POST(request(body, { 'Idempotency-Key': key }), { params: Promise.resolve({ id: appId }) })).status, 400);
+  assert.equal(calls, 0);
+});
+
+test('silent fingerprint differs while legacy normal fingerprints remain unchanged', () => {
+  const { applicationReviewFingerprint } = require('../.test-build/application-review.js');
+  const { createHash } = require('node:crypto');
+  const args = [appId, 'application:qa:current', 'approve', 'Offline'];
+  assert.equal(applicationReviewFingerprint(...args), createHash('sha256').update(JSON.stringify(args)).digest('hex'));
+  assert.notEqual(applicationReviewFingerprint(...args), applicationReviewFingerprint(...args, 'silent'));
 });

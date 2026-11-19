@@ -15,6 +15,7 @@ type Sql = ReturnType<typeof postgres>;
 let client: Sql | undefined;
 
 export interface ApplicationReviewInput {
+  communicationMode?: "silent";
   applicationId: string;
   marketId: string;
   actorAccountId: string;
@@ -63,9 +64,10 @@ export interface ApplicationReviewIdentitySnapshot {
 export interface ApplicationReviewListItem extends ApplicationReviewDetail {}
 
 export type ApplicationReviewResult =
-  | { kind: "applied"; applicationId: string; reviewState: ApplicationReviewState; reviewEventId: string; outboxId: string }
+  | { kind: "applied"; applicationId: string; reviewState: ApplicationReviewState; reviewEventId: string; outboxId: string | null }
   | { kind: "duplicate"; applicationId: string; reviewState: ApplicationReviewState; reviewEventId: string; outboxId: string | null }
   | { kind: "conflict" }
+  | { kind: "pending_communications" }
   | { kind: "not_found" }
   | { kind: "missing_opportunity" }
   | { kind: "missing_identity_snapshot" }
@@ -412,7 +414,9 @@ export async function recordApplicationReview(
     || !validSourceEventId(input.sourceEventId)
     || (input.action !== "approve" && input.action !== "request_changes" && input.action !== "decline")
     || typeof input.reason !== "string" || input.reason.length > 2000
-    || (input.action !== "approve" && !input.reason.trim())) {
+    || (input.action !== "approve" && !input.reason.trim())
+    || (input.communicationMode !== undefined && input.communicationMode !== "silent")
+    || (input.communicationMode === "silent" && (input.action !== "approve" || !input.reason.trim()))) {
     throw new Error("Application review input is invalid.");
   }
   const payloadHash = applicationReviewFingerprint(
@@ -420,6 +424,7 @@ export async function recordApplicationReview(
     input.sourceEventId,
     input.action,
     input.reason,
+    input.communicationMode,
   );
   return sql.begin(async tx => {
     // Read the immutable identity first without holding a row lock, then take
@@ -437,6 +442,18 @@ export async function recordApplicationReview(
       WHERE id = ${input.applicationId} AND market_id = ${input.marketId}
       FOR UPDATE`;
     if (!application) return { kind: "not_found" };
+
+    // Do not promise silence while an older review delivery can still run.
+    // A processing lease remains blocking even if expired, until reconciled.
+    if (input.communicationMode === "silent") {
+      const outstanding = await tx<{ id: string }[]>`
+        SELECT j.id FROM fame_application_outbox j
+        JOIN fame_application_review_events e ON e.outbox_id = j.id AND e.market_id = j.market_id
+        WHERE e.application_id = ${application.id} AND e.market_id = ${input.marketId}
+          AND j.status IN ('pending', 'processing', 'failed')
+        LIMIT 1`;
+      if (outstanding.length) return { kind: "pending_communications" };
+    }
 
     // A replay must be recognized before terminal/stale checks, because the
     // original action may itself have made the application terminal.
@@ -511,9 +528,12 @@ export async function recordApplicationReview(
       }
     }
 
+    const auditReason = input.communicationMode === "silent"
+      ? "[Portal-only approval: vendor email and CRM delivery suppressed] " + input.reason
+      : input.reason;
     const reviewState = stateForReviewAction(input.action);
     const reviewEventId = randomUUID();
-    const outboxId = randomUUID();
+    const outboxId = input.communicationMode === "silent" ? null : randomUUID();
     const payload: ApplicationReviewOutboxPayload = {
       applicationId: application.id,
       reviewEventId,
@@ -537,15 +557,17 @@ export async function recordApplicationReview(
       WHERE id = ${application.id} AND market_id = ${input.marketId}`;
     // The outbox record is written before the audit row because the audit row
     // has a foreign key to it. Both writes remain in this one transaction.
-    const created = await tx`
-      INSERT INTO fame_application_outbox
-        (id, market_id, topic, dedupe_key, payload)
-      VALUES
-        (${outboxId}, ${application.market_id}, 'application-review',
-         ${`application-review:${reviewEventId}`},
-         ${tx.json(payload as unknown as Parameters<typeof tx.json>[0])})
-      RETURNING id`;
-    if (!created.length) throw new Error("Application review outbox write failed.");
+    if (outboxId) {
+      const created = await tx`
+        INSERT INTO fame_application_outbox
+          (id, market_id, topic, dedupe_key, payload)
+        VALUES
+          (${outboxId}, ${application.market_id}, 'application-review',
+           ${`application-review:${reviewEventId}`},
+           ${tx.json(payload as unknown as Parameters<typeof tx.json>[0])})
+        RETURNING id`;
+      if (!created.length) throw new Error("Application review outbox write failed.");
+    }
     await tx`
       INSERT INTO fame_application_review_events
         (id, application_id, market_id, source_event_id, actor_account_id, idempotency_key,
@@ -553,7 +575,7 @@ export async function recordApplicationReview(
       VALUES
         (${reviewEventId}, ${application.id}, ${application.market_id}, ${input.sourceEventId},
          ${input.actorAccountId}, ${input.idempotencyKey}, ${payloadHash}, ${currentState},
-         ${reviewState}, ${input.reason}, ${outboxId})`;
+         ${reviewState}, ${auditReason}, ${outboxId})`;
     return { kind: "applied", applicationId: application.id, reviewState, reviewEventId, outboxId };
   });
 }

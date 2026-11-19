@@ -41,7 +41,7 @@ function harness() {
 const flush = () => new Promise(resolve => setImmediate(resolve));
 async function scenario(response, run, initial = application) {
   const previous = global.fetch, calls = [];
-  global.fetch = async (url, options = {}) => { calls.push({ url, options }); return Response.json(options.method === 'PATCH' ? response : { application: initial }); };
+  global.fetch = async (url, options = {}) => { calls.push({ url, options }); return Response.json(['PATCH', 'POST'].includes(options.method) ? response : { application: initial }); };
   try { const panel = harness(); panel.flushEffects(); await flush(); panel.render(); await run(panel, calls); } finally { global.fetch = previous; }
 }
 const saved = delivery => ({ application: { id: appId, reviewState: 'changes_requested' }, reviewEventId: 'correction', duplicate: false,
@@ -126,5 +126,22 @@ test('unknown stored CRM status preserves the saved correction and never claims 
     assert.match(panel.text(), /decision was saved, but its CRM delivery status could not be checked/);
     assert.match(panel.text(), /No email was sent to the vendor/);
     assert.doesNotMatch(panel.text(), /state is queued for verification|stage update was delivered/);
+  });
+});
+
+test('silent approval uses dedicated POST, requires a reason and reports no CRM update', async () => {
+  await scenario({ application: { id: appId, reviewState: 'approved' }, reviewEventId: 'silent', duplicate: false,
+    delivery: 'suppressed', vendorNotification: 'suppressed' }, async (panel, calls) => {
+    panel.find(n => n.type === 'input' && n.props.type === 'checkbox').props.onChange({ target: { checked: true } });
+    panel.render();
+    await panel.submit();
+    assert.equal(calls.filter(c => c.options.method === 'POST').length, 0);
+    panel.note('Offline evidence reviewed');
+    await panel.submit();
+    assert.equal(calls.filter(c => c.options.method === 'PATCH').length, 0);
+    const post = calls.find(c => c.options.method === 'POST');
+    assert.equal(JSON.parse(post.options.body).communicationMode, 'silent');
+    assert.match(panel.text(), /HighLevel was not updated/);
+    assert.doesNotMatch(panel.text(), /vendor has been emailed/);
   });
 });

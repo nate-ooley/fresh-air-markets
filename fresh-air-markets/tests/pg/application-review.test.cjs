@@ -103,6 +103,7 @@ function decision(application, patch = {}) {
     idempotencyKey: patch.idempotencyKey || randomUUID(),
     action: patch.action || 'approve',
     reason: patch.reason || '',
+    ...(patch.communicationMode ? { communicationMode: patch.communicationMode } : {}),
   };
 }
 
@@ -551,4 +552,32 @@ test('a manager can decline while a change request still waits on the vendor', a
   const declined = await recordApplicationReview(decision(application, { action: 'decline', reason: 'Vendor withdrew by phone.' }), first);
   assert.equal(declined.kind, 'applied');
   assert.equal(declined.reviewState, 'declined');
+});
+
+test('silent approval records an audit without outbound work; replay and mode changes are safe', async () => {
+  const application = await seedApplication();
+  const input = decision(application, { communicationMode: 'silent', reason: 'Offline evidence reviewed' });
+  const result = await recordApplicationReview(input, first);
+  assert.equal(result.kind, 'applied');
+  assert.equal(result.outboxId, null);
+  assert.equal((await first`SELECT * FROM fame_application_outbox`).length, 0);
+  const [audit] = await first`SELECT * FROM fame_application_review_events`;
+  assert.equal(audit.to_state, 'approved');
+  assert.match(audit.reason, /Portal-only approval/);
+  assert.equal((await recordApplicationReview(input, second)).kind, 'duplicate');
+  assert.equal((await recordApplicationReview({ ...input, communicationMode: undefined }, second)).kind, 'conflict');
+});
+test('silent approval blocks outstanding jobs scoped to exact market and application', async () => {
+  const unrelated = await seedApplication({ contactId: 'unrelated' });
+  await recordApplicationReview(decision(unrelated), first);
+  const application = await seedApplication({ contactId: 'target' });
+  const correction = await recordApplicationReview(decision(application, { action: 'request_changes', reason: 'Evidence' }), first);
+  const input = decision(application, { idempotencyKey: randomUUID(), communicationMode: 'silent', reason: 'Offline evidence reviewed' });
+  for (const status of ['pending', 'processing', 'failed']) {
+    await first`UPDATE fame_application_outbox SET status = ${status} WHERE id = ${correction.outboxId}`;
+    assert.equal((await recordApplicationReview(input, second)).kind, 'pending_communications');
+  }
+  await first`UPDATE fame_application_outbox SET status = 'delivered' WHERE id = ${correction.outboxId}`;
+  assert.equal((await recordApplicationReview(input, second)).kind, 'applied');
+  assert.equal((await first`SELECT * FROM fame_application_review_events WHERE application_id = ${application.applicationId}`).length, 2);
 });
