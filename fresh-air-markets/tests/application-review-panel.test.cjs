@@ -85,6 +85,14 @@ test('a correction waiting on the vendor is locked and says so; a re-submitted o
     panel.chooseCorrection(); panel.note('Anything'); await panel.submit();
     assert.equal(calls.filter(c => c.options.method === 'PATCH').length, 0);
   }, { ...application, reviewState: 'changes_requested', updatedSinceReview: false, submittedAt: '2026-09-15T22:50:33.799Z' });
+  // Approve stays available while waiting: the vendor may have answered by phone or email.
+  await scenario({ ...saved('delivered'), application: { id: appId, reviewState: 'approved' } }, async (panel, calls) => {
+    assert.match(panel.text(), /you can still approve or decline below/);
+    await panel.submit();
+    const patches = calls.filter(c => c.options.method === 'PATCH');
+    assert.equal(patches.length, 1);
+    assert.equal(JSON.parse(patches[0].options.body).action, 'approve');
+  }, { ...application, reviewState: 'changes_requested', updatedSinceReview: false, submittedAt: '2026-09-15T22:50:33.799Z' });
   await scenario(saved('delivered'), async (panel, calls) => {
     assert.match(panel.text(), /The vendor responded to your change request/);
     assert.doesNotMatch(panel.text(), /Waiting for their updated application/);

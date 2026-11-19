@@ -496,7 +496,10 @@ export async function recordApplicationReview(
           AND state IN ('held', 'payment_pending', 'paid', 'confirmed', 'manual_review')`;
       if (live.length) return { kind: "has_live_booking", states: live.map(row => row.state) };
     }
-    if (currentState === "changes_requested") {
+    // While a change request waits on the vendor, the manager may still
+    // approve or decline (the vendor often answers by phone, text or email).
+    // Only a second change request on the same unanswered submission waits.
+    if (currentState === "changes_requested" && input.action === "request_changes") {
       if (lastReview?.source_event_id === input.sourceEventId) {
         // The vendor may answer a change request by uploading a document
         // instead of re-submitting the form; that counts as their reply.
