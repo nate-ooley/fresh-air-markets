@@ -39,14 +39,14 @@ interface SavedReview {
   application: { id: string; reviewState: ReviewState };
   reviewEventId: string;
   duplicate: boolean;
-  delivery: "delivered" | "queued" | "failed" | "unknown" | "disabled";
-  vendorNotification?: "not_sent" | "sent" | "failed";
+  delivery: "delivered" | "queued" | "failed" | "unknown" | "disabled" | "suppressed";
+  vendorNotification?: "not_sent" | "sent" | "failed" | "suppressed";
 }
 
 interface ReviewNotice {
   duplicate: boolean;
-  delivery: "delivered" | "queued" | "failed" | "unknown" | "disabled";
-  vendorNotification?: "not_sent" | "sent" | "failed";
+  delivery: "delivered" | "queued" | "failed" | "unknown" | "disabled" | "suppressed";
+  vendorNotification?: "not_sent" | "sent" | "failed" | "suppressed";
   reviewState: ReviewState;
 }
 
@@ -122,9 +122,9 @@ function isSavedReview(value: unknown, applicationId: string): value is SavedRev
     && isReviewState(application.reviewState)
     && typeof saved?.reviewEventId === "string"
     && typeof saved?.duplicate === "boolean"
-    && (saved?.delivery === "delivered" || saved?.delivery === "queued" || saved?.delivery === "failed" || saved?.delivery === "unknown" || saved?.delivery === "disabled")
+    && (saved?.delivery === "delivered" || saved?.delivery === "queued" || saved?.delivery === "failed" || saved?.delivery === "unknown" || saved?.delivery === "disabled" || saved?.delivery === "suppressed")
     && (saved.vendorNotification === undefined || saved.vendorNotification === "not_sent"
-      || saved.vendorNotification === "sent" || saved.vendorNotification === "failed")
+      || saved.vendorNotification === "sent" || saved.vendorNotification === "failed" || saved.vendorNotification === "suppressed")
     && (application.reviewState !== "changes_requested" || saved.vendorNotification !== undefined);
 }
 
@@ -176,6 +176,7 @@ export default function ApplicationReviewPanel({ applicationId, deadlineEnforced
   const attempts = useRef(new Map<string, string>());
   const [application, setApplication] = useState<ApplicationReviewDetail | null>(null);
   const [action, setAction] = useState<ReviewAction>("approve");
+  const [silent, setSilent] = useState(false);
   const [reason, setReason] = useState("");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -256,7 +257,7 @@ export default function ApplicationReviewPanel({ applicationId, deadlineEnforced
     if ((awaitingResubmission || (application.reviewState === "changes_requested" && !application.updatedSinceReview)) && action === "request_changes") return;
 
     const normalizedReason = reason.trim();
-    if (action !== "approve" && !normalizedReason) {
+    if ((action !== "approve" || silent) && !normalizedReason) {
       setSaveError("A manager note is required for changes or a decline.");
       return;
     }
@@ -264,17 +265,17 @@ export default function ApplicationReviewPanel({ applicationId, deadlineEnforced
     setSaving(true);
     setSaveError("");
     setNotice(null);
-    const material = JSON.stringify([application.id, application.sourceEventId, action, normalizedReason]);
+    const material = JSON.stringify(silent ? [application.id, application.sourceEventId, action, normalizedReason, "silent"] : [application.id, application.sourceEventId, action, normalizedReason]);
     try {
       const idempotencyKey = await idempotencyKeyFor(material);
       const response = await fetch(reviewEndpoint(application.id), {
-        method: "PATCH",
+        method: silent ? "POST" : "PATCH",
         headers: {
           "Content-Type": "application/json",
           Accept: "application/json",
           "Idempotency-Key": idempotencyKey,
         },
-        body: JSON.stringify({ action, sourceEventId: application.sourceEventId, reason: normalizedReason }),
+        body: JSON.stringify({ action, sourceEventId: application.sourceEventId, reason: normalizedReason, ...(silent && action === "approve" ? { communicationMode: "silent" } : {}) }),
       });
       const payload = await readJson(response);
       if (response.status === 401) {
@@ -351,7 +352,7 @@ export default function ApplicationReviewPanel({ applicationId, deadlineEnforced
   const waitingOnVendor = awaitingResubmission || (application?.reviewState === "changes_requested" && !application.updatedSinceReview);
   // Waiting on the vendor blocks only another change request, never approve or decline.
   const canReview = Boolean(application?.sourceEventId && application.hasOpportunity && application.identitySnapshot && !terminal);
-  const requiresReason = action !== "approve";
+  const requiresReason = action !== "approve" || silent;
   const actionBlocked = waitingOnVendor && action === "request_changes";
   const canSubmit = canReview && !saving && !actionBlocked && (!requiresReason || Boolean(reason.trim()));
 
@@ -513,7 +514,7 @@ export default function ApplicationReviewPanel({ applicationId, deadlineEnforced
                   <p className="font-semibold">
                     {notice.duplicate ? "This exact decision was already saved." : `Application marked ${STATE_LABEL[notice.reviewState].toLowerCase()}.`}
                   </p>
-                  {notice.delivery !== "disabled" && (
+                  {notice.delivery !== "disabled" && notice.delivery !== "suppressed" && (
                     <p className="mt-1 text-cream/75">
                       {notice.delivery === "unknown"
                         ? "The decision was saved, but its CRM delivery status could not be checked. Reload before taking further action."
@@ -521,6 +522,9 @@ export default function ApplicationReviewPanel({ applicationId, deadlineEnforced
                           ? CORRECTION_DELIVERY_LABEL[notice.delivery]
                           : REVIEW_DELIVERY_LABEL[notice.delivery]}
                     </p>
+                  )}
+                  {notice.vendorNotification === "suppressed" && (
+                    <p className="mt-2 font-semibold">Portal-only approval saved. Vendor email and CRM delivery were suppressed; HighLevel was not updated.</p>
                   )}
                   {notice.vendorNotification === "sent" && (
                     <p className="mt-2 font-semibold">The vendor has been emailed about this decision.</p>
@@ -546,6 +550,7 @@ export default function ApplicationReviewPanel({ applicationId, deadlineEnforced
                         aria-pressed={action === option.value}
                         onClick={() => {
                           setAction(option.value);
+                          setSilent(false);
                           setSaveError("");
                           setNotice(null);
                         }}
@@ -563,6 +568,13 @@ export default function ApplicationReviewPanel({ applicationId, deadlineEnforced
                     ))}
                   </div>
 
+                  {action === "approve" && (
+                    <label className="mt-5 block text-sm text-pine-deep">
+                      <input type="checkbox" checked={silent} onChange={event => { setSilent(event.target.checked); setNotice(null); }} />
+                      {" "}Approve without contacting vendor (portal only)
+                      <span className="block text-xs">Suppresses vendor email and CRM delivery. HighLevel stays unchanged. A manager reason is required.</span>
+                    </label>
+                  )}
                   <label className="mt-5 block text-sm font-bold text-pine-deep">
                     Manager note {requiresReason ? <span className="text-clay">(required)</span> : <span className="font-normal text-ink/50">(optional)</span>}
                     <textarea
@@ -574,7 +586,7 @@ export default function ApplicationReviewPanel({ applicationId, deadlineEnforced
                         setReason(event.target.value);
                         setSaveError("");
                       }}
-                      placeholder={requiresReason ? "Explain what needs to change or why the application is declined." : "Add an optional internal review note."}
+                      placeholder={silent ? "Record why this approval must not contact the vendor." : requiresReason ? "Explain what needs to change or why the application is declined." : "Add an optional internal review note."}
                       className="mt-2 w-full rounded-2xl border border-pine/20 bg-white px-4 py-3 font-normal text-ink outline-none transition focus:border-amber focus:ring-2 focus:ring-amber/25"
                     />
                     <span className="mt-1 block text-right text-xs font-normal text-ink/45">{reason.length}/2000</span>

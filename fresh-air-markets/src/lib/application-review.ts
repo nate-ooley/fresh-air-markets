@@ -4,6 +4,7 @@ export type ApplicationReviewAction = "approve" | "request_changes" | "decline";
 export type ApplicationReviewState = "unreviewed" | "needs_review" | "changes_requested" | "approved" | "declined" | "withdrawn";
 
 export interface ParsedApplicationReview {
+  communicationMode?: "silent";
   action: ApplicationReviewAction;
   reason: string;
   sourceEventId: string;
@@ -40,9 +41,12 @@ export function parseApplicationReview(
   if (!validReviewIdempotencyKey(idempotencyKey) || !validSourceEventId(body.sourceEventId)) return null;
   if (body.action !== "approve" && body.action !== "request_changes" && body.action !== "decline") return null;
   if (body.reason !== undefined && typeof body.reason !== "string") return null;
+  if (body.communicationMode !== undefined && body.communicationMode !== "silent") return null;
+  if (body.communicationMode === "silent" && body.action !== "approve") return null;
   const reason = (typeof body.reason === "string" ? body.reason : "").trim();
   if (reason.length > 2000 || (body.action !== "approve" && !reason)) return null;
-  return { action: body.action, reason, sourceEventId: body.sourceEventId, idempotencyKey };
+  if (body.communicationMode === "silent" && !reason) return null;
+  return { action: body.action, reason, sourceEventId: body.sourceEventId, idempotencyKey, ...(body.communicationMode === "silent" ? { communicationMode: "silent" as const } : {}) };
 }
 
 export function stateForReviewAction(action: ApplicationReviewAction): ApplicationReviewState {
@@ -57,8 +61,9 @@ export function applicationReviewFingerprint(
   sourceEventId: string,
   action: ApplicationReviewAction,
   reason: string,
+  communicationMode?: "silent",
 ): string {
   return createHash("sha256")
-    .update(JSON.stringify([applicationId, sourceEventId, action, reason]))
+    .update(JSON.stringify(communicationMode === "silent" ? [applicationId, sourceEventId, action, reason, "silent"] : [applicationId, sourceEventId, action, reason]))
     .digest("hex");
 }
